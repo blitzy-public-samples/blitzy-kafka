@@ -31,10 +31,43 @@ import javax.security.sasl.SaslException;
  * <a href="https://tools.ietf.org/html/rfc5802">RFC 5802</a>
  *
  */
+// SECURITY: (HIGH) RFC 5802 SASL SCRAM message parsing and construction.
+// Why: This class parses untrusted network data into structured SCRAM protocol messages.
+// Malformed messages from a malicious client or MITM could cause parsing errors, regex
+// backtracking, or injection of crafted attribute values.
+// Exploit: An attacker could craft a SCRAM message where attribute values contain unescaped
+// reserved characters (comma ',' is the attribute separator per RFC 5802). While the regex
+// patterns restrict the character set (VALUE_SAFE excludes '=' and ','; PRINTABLE excludes
+// ','), a message that passes regex validation but contains semantically invalid content
+// (e.g., extremely long nonce, malformed Base64 in salt/proof) could cause downstream
+// parsing errors or excessive memory allocation.
+// Improvement: (1) Add length limits on parsed fields (nonce, saslName, Base64 values) to
+// prevent memory exhaustion attacks. (2) Add regex timeout or use possessive quantifiers to
+// prevent ReDoS. (3) Validate Base64 field lengths match expected hash output sizes.
+//
+// CROSS-CUTTING: Used by ScramSaslServer and ScramSaslClient for SCRAM protocol message
+// construction, parsing, and wire format conversion. Each nested message class corresponds
+// to one step in the RFC 5802 four-message exchange:
+//   ClientFirstMessage -> ServerFirstMessage -> ClientFinalMessage -> ServerFinalMessage.
+// Depends on ScramExtensions for protocol extension parsing in ClientFirstMessage.
+// Depends on Utils.mkString() for extension serialization.
+// Impact: Changes to message format, regex patterns, or field accessors would break both
+// client and server SCRAM authentication paths simultaneously.
 public class ScramMessages {
 
+    // DECISION: Regex-based message parsing per RFC 5802 ABNF grammar rather than a
+    // hand-written character-by-character parser. Alternatives: (1) ANTLR grammar for formal
+    // parsing, (2) Manual StringTokenizer/split parsing, (3) State machine character parser.
+    // Rationale: Precompiled regex Pattern objects (PATTERN constants in each message class)
+    // directly express the RFC 5802 ABNF rules, making compliance verifiable by inspection.
+    // The patterns are compiled once (static final) and reused across all message instances.
+    // Risk: Complex regex patterns may be vulnerable to catastrophic backtracking (ReDoS).
     abstract static class AbstractScramMessage {
 
+        // SECURITY: Regex character classes define allowed character sets per RFC 5802 ABNF.
+        // VALUE_SAFE: Excludes '=' and ',' -- prevents attribute boundary confusion.
+        // PRINTABLE: Excludes only ',' -- used for nonce values which must be unique/random.
+        // SASLNAME: Allows '=2C' and '=3D' escape sequences per RFC 5802 Section 5.1.
         static final String ALPHA = "[A-Za-z]+";
         static final String VALUE_SAFE = "[\\x01-\\x7F&&[^=,]]+";
         static final String VALUE = "[\\x01-\\x7F&&[^,]]+";
@@ -78,6 +111,12 @@ public class ScramMessages {
         private final String nonce;
         private final String authorizationId;
         private final ScramExtensions extensions;
+        // SECURITY: Parsing client-first message from untrusted network data. The regex
+        // PATTERN validates the overall structure, but individual field content is not
+        // bounds-checked. The saslName field undergoes =2C/=3D unescaping in
+        // ScramFormatter.username() -- crafted saslNames with unexpected escape sequences
+        // could cause IllegalArgumentException.
+        // Improvement: Add bounds-checking on saslName length after regex extraction.
         public ClientFirstMessage(byte[] messageBytes) throws SaslException {
             String message = toMessage(messageBytes);
             Matcher matcher = PATTERN.matcher(message);
@@ -91,6 +130,10 @@ public class ScramMessages {
 
             this.extensions = extString.startsWith(",") ? new ScramExtensions(extString.substring(1)) : new ScramExtensions();
         }
+        // DECISION: Separate constructors for parsing (from bytes) and construction (from
+        // fields). The byte constructor validates via regex; the field constructor trusts
+        // its callers. This asymmetry is intentional -- server-originated messages trust
+        // internal data.
         public ClientFirstMessage(String saslName, String nonce, Map<String, String> extensions) {
             this.saslName = saslName;
             this.nonce = nonce;
@@ -149,6 +192,11 @@ public class ScramMessages {
             Matcher matcher = PATTERN.matcher(message);
             if (!matcher.matches())
                 throw new SaslException("Invalid SCRAM server first message format: " + message);
+            // SECURITY: Iteration count parsed from server message. A compromised server
+            // could send extremely high iterations (e.g., Integer.MAX_VALUE) causing CPU
+            // exhaustion during PBKDF2 key derivation on the client. ScramSaslClient checks
+            // minimum but not maximum. Improvement: Enforce ScramMechanism.maxIterations()
+            // (16384) here to reject excessive iteration counts before PBKDF2 begins.
             try {
                 this.iterations = Integer.parseInt(matcher.group("iterations"));
                 if (this.iterations <= 0)
@@ -204,6 +252,12 @@ public class ScramMessages {
 
             this.channelBinding = Base64.getDecoder().decode(matcher.group("channel"));
             this.nonce = matcher.group("nonce");
+            // SECURITY: Client proof is the core authentication token -- ClientProof =
+            // ClientKey XOR ClientSignature. This field is Base64-decoded from untrusted
+            // client data. No length validation is performed -- an incorrect-length proof
+            // would cause comparison failure in ScramSaslServer.verifyClientProof() but not
+            // before crypto operations are performed.
+            // Improvement: Validate decoded proof length matches expected hash output size.
             this.proof = Base64.getDecoder().decode(matcher.group("proof"));
         }
         public ClientFinalMessage(byte[] channelBinding, String nonce) {
@@ -254,6 +308,10 @@ public class ScramMessages {
             Matcher matcher = PATTERN.matcher(message);
             if (!matcher.matches())
                 throw new SaslException("Invalid SCRAM server final message format: " + message);
+            // DECISION: Error and server-signature are mutually exclusive per RFC 5802
+            // Section 7. The try-catch on matcher.group("error") handles regex groups that
+            // may not participate in the match. If error is present, serverSignature is null
+            // and vice versa.
             String error = null;
             try {
                 error = matcher.group("error");
