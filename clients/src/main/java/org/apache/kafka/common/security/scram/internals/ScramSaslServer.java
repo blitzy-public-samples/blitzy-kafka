@@ -53,11 +53,41 @@ import javax.security.sasl.SaslServerFactory;
  *
  * @see <a href="https://tools.ietf.org/html/rfc5802">RFC 5802</a>
  */
+// SECURITY: (CRITICAL) Server-side SCRAM challenge-response handler implementing RFC 5802.
+// Why: This class handles raw SASL tokens from untrusted clients, performs cryptographic
+// proof verification, and manages the server-side SCRAM state machine. Incorrect state
+// transitions, timing leaks, or proof verification flaws would allow authentication bypass.
+// Exploit: A malicious client could send a crafted SASL token targeting a specific state
+// to trigger an IllegalSaslStateException or skip the proof verification step. Additionally,
+// if HMAC comparison in verifyClientProof() did NOT use constant-time MessageDigest.isEqual(),
+// an attacker could determine the correct storedKey byte-by-byte via timing analysis across
+// thousands of authentication attempts (even 10ns differences are exploitable with statistics).
+// Improvement: (1) Verify ALL comparison paths use MessageDigest.isEqual() -- String.equals()
+// or Arrays.equals() MUST NOT be used for cryptographic material. (2) Add input length
+// validation before state machine transition to reject malformed tokens early. (3) Consider
+// adding rate limiting for failed authentication attempts per client IP.
+//
+// CROSS-CUTTING: Depends on ScramFormatter for all cryptographic operations (HMAC, hash,
+// key derivation, nonce generation). Depends on ScramMessages for RFC 5802 message parsing.
+// Depends on ScramMechanism for algorithm selection (SHA-256/SHA-512).
+// Consumed by authenticator/SaslServerAuthenticator via Java SASL Provider SPI -- the
+// ScramSaslServerFactory nested class is registered by ScramSaslServerProvider.
+// Contract: CallbackHandler MUST handle ScramCredentialCallback or DelegationTokenCredentialCallback.
+// Impact: Changes to ScramFormatter's cryptographic methods break proof verification.
 public class ScramSaslServer implements SaslServer {
 
     private static final Logger log = LoggerFactory.getLogger(ScramSaslServer.class);
+    // SECURITY: Allowlist of supported SCRAM extensions. Only TOKEN_AUTH_CONFIG ("tokenauth")
+    // is permitted. Unsupported extensions are logged and ignored (not rejected), which is a
+    // deliberate lenient policy to avoid breaking forward compatibility.
     private static final Set<String> SUPPORTED_EXTENSIONS = Set.of(ScramLoginModule.TOKEN_AUTH_CONFIG);
 
+    // DECISION: Explicit enum state machine rather than if-else chains or boolean flags.
+    // States: RECEIVE_CLIENT_FIRST_MESSAGE -> RECEIVE_CLIENT_FINAL_MESSAGE -> COMPLETE (or FAILED).
+    // Alternatives: (1) Single evaluateResponse with message-type detection, (2) Coroutine-style
+    // continuation passing. Rationale: Enum states directly map to RFC 5802 protocol phases,
+    // making the state machine verifiable against the specification. The FAILED terminal state
+    // ensures no further processing after an error, preventing partial authentication.
     enum State {
         RECEIVE_CLIENT_FIRST_MESSAGE,
         RECEIVE_CLIENT_FINAL_MESSAGE,
@@ -76,6 +106,9 @@ public class ScramSaslServer implements SaslServer {
     private String authorizationId;
     private Long tokenExpiryTimestamp;
 
+    // DECISION: ScramFormatter created per-connection rather than shared across connections.
+    // This avoids thread-safety issues since MessageDigest and Mac are stateful and not
+    // thread-safe. The performance cost is acceptable because SCRAM auth is low-frequency.
     public ScramSaslServer(ScramMechanism mechanism, Map<String, ?> props, CallbackHandler callbackHandler) throws NoSuchAlgorithmException {
         this.mechanism = mechanism;
         this.formatter = new ScramFormatter(mechanism);
@@ -92,6 +125,17 @@ public class ScramSaslServer implements SaslServer {
      * most cases so that a standard error message is returned to clients.
      * </p>
      */
+    // COMPLEXITY: ~76 lines -- multi-state SCRAM challenge-response handler.
+    // Structure: switch on state enum with two primary cases:
+    //   1. RECEIVE_CLIENT_FIRST_MESSAGE: Parse client-first, extract extensions,
+    //      resolve credentials via CallbackHandler, validate iteration count, generate
+    //      server-first. Branch points: tokenAuthenticated check, null credential,
+    //      authzid mismatch, iteration bounds.
+    //   2. RECEIVE_CLIENT_FINAL_MESSAGE: Parse client-final, verify nonce match,
+    //      verify client proof, compute server signature, clear credentials.
+    // Exit paths: normal return (server message bytes), SaslException,
+    //   SaslAuthenticationException, IllegalSaslStateException (default case).
+    //   All exceptions trigger clearCredentials() and state transition to FAILED.
     @Override
     public byte[] evaluateResponse(byte[] response) throws SaslException, SaslAuthenticationException {
         try {
@@ -109,6 +153,11 @@ public class ScramSaslServer implements SaslServer {
                         String username = ScramFormatter.username(saslName);
                         NameCallback nameCallback = new NameCallback("username", username);
                         ScramCredentialCallback credentialCallback;
+                        // SECURITY: (HIGH) Delegation token auth path -- branches on
+                        // client extension. If tokenAuthenticated() is true, uses
+                        // DelegationTokenCredentialCallback instead of ScramCredentialCallback.
+                        // Risk: If dispatch logic is flawed, a regular SCRAM auth could be
+                        // routed to token lookup, bypassing token expiry checks.
                         if (scramExtensions.tokenAuthenticated()) {
                             DelegationTokenCredentialCallback tokenCallback = new DelegationTokenCredentialCallback();
                             credentialCallback = tokenCallback;
@@ -124,6 +173,8 @@ public class ScramSaslServer implements SaslServer {
                             this.tokenExpiryTimestamp = null;
                         }
                         this.scramCredential = credentialCallback.scramCredential();
+                        // SECURITY: Fail-closed -- null credential causes immediate
+                        // SaslException, preventing auth with non-existent users.
                         if (scramCredential == null)
                             throw new SaslException("Authentication failed: Invalid user credentials");
                         String authorizationIdFromClient = clientFirstMessage.authorizationId();
@@ -183,6 +234,8 @@ public class ScramSaslServer implements SaslServer {
         return mechanism.mechanismName();
     }
 
+    // DECISION: Returns tokenExpiryTimestamp as a negotiated SASL property, enabling the
+    // authenticator layer to enforce credential lifetime without coupling to SCRAM internals.
     @Override
     public Object getNegotiatedProperty(String propName) {
         if (!isComplete())
@@ -223,6 +276,13 @@ public class ScramSaslServer implements SaslServer {
         this.state = state;
     }
 
+    // SECURITY: (CRITICAL) Constant-time proof verification using MessageDigest.isEqual().
+    // This method reconstructs StoredKey from the client's proof and compares it against
+    // the expected StoredKey using a constant-time comparison to prevent timing attacks.
+    // Why: Non-constant-time comparison (e.g., Arrays.equals()) would allow an attacker to
+    // determine the correct StoredKey one byte at a time by measuring response time.
+    // Computation: computedStoredKey = H(clientSignature XOR clientProof) must equal
+    // expectedStoredKey. If they match, the client has proven knowledge of ClientKey.
     // Visible for testing
     void verifyClientProof(ClientFinalMessage clientFinalMessage) throws SaslException {
         try {
@@ -236,12 +296,20 @@ public class ScramSaslServer implements SaslServer {
         }
     }
 
+    // SECURITY: (MEDIUM) Credential clearing after authentication completes or fails.
+    // Sets references to null but does NOT zero the underlying byte arrays (salt,
+    // storedKey, serverKey). Contents remain in memory until garbage collected.
+    // Improvement: Zero byte arrays explicitly before nulling references to reduce
+    // the window for heap dump credential extraction.
     private void clearCredentials() {
         scramCredential = null;
         clientFirstMessage = null;
         serverFirstMessage = null;
     }
 
+    // CROSS-CUTTING: Factory registered via ScramSaslServerProvider into JCA Provider
+    // framework. Consumed by javax.security.sasl.Sasl.createSaslServer() during SASL
+    // negotiation in SaslServerAuthenticator. Validates mechanism name against ScramMechanism.
     public static class ScramSaslServerFactory implements SaslServerFactory {
 
         @Override
