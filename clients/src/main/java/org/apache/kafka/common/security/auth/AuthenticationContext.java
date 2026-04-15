@@ -24,6 +24,23 @@ import java.net.InetAddress;
  * {@link PlaintextAuthenticationContext}, {@link SaslAuthenticationContext}
  * and {@link SslAuthenticationContext}. This class is only used in the broker.
  */
+// DECISION: Marker interface with securityProtocol(), clientAddress(), and listenerName()
+// for protocol-agnostic authentication context. Sealed hierarchy (by convention, not Java
+// sealed classes): PlaintextAuthenticationContext, SslAuthenticationContext,
+// SaslAuthenticationContext. Alternative: Use a single class with optional fields for
+// SSLSession and SaslServer. Rationale: Separate implementations ensure type safety —
+// KafkaPrincipalBuilder.build() can use instanceof to determine the authentication
+// mechanism and safely downcast to access mechanism-specific context (e.g., SSLSession
+// for certificate extraction, SaslServer for authorization ID).
+//
+// CROSS-CUTTING: Created by common/network/ channel builders (PlaintextChannelBuilder,
+// SslChannelBuilder, SaslChannelBuilder) during connection establishment. Passed to
+// auth/KafkaPrincipalBuilder.build() for principal construction. Also used by broker-side
+// interceptors and audit logging for connection metadata.
+// Depends on: auth/SecurityProtocol (this package). Depended on by: all KafkaPrincipalBuilder
+// implementations and all authentication-aware broker components.
+// Contract: Implementations must be immutable after construction. This interface is only
+// used in the broker (per existing Javadoc); clients construct context internally.
 public interface AuthenticationContext {
     /**
      * Underlying security protocol of the authentication session.
