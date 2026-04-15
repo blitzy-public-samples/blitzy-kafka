@@ -51,10 +51,35 @@ import javax.security.sasl.SaslException;
  * @see <a href="https://tools.ietf.org/html/rfc5802">RFC 5802</a>
  *
  */
+// SECURITY: (HIGH) Client-side SCRAM SASL implementation per RFC 5802.
+// Why: Computes client proof (ClientKey XOR ClientSignature) and verifies server signature.
+// Handles the client's password in memory during key derivation (saltedPassword field).
+// Nonce generation uses SecureRandom via ScramFormatter.secureRandomString().
+// Exploit: If client nonce were predictable (e.g., weak RNG like java.util.Random instead of
+// SecureRandom), the server's combined nonce could be pre-computed, enabling an offline
+// dictionary attack without observing the full SCRAM exchange. Also, if ClientKey leaks
+// (e.g., via memory dump of saltedPassword), an attacker can authenticate as the user.
+// Improvement: (1) Zero saltedPassword byte array after computing clientProof and serverKey
+// in handleServerFirstMessage(). (2) Validate that nonce generation uses SecureRandom.
+// (3) Consider char[] instead of byte[] for intermediate password material to enable zeroing.
+//
+// CROSS-CUTTING: Depends on ScramFormatter for cryptographic operations (PBKDF2, HMAC, hash).
+// Depends on ScramMessages for RFC 5802 message construction and parsing.
+// Depends on ScramMechanism for algorithm selection and iteration bounds.
+// Uses ScramExtensionsCallback (from scram/ parent) for optional SCRAM extensions (tokenauth).
+// Consumed by authenticator/SaslClientAuthenticator via Java SASL Provider SPI -- the nested
+// ScramSaslClientFactory is registered by ScramSaslClientProvider.
+// Impact: Changes to ScramFormatter's key derivation (hi method) would break proof computation.
 public class ScramSaslClient implements SaslClient {
 
     private static final Logger log = LoggerFactory.getLogger(ScramSaslClient.class);
 
+    // DECISION: Client-side state machine: SEND_CLIENT_FIRST_MESSAGE ->
+    // RECEIVE_SERVER_FIRST_MESSAGE -> RECEIVE_SERVER_FINAL_MESSAGE -> COMPLETE (or FAILED).
+    // Mirrors the RFC 5802 client flow.
+    // Alternatives: (1) Stateless message-type dispatch, (2) Promise/callback chain.
+    // Rationale: Enum states map directly to RFC 5802 Section 5 steps, making compliance
+    // verifiable by inspection.
     enum State {
         SEND_CLIENT_FIRST_MESSAGE,
         RECEIVE_SERVER_FIRST_MESSAGE,
@@ -85,6 +110,9 @@ public class ScramSaslClient implements SaslClient {
         return mechanism.mechanismName();
     }
 
+    // DECISION: Returns true -- SCRAM client sends the first message (client-first-message)
+    // before receiving any server challenge. This is required by RFC 5802 and the SASL SCRAM
+    // profile (the client initiates the exchange, not the server).
     @Override
     public boolean hasInitialResponse() {
         return true;
@@ -94,6 +122,10 @@ public class ScramSaslClient implements SaslClient {
     public byte[] evaluateChallenge(byte[] challenge) throws SaslException {
         try {
             switch (state) {
+                // DECISION: ScramExtensionsCallback is requested separately and
+                // UnsupportedCallbackException is caught. This allows SCRAM to work even if
+                // the CallbackHandler does not support extensions -- graceful degradation
+                // rather than hard failure.
                 case SEND_CLIENT_FIRST_MESSAGE:
                     if (challenge != null && challenge.length != 0)
                         throw new SaslException("Expected empty challenge");
@@ -122,8 +154,15 @@ public class ScramSaslClient implements SaslClient {
 
                 case RECEIVE_SERVER_FIRST_MESSAGE:
                     this.serverFirstMessage = new ServerFirstMessage(challenge);
+                    // SECURITY: Verifies server nonce starts with client nonce per RFC 5802
+                    // Section 5. Prevents server nonce substitution attacks where a MITM
+                    // replaces the server's nonce.
                     if (!serverFirstMessage.nonce().startsWith(clientNonce))
                         throw new SaslException("Invalid server nonce: does not start with client nonce");
+                    // SECURITY: Enforces minimum iteration count from the mechanism
+                    // definition (4096 for both SHA-256 and SHA-512). Prevents a compromised
+                    // server from requesting trivially low iterations, which would weaken the
+                    // key derivation and make the salted password easier to brute-force.
                     if (serverFirstMessage.iterations() < mechanism.minIterations())
                         throw new SaslException("Requested iterations " + serverFirstMessage.iterations() +  " is less than the minimum " + mechanism.minIterations() + " for " + mechanism);
                     PasswordCallback passwordCallback = new PasswordCallback("Password:", false);
@@ -188,6 +227,14 @@ public class ScramSaslClient implements SaslClient {
         this.state = state;
     }
 
+    // SECURITY: (HIGH) Derives SaltedPassword from user's password using PBKDF2
+    // (ScramFormatter.hi). The saltedPassword is stored in an instance field and persists
+    // until GC.
+    // Risk: Heap dump or memory scanner could extract the salted password, which, combined
+    // with the known salt, allows an attacker to impersonate the client without knowing the
+    // original password. The char[] password from PasswordCallback is also converted to
+    // byte[] via normalize() -- the char[] is managed by the CallbackHandler but the byte[]
+    // copy (passwordBytes) persists on the heap until GC.
     private ClientFinalMessage handleServerFirstMessage(char[] password) throws SaslException {
         try {
             byte[] passwordBytes = ScramFormatter.normalize(new String(password));
@@ -202,6 +249,10 @@ public class ScramSaslClient implements SaslClient {
         }
     }
 
+    // SECURITY: Server signature verification using constant-time MessageDigest.isEqual().
+    // This prevents a malicious server from detecting partial signature match via timing
+    // analysis. The verification ensures mutual authentication -- the server proves it
+    // knows the ServerKey.
     private void handleServerFinalMessage(byte[] signature) throws SaslException {
         try {
             byte[] serverKey = formatter.serverKey(saltedPassword);
@@ -213,6 +264,9 @@ public class ScramSaslClient implements SaslClient {
         }
     }
 
+    // CROSS-CUTTING: Factory registered by ScramSaslClientProvider into JCA Provider framework.
+    // Consumed by javax.security.sasl.Sasl.createSaslClient() during SASL negotiation in
+    // SaslClientAuthenticator. First matching ScramMechanism from the offered list is selected.
     public static class ScramSaslClientFactory implements SaslClientFactory {
 
         @Override
