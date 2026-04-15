@@ -26,6 +26,23 @@ import javax.security.auth.login.LoginException;
 /**
  * Login interface for authentication.
  */
+// DECISION: Lifecycle interface for SASL login management, separating login (credential
+// acquisition) from authentication (credential verification during SASL exchange).
+// Alternative: Combine login and authentication in a single interface.
+// Rationale: Login (credential acquisition via JAAS LoginContext) and authentication
+// (SASL challenge-response via AuthenticateCallbackHandler) have different lifecycles:
+// login happens once at startup (or periodically for Kerberos TGT renewal / OAuth token
+// refresh), while authentication happens per-connection. Separating concerns allows
+// mechanism-specific login strategies (e.g., KerberosLogin's background TGT renewal thread)
+// without complicating the per-connection authentication path.
+//
+// CROSS-CUTTING: Implemented by authenticator/AbstractLogin (base lifecycle),
+// authenticator/DefaultLogin (standard JAAS login), kerberos/KerberosLogin (TGT renewal daemon),
+// oauthbearer/OAuthBearerRefreshingLogin (OAuth token refresh). Managed by
+// authenticator/LoginManager which provides reference-counted lifecycle management.
+// Contract: configure() must be called before login(). subject() returns the authenticated
+// Subject after login() completes. close() must release all resources (e.g., TGT renewal thread).
+// Impact: Adding methods to this interface breaks all custom Login implementations.
 public interface Login {
 
     /**
