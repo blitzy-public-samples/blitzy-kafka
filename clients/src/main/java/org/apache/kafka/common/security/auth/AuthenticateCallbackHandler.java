@@ -26,6 +26,24 @@ import javax.security.auth.login.AppConfigurationEntry;
 /*
  * Callback handler for SASL-based authentication
  */
+// DECISION: Extends javax.security.auth.callback.CallbackHandler with Configurable lifecycle
+// (configure + close). Alternative: Use plain CallbackHandler directly.
+// Rationale: Plain CallbackHandler.handle() provides no mechanism for passing Kafka-specific
+// context (SASL mechanism name, JAAS config entries, listener-scoped Kafka configs). The
+// configure() method bridges this gap, enabling mechanism-specific initialization (e.g.,
+// SCRAM credential lookup, OAuth token endpoint configuration, Kerberos service name).
+// The close() method ensures resource cleanup (e.g., closing HTTP connections in OAuth handlers).
+//
+// CROSS-CUTTING: Central extension point for ALL SASL mechanism callback handlers.
+// Implemented by: authenticator/SaslClientCallbackHandler, authenticator/SaslServerCallbackHandler,
+// oauthbearer/OAuthBearerLoginCallbackHandler, oauthbearer/OAuthBearerValidatorCallbackHandler,
+// kerberos/KerberosClientCallbackHandler, plain/internals/PlainServerCallbackHandler,
+// scram/internals/ScramServerCallbackHandler, and custom user-provided handlers.
+// Loaded via reflection from SaslConfigs.SASL_CLIENT_CALLBACK_HANDLER_CLASS /
+// SASL_SERVER_CALLBACK_HANDLER_CLASS / SASL_LOGIN_CALLBACK_HANDLER_CLASS.
+// Contract: configure() is called once after construction; handle() may be called concurrently
+// from multiple SASL authentication threads; close() is called during shutdown.
+// Impact: Adding new callbacks or changing the configure() signature breaks all custom handlers.
 public interface AuthenticateCallbackHandler extends CallbackHandler {
 
     /**
