@@ -22,8 +22,19 @@ import java.util.Set;
 
 /**
  * Options for {@link org.apache.kafka.clients.admin.Admin#electLeaders(ElectionType, Set, org.apache.kafka.clients.admin.ElectLeadersOptions)}.
+ *
+ * @implNote DECISION: Two election types (PREFERRED and UNCLEAN) mapped to numeric protocol
+ * codes (0 and 1) for wire format compatibility. Alternative: Boolean flag for
+ * preferred/unclean. Rationale: Enum is extensible for future election types; numeric codes
+ * are stable across protocol versions.
  */
+// CROSS-CUTTING: Used by clients/admin/Admin.electLeaders() and
+// metadata/controller/ReplicationControlManager for partition leader election.
 public enum ElectionType {
+    // DECISION: Preferred replica election (KIP-183) — triggers leader change to preferred
+    //   replica without data loss.
+    // DECISION: Unclean leader election — allows out-of-sync replica to become leader, risking
+    //   data loss. Enabled per-topic via unclean.leader.election.enable config.
     PREFERRED((byte) 0), UNCLEAN((byte) 1);
 
     public final byte value;
