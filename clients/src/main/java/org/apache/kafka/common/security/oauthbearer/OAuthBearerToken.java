@@ -39,6 +39,22 @@ import java.util.Set;
  *      <a href="https://tools.ietf.org/html/rfc6750#section-2.1">RFC 6750
  *      Section 2.1</a>
  */
+// SECURITY: (MEDIUM) Token interface exposing the raw b64token value via value().
+// Why: The value() method returns the complete bearer token string — anyone with a
+// reference to an OAuthBearerToken instance can extract and reuse the raw token.
+// Exploit: If OAuthBearerToken instances are logged, serialized, or exposed via JMX,
+// the raw token value becomes available to attackers for replay attacks.
+// Improvement: Consider a token type that redacts value() in toString() and prevents
+// accidental serialization (mark as transient or implement custom serialization).
+//
+// CROSS-CUTTING: Core token contract consumed by the entire OAUTHBEARER stack:
+// - OAuthBearerLoginModule (stores in Subject's private credentials)
+// - OAuthBearerSaslClient (sends value() to broker during SASL exchange)
+// - OAuthBearerSaslServer (validates and exposes via negotiated properties)
+// - OAuthBearerValidatorCallback/OAuthBearerTokenCallback (callback transport)
+// - ExpiringCredential (refresh scheduling based on lifetimeMs/startTimeMs)
+// Implementations: internals/secured/BasicOAuthBearerToken, internals/unsecured/
+// OAuthBearerUnsecuredJws. Changes to this interface affect all OAUTHBEARER auth paths.
 public interface OAuthBearerToken {
     /**
      * The <code>b64token</code> value as defined in
@@ -62,6 +78,9 @@ public interface OAuthBearerToken {
      *         be trimmed of preceding and trailing whitespace, and the result will
      *         never contain the empty string.
      */
+    // DECISION: scope() returns non-null Set (potentially empty). Alternative: Nullable set.
+    // Rationale: Non-null contract simplifies caller code — no null checks needed. Empty set
+    // semantics = no scopes granted, which is the restrictive default.
     Set<String> scope();
 
     /**
@@ -74,6 +93,10 @@ public interface OAuthBearerToken {
      *         <a href="https://tools.ietf.org/html/rfc6749#section-1.4">RFC 6749
      *         Section 1.4</a>.
      */
+    // DECISION: Named "lifetimeMs" (absolute timestamp) rather than "expiresIn" (relative
+    // duration). Alternative: Relative duration from creation. Rationale: Absolute timestamp
+    // avoids ambiguity about the reference point (creation time vs current time) and is
+    // directly comparable with System.currentTimeMillis() for expiration checks.
     long lifetimeMs();
 
     /**
@@ -92,5 +115,9 @@ public interface OAuthBearerToken {
      * @return the time when the credential became valid, in terms of the number of
      *         milliseconds since the epoch, if known, otherwise null
      */
+    // DECISION: startTimeMs() returns nullable Long. Alternative: Default to 0 or throw
+    // UnsupportedOperationException. Rationale: OAuth tokens may not include an "iat" claim
+    // (though Kafka's validators require it) — the nullable contract supports interop with
+    // external token implementations that don't provide issuance time.
     Long startTimeMs();
 }
