@@ -35,6 +35,30 @@ import org.apache.kafka.common.security.oauthbearer.internals.secured.OAuthBeare
  * @see FileJwtRetriever
  */
 
+// DECISION: Separate retrieval (JwtRetriever) from validation (JwtValidator) concerns.
+// Alternative: Single JwtProvider interface that retrieves and validates. Rationale:
+// Separation of concerns — retrieval may involve HTTP calls, file I/O, or token exchange
+// (each with different security properties), while validation involves cryptographic
+// operations. Different OAuth grant types only differ in retrieval, not validation.
+// This enables the pluggable retriever pattern (DefaultJwtRetriever, ClientCredentials,
+// JwtBearer, File) without duplicating validation logic.
+
+// DECISION: Extends OAuthBearerConfigurable (configure + Closeable) rather than defining
+// its own lifecycle. Alternative: Standalone interface with separate init/close. Rationale:
+// OAuthBearerConfigurable standardizes the configure(Map, String,
+// List<AppConfigurationEntry>) contract across all OAUTHBEARER components, enabling
+// uniform initialization via ConfigurationUtils.getConfiguredInstance().
+
+// CROSS-CUTTING: Contract interface for JWT token retrieval. Implementations:
+// - DefaultJwtRetriever (delegates to File or ClientCredentials based on URL scheme)
+// - ClientCredentialsJwtRetriever (OAuth client_credentials grant)
+// - JwtBearerJwtRetriever (JWT bearer assertion grant)
+// - FileJwtRetriever (local file)
+// - internals/secured/HttpJwtRetriever (HTTP transport, used by delegation)
+// Consumed by: OAuthBearerLoginCallbackHandler (via getConfiguredInstance),
+// OAuthBearerLoginModule (indirectly via callback handler).
+// External deps: OAuthBearerConfigurable (lifecycle), JwtRetrieverException (error).
+
 public interface JwtRetriever extends OAuthBearerConfigurable {
 
     /**
@@ -51,6 +75,11 @@ public interface JwtRetriever extends OAuthBearerConfigurable {
      *
      * @throws JwtRetrieverException Thrown on errors related to IO during retrieval
      */
+
+    // DECISION: Blocking API (no CompletableFuture or callback). Alternative: Async API.
+    // Rationale: Called from JAAS LoginModule which uses synchronous JAAS callbacks.
+    // The SASL authentication handshake is inherently synchronous in Kafka — async would
+    // add complexity without benefit since the SASL channel is blocked until auth completes.
 
     String retrieve() throws JwtRetrieverException;
 }
