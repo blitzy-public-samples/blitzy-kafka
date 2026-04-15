@@ -25,6 +25,12 @@ import java.util.stream.Collectors;
 
 /**
  * The classic group state.
+ *
+ * @implNote DECISION: Separate enum for classic (JoinGroup/SyncGroup protocol) group states
+ * rather than reusing GroupState. Alternative: Unify with GroupState. Rationale: Classic group
+ * lifecycle (PREPARING_REBALANCE->COMPLETING_REBALANCE->STABLE->DEAD->EMPTY) has different
+ * semantics from modern consumer groups (which add ASSIGNING/RECONCILING). Separate types
+ * prevent invalid state transitions at compile time.
  */
 public enum ClassicGroupState {
     UNKNOWN("Unknown"),
@@ -34,6 +40,8 @@ public enum ClassicGroupState {
     DEAD("Dead"),
     EMPTY("Empty");
 
+    // DECISION: Same eager-map + Locale.ROOT pattern as GroupState for consistent
+    // case-insensitive parsing across all enum types.
     private static final Map<String, ClassicGroupState> NAME_TO_ENUM = Arrays.stream(values())
         .collect(Collectors.toMap(state -> state.name.toUpperCase(Locale.ROOT), Function.identity()));
 
