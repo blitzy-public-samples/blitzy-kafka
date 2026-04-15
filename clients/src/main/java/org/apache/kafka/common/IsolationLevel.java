@@ -18,8 +18,26 @@ package org.apache.kafka.common;
 
 import java.util.Locale;
 
+/**
+ * Defines the transaction isolation semantics for reading records from a topic partition.
+ *
+ * @implNote DECISION: Two isolation levels (READ_UNCOMMITTED=0, READ_COMMITTED=1) model
+ * transactional semantics introduced in KIP-98. Alternative considered: a simple boolean flag
+ * (committed vs. uncommitted). Rationale: an enum with explicit numeric IDs is extensible for
+ * potential future isolation levels and maps directly to the FetchRequest protocol field, avoiding
+ * a breaking protocol change if a third level is ever added.
+ *
+ * <p>CROSS-CUTTING: Used by consumer FetchRequest construction (clients module), FetchSession
+ * handling (core/server), and server-side FetchDataInfo filtering in ReplicaManager. The isolation
+ * level determines whether uncommitted transactional records are visible to the consumer.
+ */
 public enum IsolationLevel {
-    READ_UNCOMMITTED((byte) 0), READ_COMMITTED((byte) 1);
+    // DECISION: Default isolation level — returns all records including uncommitted transactional
+    // records. Matches pre-transaction behavior for backward compatibility.
+    READ_UNCOMMITTED((byte) 0),
+    // DECISION: Only returns committed transactional records and all non-transactional records.
+    // Requires consumer to track LSO (Last Stable Offset).
+    READ_COMMITTED((byte) 1);
 
     private final byte id;
 
