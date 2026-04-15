@@ -46,6 +46,27 @@ import org.apache.kafka.common.security.oauthbearer.internals.secured.OAuthBeare
  *                         contents and verify the signature
  */
 
+// CROSS-CUTTING: Contract interface for JWT token validation. Implementations:
+// - BrokerJwtValidator (jose4j-based JWKS signature verification, broker-side)
+// - ClientJwtValidator (structural parsing only, client-side)
+// - DefaultJwtValidator (delegates to Broker or Client based on VerificationKeyResolver)
+// Consumed by: OAuthBearerValidatorCallbackHandler (broker-side validation),
+// OAuthBearerLoginCallbackHandler (client-side validation after retrieval).
+// External deps: OAuthBearerConfigurable (lifecycle), OAuthBearerToken (result type),
+// JwtValidatorException (error contract).
+// Impact: Changes to this interface require updates to all validator implementations
+// and both callback handlers.
+
+// DECISION: Asymmetric client/broker validation by design — the existing Javadoc explains
+// that client performs lightweight validation while broker performs signature verification.
+// This is a deliberate security architecture decision: clients do not need jose4j and should
+// not be trusted to verify their own tokens (the broker is the trust anchor).
+// Alternative: Uniform validation on both sides. Rationale: Client-side signature verification
+// would require distributing JWKS configuration to all clients, increasing operational
+// complexity. The broker-centric trust model keeps key management centralized.
+
+// DECISION: Same configurable lifecycle as JwtRetriever. Enables uniform instantiation
+// via ConfigurationUtils.getConfiguredInstance() and consistent configure/close contract.
 public interface JwtValidator extends OAuthBearerConfigurable {
 
     /**
@@ -59,5 +80,10 @@ public interface JwtValidator extends OAuthBearerConfigurable {
      * @throws JwtValidatorException Thrown on errors performing validation of given token
      */
 
+    // DECISION: Returns parsed OAuthBearerToken rather than just boolean valid/invalid.
+    // Alternative: Void return with exception-only failure. Rationale: The parsed token
+    // contains extracted claims (scope, subject, expiration) needed by the caller for
+    // credential storage and authorization decisions. Returning the token avoids redundant
+    // parsing by the caller.
     OAuthBearerToken validate(String accessToken) throws JwtValidatorException;
 }
