@@ -23,7 +23,18 @@ import java.util.Set;
 
 /**
  * Interface for reconfigurable classes that support dynamic configuration.
+ *
+ * @implNote DECISION: Extends Configurable with three additional methods (reconfigurableConfigs,
+ * validateReconfiguration, reconfigure) to support hot-reload of broker configurations without
+ * restart (KIP-226). Alternative: a single reconfigure(Map) method. Rationale: separation of
+ * validation from application enables the broker to reject invalid configs before partially
+ * applying changes, and reconfigurableConfigs() enables DynamicBrokerConfig to know which configs
+ * are mutable at runtime.
  */
+// CROSS-CUTTING: Implemented by SslFactory, ListenerReconfigurable, MetricsReporter, and
+// producer/consumer interceptors. Consumed by core/DynamicBrokerConfig.scala for runtime
+// reconfiguration. Contract: validateReconfiguration() must be idempotent; reconfigure() must
+// be atomic (all-or-nothing).
 public interface Reconfigurable extends Configurable {
 
     /**
