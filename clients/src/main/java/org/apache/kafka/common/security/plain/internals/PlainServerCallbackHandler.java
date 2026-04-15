@@ -33,8 +33,31 @@ import javax.security.auth.callback.NameCallback;
 import javax.security.auth.callback.UnsupportedCallbackException;
 import javax.security.auth.login.AppConfigurationEntry;
 
+// SECURITY: (MEDIUM) Server-side credential validation handler for SASL/PLAIN.
+// Why: This handler validates received plaintext credentials against expected credentials
+// stored in JAAS configuration entries. Credentials are compared using constant-time
+// Utils.isEqualConstantTime() in authenticate(), correctly preventing timing side-channel attacks.
+// Exploit: If the JAAS config file (containing user_<username>=<password> entries) has
+// incorrect permissions, an attacker with filesystem access can read all plaintext passwords.
+// The JAAS_USER_PREFIX pattern means passwords are stored as configuration values.
+// Improvement: Consider supporting external credential stores (LDAP, database) as an
+// alternative to JAAS file-based passwords for production deployments.
+//
+// CROSS-CUTTING: Implements auth/AuthenticateCallbackHandler interface.
+// Depends on plain/PlainAuthenticateCallback (reads password(), sets authenticated()),
+// JaasContext.configEntryOption() for credential lookup, and PlainLoginModule (JAAS config
+// entry class name filter).
+// Consumed by: authenticator/SaslServerAuthenticator when handling PLAIN mechanism callbacks.
+// Contract: JAAS config must contain entries matching PlainLoginModule with
+// user_<username>=<password> options.
+// Impact: If JAAS entries are misconfigured, all PLAIN authentications fail silently
+// (authenticate() returns false).
 public class PlainServerCallbackHandler implements AuthenticateCallbackHandler {
 
+    // DECISION: Uses "user_" prefix convention for JAAS option keys (e.g., user_admin=password).
+    // Alternatives: (1) Separate credential file, (2) LDAP lookup, (3) Database-backed store.
+    // Rationale: Consistent with ZooKeeper Digest-MD5 convention and keeps credential
+    // configuration co-located with JAAS module configuration for simplicity.
     private static final String JAAS_USER_PREFIX = "user_";
     private List<AppConfigurationEntry> jaasConfigEntries;
 
@@ -43,6 +66,11 @@ public class PlainServerCallbackHandler implements AuthenticateCallbackHandler {
         this.jaasConfigEntries = jaasConfigEntries;
     }
 
+    // DECISION: Processes callbacks in array order, expecting NameCallback before
+    // PlainAuthenticateCallback.
+    // Rationale: The SASL framework guarantees callback ordering from
+    // PlainSaslServer.evaluateResponse() which creates [NameCallback, PlainAuthenticateCallback]
+    // in that order.
     @Override
     public void handle(Callback[] callbacks) throws IOException, UnsupportedCallbackException {
         String username = null;
@@ -58,6 +86,11 @@ public class PlainServerCallbackHandler implements AuthenticateCallbackHandler {
         }
     }
 
+    // SECURITY: (MEDIUM) Uses Utils.isEqualConstantTime() for constant-time password comparison.
+    // Why: Prevents timing side-channel attacks where an attacker measures response time
+    // differences to deduce password characters one by one.
+    // Note: This is correctly implemented -- the constant-time comparison does NOT short-circuit
+    // on the first mismatched character.
     protected boolean authenticate(String username, char[] password) throws IOException {
         if (username == null)
             return false;
