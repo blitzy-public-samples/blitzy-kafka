@@ -45,6 +45,23 @@ import javax.security.sasl.SaslServerFactory;
  * servers in production systems, this module can be replaced with a different implementation.
  *
  */
+// SECURITY: (CRITICAL) SASL/PLAIN transmits credentials in CLEARTEXT at the SASL layer.
+// Why: PLAIN mechanism sends username and password as Base64-encoded bytes with no encryption
+// at the SASL layer itself. Authentication relies entirely on transport layer (TLS) for
+// confidentiality. Per RFC 4616, PLAIN MUST NOT be used without adequate data security.
+// Exploit: If TLS is not configured (SASL_PLAINTEXT listener), a network sniffer can capture
+// credentials in plaintext. Even with TLS, if certificate validation is disabled
+// (ssl.endpoint.identification.algorithm=none), a MITM attacker can intercept credentials.
+// Improvement: Consider deprecating SASL_PLAINTEXT and requiring SASL_SSL for PLAIN mechanism.
+// Add runtime warning when PLAIN is used without TLS. Enforce ssl.endpoint.identification
+// to prevent MITM attacks on credential exchange.
+//
+// CROSS-CUTTING: Depends on plain/PlainAuthenticateCallback (credential carrier passed to
+// CallbackHandler). Consumed by authenticator/SaslServerAuthenticator when PLAIN mechanism
+// is negotiated via Sasl.createSaslServer().
+// Contract: CallbackHandler must handle NameCallback and PlainAuthenticateCallback.
+// Impact: If PlainSaslServerFactory is not registered via PlainSaslServerProvider, SASL
+// mechanism negotiation fails -- Sasl.createSaslServer("PLAIN",...) returns null.
 public class PlainSaslServer implements SaslServer {
 
     public static final String PLAIN_MECHANISM = "PLAIN";
@@ -67,6 +84,26 @@ public class PlainSaslServer implements SaslServer {
      * some cases so that a standard error message is returned to clients.
      * </p>
      */
+    // COMPLEXITY: 44 lines -- RFC 4616 token parsing, callback-based validation, authz ID check.
+    // Structure: (1) Parse NUL-delimited message into 3 tokens via extractTokens(), (2) Validate
+    // non-empty username/password, (3) Dispatch to CallbackHandler for credential verification,
+    // (4) Verify authorization ID matches authentication ID if provided.
+    // Key paths: Success -> sets authorizationId and complete=true, returns empty byte[];
+    // Failure -> throws SaslAuthenticationException at 4 distinct validation points.
+    //
+    // SECURITY: (HIGH) Parses raw bytes from untrusted client into credential tokens.
+    // Why: The NUL-delimited format (authzid NUL authcid NUL passwd per RFC 4616) is parsed from
+    // raw bytes. Malformed messages could cause unexpected token extraction.
+    // Exploit: A client could send a message with extra NUL bytes to attempt unexpected parsing.
+    // The extractTokens() method mitigates this by validating exactly 3 tokens.
+    // Improvement: Consider adding maximum token length validation (RFC 4616 specifies 255 octets
+    // max per field) to prevent memory abuse from oversized credentials.
+    //
+    // DECISION: Uses simple NUL-delimited format per RFC 4616 rather than challenge-response.
+    // Alternatives: (1) Challenge-response protocol like SCRAM, (2) Token-based like OAUTHBEARER.
+    // Rationale: PLAIN is intentionally simple for environments where TLS provides transport
+    // security and a lightweight auth mechanism is sufficient. The single-round-trip design
+    // minimizes authentication latency.
     @Override
     public byte[] evaluateResponse(byte[] responseBytes) throws SaslAuthenticationException {
         /*
@@ -113,6 +150,11 @@ public class PlainSaslServer implements SaslServer {
         return new byte[0];
     }
 
+    // SECURITY: (MEDIUM) Input validation for NUL-delimited SASL/PLAIN message format.
+    // Why: Parses untrusted client input -- malformed NUL sequences could yield wrong token count.
+    // The method enforces exactly 3 tokens, rejecting messages with fewer or more segments.
+    // Exploit: Without the token-count check, extra NUL bytes could cause index confusion.
+    // Improvement: Add per-token length cap (255 octets per RFC 4616 Section 4) to bound memory.
     private List<String> extractTokens(String string) {
         List<String> tokens = new ArrayList<>();
         int startIndex = 0;
@@ -157,6 +199,11 @@ public class PlainSaslServer implements SaslServer {
         return complete;
     }
 
+    // DECISION: Explicitly throws IllegalStateException for wrap/unwrap because PLAIN provides no
+    // security layer (no integrity or privacy). This is per SASL spec -- mechanisms declare QoP
+    // (Quality of Protection) support, and PLAIN offers none.
+    // Alternatives: Return input unchanged (pass-through). Rationale: Throwing is more correct
+    // because it prevents callers from incorrectly assuming a security layer exists.
     @Override
     public byte[] unwrap(byte[] incoming, int offset, int len) {
         if (!complete)
@@ -175,6 +222,9 @@ public class PlainSaslServer implements SaslServer {
     public void dispose() {
     }
 
+    // SECURITY: (LOW) Factory respects Sasl.POLICY_NOPLAINTEXT property to suppress PLAIN in
+    // policy-restricted environments. getMechanismNames() returns empty array when NOPLAINTEXT
+    // is set, preventing PLAIN from being offered during SASL mechanism negotiation.
     public static class PlainSaslServerFactory implements SaslServerFactory {
 
         @Override
