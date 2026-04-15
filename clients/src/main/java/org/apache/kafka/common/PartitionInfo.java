@@ -21,6 +21,17 @@ import java.util.Objects;
 
 /**
  * This is used to describe per-partition state in the MetadataResponse.
+ *
+ * <p>CROSS-CUTTING: Consumed by Cluster.java for partition index construction, KafkaProducer
+ * for leader selection, KafkaConsumer for partition assignment, and admin APIs for topic
+ * descriptions. Contract: Effectively immutable (arrays are shared by reference but expected
+ * not to be mutated by callers).
+ *
+ * @implNote DECISION: Uses Node[] arrays rather than List&lt;Node&gt; for replicas,
+ * inSyncReplicas, and offlineReplicas. Alternative: List&lt;Node&gt;. Rationale: Arrays are
+ * more compact in memory and avoid boxing overhead for a type that is instantiated per-partition
+ * (potentially thousands of instances in a large cluster). The tradeoff is reduced API
+ * flexibility.
  */
 public class PartitionInfo {
     private final String topic;
@@ -30,6 +41,8 @@ public class PartitionInfo {
     private final Node[] inSyncReplicas;
     private final Node[] offlineReplicas;
 
+    // DECISION: Two constructors for backward compatibility — original constructor defaults
+    // offlineReplicas to empty array. New constructor supports offline replica tracking (KIP-188).
     public PartitionInfo(String topic, int partition, Node leader, Node[] replicas, Node[] inSyncReplicas) {
         this(topic, partition, leader, replicas, inSyncReplicas, new Node[0]);
     }
