@@ -21,7 +21,16 @@ import java.util.Objects;
 
 /**
  * The <code>ClusterResource</code> class encapsulates metadata for a Kafka cluster.
+ *
+ * @implNote DECISION: Minimal immutable wrapper around clusterId (String). Alternative: include
+ * additional cluster metadata (broker count, controller info). Rationale: ClusterResource is
+ * passed to ClusterResourceListeners which may run in performance-sensitive paths
+ * (serializer/interceptor chains) — keeping it lightweight avoids allocation overhead. The
+ * clusterId alone is sufficient for multi-cluster identification.
  */
+// CROSS-CUTTING: Constructed by Cluster.clusterResource() and passed to
+// ClusterResourceListener.onUpdate(). Consumed by interceptors, reporters, and serializers
+// that need to identify which cluster they're connected to.
 public class ClusterResource {
 
     private final String clusterId;
