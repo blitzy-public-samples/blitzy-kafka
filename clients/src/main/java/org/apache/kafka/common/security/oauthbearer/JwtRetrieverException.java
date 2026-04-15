@@ -24,6 +24,19 @@ import org.apache.kafka.common.KafkaException;
  *
  * @see JwtRetriever#retrieve()
  */
+// DECISION: Extends KafkaException (unchecked) rather than a checked exception. Alternative:
+// Extend IOException (checked). Rationale: JwtRetriever.retrieve() declares this as a
+// thrown exception but callers (OAuthBearerLoginCallbackHandler) catch it within their
+// IOException-declaring handle() method. Using unchecked exception avoids forcing all
+// intermediate callers to declare or catch it, while still allowing targeted catch blocks.
+// Risk: Unchecked exceptions can propagate unexpectedly if not caught at appropriate levels.
+//
+// CROSS-CUTTING: Thrown by all JwtRetriever implementations (HttpJwtRetriever,
+// FileJwtRetriever, ClientCredentialsJwtRetriever, JwtBearerJwtRetriever) on retrieval
+// failures (network errors, file I/O, JSON parsing). Caught by OAuthBearerLoginCallbackHandler
+// (client-side) and re-thrown as IOException to the SASL framework.
+// Contract: Message should describe the retrieval failure without including sensitive data
+// (tokens, credentials, secrets). Cause chain preserves original exception for debugging.
 public class JwtRetrieverException extends KafkaException {
 
     public JwtRetrieverException(String message) {
