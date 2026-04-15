@@ -22,9 +22,18 @@ import java.util.Objects;
 
 /**
  * The topic name, partition number and the brokerId of the replica
+ *
+ * @implNote DECISION: Extends the TopicPartition concept by adding brokerId to uniquely
+ * identify a specific replica. Alternative: {@code Pair<TopicPartition, Integer>}. Rationale:
+ * First-class type enables type safety in admin APIs (log-dir reassignment) and implements
+ * Serializable for cross-JVM transfer.
  */
+// CROSS-CUTTING: Used by clients/admin/Admin.alterReplicaLogDirs() and
+// describeReplicaLogDirs() for log directory management operations.
 public final class TopicPartitionReplica implements Serializable {
 
+    // DECISION: Lazy-cached hashCode following the same pattern as TopicPartition.
+    // Thread-safe due to benign race on idempotent computation.
     private int hash = 0;
     private final int brokerId;
     private final int partition;
