@@ -59,7 +59,13 @@ import java.util.Objects;
  * // as messages are sent we record the sizes
  * sensor.record(messageSize);
  * }</pre>
+ *
+ * @implNote DECISION: Immutable metric ID with lazy-cached hashCode ({@code hash}). Alternative:
+ * eager computation in constructor — avoided because not all instances become map keys. Thread
+ * safety: benign race; idempotent computation always produces the same value.
  */
+// CROSS-CUTTING: Core metric identity used by common/metrics/Metrics, JmxReporter MBean naming,
+// and all clients. Contract: Immutable; equals/hashCode on name+group+tags (not description).
 public final class MetricName {
 
     private final String name;
@@ -76,6 +82,8 @@ public final class MetricName {
      * @param description A human-readable description to include in the metric
      * @param tags        additional key/value attributes of the metric
      */
+    // DECISION: name+group form unique identity; description and tags are optional metadata.
+    // Null tags default to empty map for consistent equals/hashCode.
     public MetricName(String name, String group, String description, Map<String, String> tags) {
         this.name = Objects.requireNonNull(name);
         this.group = Objects.requireNonNull(group);
