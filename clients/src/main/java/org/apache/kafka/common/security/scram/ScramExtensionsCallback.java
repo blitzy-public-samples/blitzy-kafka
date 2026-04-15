@@ -26,7 +26,28 @@ import javax.security.auth.callback.Callback;
  * Optional callback used for SCRAM mechanisms if any extensions need to be set
  * in the SASL/SCRAM exchange.
  */
+// SECURITY: (LOW) JAAS Callback for SCRAM protocol extensions (RFC 5802 extensions).
+// Why: Extensions are included in the client-first SCRAM message and are visible to
+// the server. Currently used for delegation token authentication signaling (tokenauth=true).
+// Exploit: If an attacker can inject arbitrary extensions into the SCRAM client-first
+// message (e.g., by controlling CallbackHandler configuration), they could set
+// tokenauth=true to switch the server to delegation token credential lookup — potentially
+// bypassing regular SCRAM authentication if a valid delegation token exists for the user.
+// Improvement: Server-side validation should verify that the tokenauth extension is
+// consistent with the authentication mechanism being used and the client's known identity.
+//
+// CROSS-CUTTING: Used by ScramSaslClient (internals/) to include extensions in the
+// SCRAM client-first message. Populated by OAuthBearerLoginCallbackHandler or
+// ScramLoginModule when tokenauth=true is configured.
+// Contract: Extensions map MUST be set before ScramSaslClient.evaluateChallenge() is called.
+// Depends on: ScramLoginModule.TOKEN_AUTH_CONFIG for the tokenauth extension key.
+// Impact: If extensions are not set, the SCRAM exchange proceeds as a normal (non-token)
+// authentication — this is the correct default behavior.
 public class ScramExtensionsCallback implements Callback {
+    // DECISION: Default to Collections.emptyMap() rather than null.
+    // Alternatives: (1) null default with null-check in consumers, (2) empty HashMap.
+    // Rationale: Empty immutable map avoids null checks in ScramSaslClient message
+    // construction and ensures the extensions attribute is always safe to iterate.
     private Map<String, String> extensions = Collections.emptyMap();
 
     /**
@@ -41,6 +62,9 @@ public class ScramExtensionsCallback implements Callback {
     /**
      * Sets the SCRAM extensions on this callback. Maps passed in should be unmodifiable
      */
+    // SECURITY: No validation on extension keys or values. Javadoc states maps should be
+    // unmodifiable, but this is not enforced — a mutable map could be modified after being
+    // set, changing the SCRAM message content mid-authentication.
     public void extensions(Map<String, String> extensions) {
         this.extensions = extensions;
     }
