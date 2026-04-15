@@ -43,13 +43,40 @@ import javax.security.auth.login.Configuration;
  *   <loginModuleClass> <controlFlag> (<optionName>=<optionValue>)*;
  * }
  * </pre>
+ *
+ * @implSpec SECURITY: (MEDIUM) This class parses untrusted JAAS configuration strings
+ * (from sasl.jaas.config) using java.io.StreamTokenizer, which has complex tokenization
+ * rules. Malformed or crafted config strings could cause unexpected parsing behavior.
+ * Exploit: An attacker with config write access could inject a malicious login module
+ * class name by exploiting StreamTokenizer word-character rules (e.g., '$' for inner
+ * classes of dangerous modules), potentially bypassing the post-parse allowlist check
+ * in {@link JaasContext}. Improvement: Consider a pre-parse validation step that checks
+ * the login module class name against an allowlist BEFORE constructing the
+ * AppConfigurationEntry, and consider using a stricter parser with well-defined grammar.
+ *
+ * @implNote DECISION: Uses java.io.StreamTokenizer for JAAS config parsing rather than
+ * a regex or hand-written parser. Alternatives: (1) Regex-based parser, (2) ANTLR/javacc
+ * grammar, (3) Direct javax.security Configuration.getConfiguration(). Rationale:
+ * StreamTokenizer naturally handles quoted strings, C-style comments, and whitespace
+ * matching the JAAS file format spec. Tradeoff: reduced control over error messages and
+ * tokenization edge cases compared to a hand-written parser.
  */
+// CROSS-CUTTING: Instantiated by JaasContext.load() when dynamic SASL_JAAS_CONFIG is
+// provided. The parsed AppConfigurationEntry[] is consumed by JAAS LoginContext for
+// creating login module instances. Depends on: SaslConfigs (common/config) for config
+// key definition. Depended on by: JaasContext (this package), which passes parsed
+// entries to LoginManager -> AbstractLogin -> mechanism-specific LoginModules.
 class JaasConfig extends Configuration {
 
     private final String loginContextName;
     private final List<AppConfigurationEntry> configEntries;
 
     public JaasConfig(String loginContextName, String jaasConfigParams) {
+        // SECURITY: StreamTokenizer configured with slashSlash and slashStar comments
+        // enabled — comment sequences (//, /* */) inside JAAS config values will be
+        // silently consumed, potentially hiding injected content from human review.
+        // Characters '-', '_', '$' are added as word chars to support Java class names
+        // with inner classes and hyphens in option keys.
         StreamTokenizer tokenizer = new StreamTokenizer(new StringReader(jaasConfigParams));
         tokenizer.slashSlashComments(true);
         tokenizer.slashStarComments(true);
@@ -58,6 +85,9 @@ class JaasConfig extends Configuration {
         tokenizer.wordChars('$', '$');
 
         try {
+            // DECISION: Mutable ArrayList during parsing, exposed as array via
+            // getAppConfigurationEntry(). Multiple login modules per context are
+            // supported (semicolon-separated) matching standard JAAS file format.
             configEntries = new ArrayList<>();
             while (tokenizer.nextToken() != StreamTokenizer.TT_EOF) {
                 configEntries.add(parseAppConfigurationEntry(tokenizer));
@@ -72,6 +102,9 @@ class JaasConfig extends Configuration {
         }
     }
 
+    // DECISION: Returns null (not empty array) when name doesn't match, per
+    // javax.security.auth.login.Configuration contract. Callers must handle null
+    // return — this is a JAAS framework requirement, not a design choice.
     @Override
     public AppConfigurationEntry[] getAppConfigurationEntry(String name) {
         if (this.loginContextName.equals(name))
@@ -80,6 +113,10 @@ class JaasConfig extends Configuration {
             return  null;
     }
 
+    // DECISION: Case-insensitive control flag matching using Locale.ROOT (not default
+    // locale). Alternative: Exact case match per JAAS spec. Rationale: Lenient parsing
+    // reduces misconfiguration errors; JAAS spec allows case-insensitive matching.
+    // Uses Locale.ROOT to avoid the Turkish-I locale-sensitivity problem.
     private LoginModuleControlFlag loginModuleControlFlag(String flag) {
         if (flag == null)
             throw new IllegalArgumentException("Login module control flag is not available in the JAAS config");
@@ -104,12 +141,27 @@ class JaasConfig extends Configuration {
         return controlFlag;
     }
 
+    // SECURITY: (MEDIUM) Parses one login module entry from the token stream. The login
+    // module class name (tokenizer.sval at entry) comes directly from the config string
+    // without class-name validation — class loading is deferred to JAAS runtime. A crafted
+    // class name could reference any class on the classpath. Post-parse validation occurs
+    // in JaasContext.throwIfLoginModuleIsNotAllowed().
+    //
+    // COMPLEXITY: ~17 lines — Linear token consumption with 3 phases: (1) Read login
+    // module class name (current token), (2) Read control flag (next token), (3) Loop
+    // reading key=value pairs until ';' or EOF. Error paths: EOF before control flag,
+    // missing '=' in options, EOF before option value, missing terminating ';'. All
+    // errors throw IllegalArgumentException with descriptive messages.
     private AppConfigurationEntry parseAppConfigurationEntry(StreamTokenizer tokenizer) throws IOException {
         String loginModule = tokenizer.sval;
         if (tokenizer.nextToken() == StreamTokenizer.TT_EOF)
             throw new IllegalArgumentException("Login module control flag not specified in JAAS config");
         LoginModuleControlFlag controlFlag = loginModuleControlFlag(tokenizer.sval);
         Map<String, String> options = new HashMap<>();
+        // SECURITY: Key=value option parsing. Option values are read as raw
+        // StreamTokenizer tokens. Values containing special characters ('=', ';')
+        // must be quoted per JAAS syntax. Unquoted values terminate at whitespace,
+        // which could cause option value truncation if not properly quoted.
         while (tokenizer.nextToken() != StreamTokenizer.TT_EOF && tokenizer.ttype != ';') {
             String key = tokenizer.sval;
             if (tokenizer.nextToken() != '=' || tokenizer.nextToken() == StreamTokenizer.TT_EOF || tokenizer.sval == null)
