@@ -30,6 +30,20 @@ import javax.security.auth.callback.CallbackHandler;
  *
  * @see JwtValidator#validate(String)
  */
+// DECISION: Extends KafkaException (unchecked) rather than checked exception. Alternative:
+// Extend SecurityException. Rationale: JwtValidator.validate() declares this as thrown,
+// but it needs to propagate through CallbackHandler.handle() which only declares IOException
+// and UnsupportedCallbackException. Using KafkaException (RuntimeException) allows it to
+// propagate without modifying the JAAS Callback interface contract.
+// Risk: Must be caught explicitly by callback handlers — uncaught instances will terminate
+// the SASL handshake with an opaque error.
+//
+// CROSS-CUTTING: Thrown by BrokerJwtValidator (jose4j validation failures — expired tokens,
+// invalid signatures, missing claims), ClientJwtValidator (structural parsing failures),
+// and DefaultJwtValidator (delegation to either). Caught by OAuthBearerValidatorCallbackHandler
+// and OAuthBearerLoginCallbackHandler which translate it to callback error responses.
+// Contract: Exception message may be logged server-side but should NOT be returned to
+// the client in SASL error responses (to prevent information leakage about validation logic).
 public class JwtValidatorException extends KafkaException {
 
     public JwtValidatorException(String message) {
