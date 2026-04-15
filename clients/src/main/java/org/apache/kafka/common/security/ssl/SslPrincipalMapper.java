@@ -25,8 +25,38 @@ import java.util.regex.Pattern;
 
 import static org.apache.kafka.common.config.internals.BrokerSecurityConfigs.DEFAULT_SSL_PRINCIPAL_MAPPING_RULES;
 
+// SECURITY: (MEDIUM) Maps X.509 Distinguished Names (DNs) to Kafka principal names using
+// configurable regex rules. This is a critical component in the SSL authentication pipeline
+// that determines the identity used for all subsequent ACL evaluations.
+// Why: The regex-based mapping rules are configured via ssl.principal.mapping.rules and
+// compiled at broker startup. DN-to-principal mapping directly controls identity resolution.
+// Exploit: ReDoS attack -- if mapping rules contain complex regex patterns with catastrophic
+// backtracking potential (e.g., nested quantifiers like (a+)+ or overlapping alternations),
+// a crafted DN could cause the broker's authentication thread to hang during regex matching,
+// effectively creating a Denial-of-Service condition. Additionally, if the regex replacement
+// contains unvalidated backreference patterns, unexpected substitutions could produce
+// incorrect principal names that match different ACL entries than intended.
+// Improvement: Consider validating regex patterns at configuration time with complexity bounds
+// (e.g., reject patterns with nested quantifiers) or use a non-backtracking regex engine.
+// Also consider adding a timeout for regex execution to prevent ReDoS.
+// DECISION: Rule-based DN mapping with regex matching -- same pattern as KerberosShortNamer
+// for consistency across authentication mechanisms. Alternative: LDAP-style DN component
+// extraction (e.g., extract CN directly). Rationale: Regex rules provide maximum flexibility
+// for diverse certificate DN formats across organizations. The DEFAULT rule returns the full
+// DN as-is, while RULE: patterns enable component extraction and case normalization (L/U flags).
 public class SslPrincipalMapper {
+    // CROSS-CUTTING: Instantiated by authenticator/DefaultKafkaPrincipalBuilder to map SSL
+    // certificate DNs to Kafka principal names. Configured via BrokerSecurityConfigs
+    // .SSL_PRINCIPAL_MAPPING_RULES_CONFIG. Consumes DEFAULT_SSL_PRINCIPAL_MAPPING_RULES from
+    // config/internals/BrokerSecurityConfigs. The resulting principal name flows into
+    // KafkaPrincipal and is used by metadata/authorizer/StandardAuthorizer for ACL evaluation.
+    // Contract: Thread-safe after construction (all state is immutable). The getName() method
+    // may be called concurrently from multiple authentication threads.
 
+    // SECURITY: (LOW) Compiled regex patterns for rule parsing. These patterns are applied to
+    // the rule configuration string, not to client-supplied DNs. The DN matching uses the
+    // per-rule regex pattern (compiled in Rule constructor). RULE_PATTERN handles the
+    // DEFAULT|RULE:pattern/replacement/flags syntax with escaped delimiters.
     private static final String RULE_PATTERN = "(DEFAULT)|RULE:((\\\\.|[^\\\\/])*)/((\\\\.|[^\\\\/])*)/([LU]?).*?|(.*?)";
     private static final Pattern RULE_SPLITTER = Pattern.compile("\\s*(" + RULE_PATTERN + ")\\s*(,\\s*|$)");
     private static final Pattern RULE_PARSER = Pattern.compile(RULE_PATTERN);
@@ -37,6 +67,8 @@ public class SslPrincipalMapper {
         this.rules = parseRules(splitRules(sslPrincipalMappingRules));
     }
 
+    // DECISION: Static factory pattern alongside public constructor. Rationale: fromRules()
+    // provides a semantic name that clarifies the parameter is a rules string, not a DN.
     public static SslPrincipalMapper fromRules(String sslPrincipalMappingRules) {
         return new SslPrincipalMapper(sslPrincipalMappingRules);
     }
@@ -80,6 +112,11 @@ public class SslPrincipalMapper {
         return result;
     }
 
+    // SECURITY: (MEDIUM) Main entry point for DN-to-principal mapping. The resulting principal
+    // name is used as the KafkaPrincipal identity for ALL authorization decisions. An incorrect
+    // mapping (due to misconfigured rules or regex edge cases) could grant a client the
+    // permissions of a different principal. Throws NoMatchingRule if no rule matches -- this
+    // fails-closed, preventing unauthenticated access when rules are misconfigured.
     public String getName(String distinguishedName) throws IOException {
         for (Rule r : rules) {
             String principalName = r.apply(distinguishedName);
@@ -101,6 +138,10 @@ public class SslPrincipalMapper {
         }
     }
 
+    // DECISION: Inner Rule class encapsulates per-rule regex state (compiled Pattern, replacement,
+    // case flags). Alternative: Store rules as raw strings and recompile on each getName() call.
+    // Rationale: Pre-compiling regex patterns at construction time amortizes compilation cost
+    // across all DN lookups -- critical for high-connection-rate brokers.
     private static class Rule {
         private static final Pattern BACK_REFERENCE_PATTERN = Pattern.compile("\\$(\\d+)");
 
@@ -152,6 +193,18 @@ public class SslPrincipalMapper {
         //than attempting to use it as a back reference.
         //This method was taken from Apache Nifi project : org.apache.nifi.authorization.util.IdentityMappingUtil
         private String escapeLiteralBackReferences(final String unescaped, final int numCapturingGroups) {
+            /* COMPLEXITY: 35 lines -- Backreference escape logic adapted from Apache NiFi.
+             * Structure: Iterates over all regex backreference patterns ($N) in replacement
+             * string. For each backreference:
+             *   1. Skip $0 (refers to entire match, always valid)
+             *   2. Parse the numeric index
+             *   3. If index exceeds group count, truncate digits (e.g., $123 -> $12 -> $1)
+             *   4. If still exceeds, escape the $ as literal (\$) to prevent regex errors
+             * Key paths: (a) numCapturingGroups==0 -> return unescaped (early exit),
+             * (b) all refs valid -> return unescaped, (c) invalid refs -> escaped with \$
+             * This method prevents java.util.regex from throwing IndexOutOfBoundsException
+             * on backreferences that exceed the number of capturing groups.
+             */
             if (numCapturingGroups == 0) {
                 return unescaped;
             }
