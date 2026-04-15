@@ -30,7 +30,15 @@ import java.util.Map;
  * Kafka provides a few implementations to display records of internal topics such as __consumer_offsets,
  * __transaction_state and the MirrorMaker2 topics.
  *
+ * @implNote DECISION: Three-method lifecycle interface (configure, writeTo, close) that extends
+ * Configurable for consistent Kafka plugin initialization. Alternative: Single format(record)
+ * method returning String. Rationale: PrintStream-based writeTo avoids String allocation for each
+ * record in high-throughput console consumer scenarios; Closeable lifecycle enables resource cleanup
+ * (e.g., schema registry connections).
  */
+// CROSS-CUTTING: Plugin interface implemented by tools/DefaultMessageFormatter,
+// tools/LoggingMessageFormatter, and custom user implementations. Loaded via reflection in
+// kafka-console-consumer tool.
 public interface MessageFormatter extends Configurable, Closeable {
 
     /**
@@ -39,6 +47,9 @@ public interface MessageFormatter extends Configurable, Closeable {
      */
     default void configure(Map<String, ?> configs) {}
 
+    // DECISION: ConsumerRecord<byte[], byte[]> parameter provides raw bytes — formatters can
+    // apply custom deserialization without being coupled to Serde configuration. The boolean
+    // previousRecordWasNull parameter enables formatters to output separators between non-null records.
     /**
      * Parses and formats a record for display
      * @param consumerRecord the record to format
