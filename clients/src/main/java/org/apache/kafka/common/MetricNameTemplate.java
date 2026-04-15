@@ -27,7 +27,15 @@ import java.util.Set;
  * are omitted from the template, but are filled in at runtime with their
  * specified values. The order of the tags is maintained, if an ordered set
  * is provided, so that the mBean names can be compared and sorted lexicographically.
+ *
+ * @implNote DECISION: LinkedHashSet for tags preserves insertion order for consistent JMX
+ * naming across restarts. Alternative: HashSet. Rationale: Deterministic tag ordering ensures
+ * JMX MBean names are stable, enabling monitoring systems to track metrics across broker
+ * restarts.
  */
+// CROSS-CUTTING: Used by all metric-producing classes across clients/, streams/, connect/
+// to define metric schemas. Templates are registered in Metrics.java and validated against
+// MetricName instances at runtime.
 public class MetricNameTemplate {
     private final String name;
     private final String group;
@@ -62,6 +70,8 @@ public class MetricNameTemplate {
         this(name, group, description, getTags(tagsNames));
     }
 
+    // DECISION: Validates no duplicate tag keys at construction time rather than at metric
+    // registration -- fail-fast prevents hard-to-debug duplicate MBean issues.
     private static LinkedHashSet<String> getTags(String... keys) {
         LinkedHashSet<String> tags = new LinkedHashSet<>();
 
