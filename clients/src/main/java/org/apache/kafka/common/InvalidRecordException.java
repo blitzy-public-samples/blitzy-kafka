@@ -18,6 +18,12 @@ package org.apache.kafka.common;
 
 import org.apache.kafka.common.errors.InvalidConfigurationException;
 
+/**
+ * @implNote DECISION: Placed in common/ (not common/errors/) — used by the record layer (common/record/)
+ * for validation during record construction. Moving would break backward-compatible exception handling.
+ */
+// DECISION: Extends InvalidConfigurationException (an ApiException) — places record validation in the
+// protocol error hierarchy. Alternative: Extend KafkaException directly to isolate from API errors.
 public class InvalidRecordException extends InvalidConfigurationException {
 
     private static final long serialVersionUID = 1;
