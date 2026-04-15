@@ -22,6 +22,15 @@ import java.util.Map;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
+// CROSS-CUTTING: Used by group-coordinator/ to dispatch to appropriate group protocol handler,
+// by clients/admin/ for group type filtering, and by GroupState.groupStatesForType() to determine
+// valid states per type.
+/**
+ * @implNote DECISION: Four group types (CLASSIC, CONSUMER, SHARE, STREAMS) reflect the evolution
+ * of Kafka's group coordination protocols. CLASSIC represents the original JoinGroup/SyncGroup
+ * protocol; CONSUMER (KIP-848) adds server-side assignment; SHARE (KIP-932) enables shared
+ * consumption; STREAMS supports Kafka Streams-specific coordination.
+ */
 public enum GroupType {
     UNKNOWN("Unknown"),
     CONSUMER("Consumer"),
@@ -41,6 +50,8 @@ public enum GroupType {
     /**
      * Parse a string into a consumer group type, in a case-insensitive manner.
      */
+    // DECISION: Returns UNKNOWN for unrecognized type strings -- consistent with
+    // GroupState.parse() graceful degradation for forward compatibility.
     public static GroupType parse(String name) {
         if (name == null) {
             return UNKNOWN;
