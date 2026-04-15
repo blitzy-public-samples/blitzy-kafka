@@ -16,14 +16,51 @@
  */
 package org.apache.kafka.common.security;
 
+/**
+ * Constants for JAAS configuration across the Kafka security package.
+ *
+ * @implNote DECISION: Constants centralized in a non-instantiable utility class
+ * rather than distributed across JaasConfig and JaasContext. Alternative: Define
+ * constants in their respective consuming classes. Rationale: These system property
+ * names are used by both JaasConfig (for parsing) and JaasContext (for validation),
+ * and may be referenced by operators configuring JVM args -- a single location makes
+ * them discoverable and prevents drift between consumers.
+ */
+// CROSS-CUTTING: Constants consumed by JaasConfig (parsing), JaasContext
+// (validation/loading), KerberosLogin (service name), and indirectly by
+// all SASL mechanism implementations. Also referenced by operators setting
+// JVM system properties (-Djava.security.auth.login.config, etc.).
+// Impact: Changing any constant name here breaks system property contracts
+// with existing deployment scripts and documentation.
 public final class JaasUtils {
+    // SECURITY: (MEDIUM) Points to the system-wide JAAS configuration file.
+    // If this file is writable by unauthorized users, any login module can
+    // be injected. Improvement: Document that this file should have restrictive
+    // file permissions (e.g., 600) in production deployments.
     public static final String JAVA_LOGIN_CONFIG_PARAM = "java.security.auth.login.config";
+    // SECURITY: (HIGH) Deprecated denylist approach -- dangerous because it
+    // only blocks known-bad modules, allowing unknown/new dangerous modules
+    // through. The allowlist (ALLOWED_LOGIN_MODULES_CONFIG) is preferred.
     @Deprecated(since = "4.2")
     public static final String DISALLOWED_LOGIN_MODULES_CONFIG = "org.apache.kafka.disallowed.login.modules";
+    // SECURITY: (HIGH) Allowlist system property for login modules.
+    // When set, ONLY listed modules can be loaded -- defense-in-depth
+    // against arbitrary class loading via JAAS config injection.
+    // Improvement: Consider making the allowlist a broker config
+    // (not just system property) for easier management.
     public static final String ALLOWED_LOGIN_MODULES_CONFIG = "org.apache.kafka.allowed.login.modules";
+    // SECURITY: (HIGH) Default denylist blocks JndiLoginModule and
+    // LdapLoginModule which are known JNDI injection vectors (CVE-2023-25194).
+    // These modules allow LDAP/RMI URL injection leading to remote code
+    // execution. The denylist is not exhaustive -- other dangerous modules
+    // may exist on the classpath. Prefer allowlist approach.
     @Deprecated(since = "4.2")
     public static final String DISALLOWED_LOGIN_MODULES_DEFAULT =
             "com.sun.security.auth.module.JndiLoginModule,com.sun.security.auth.module.LdapLoginModule";
+    // DECISION: Kerberos service name key shared between JAAS config options
+    // and SaslConfigs. Used by KerberosLogin to extract the service principal
+    // component. Kept here rather than in kerberos/ package because it appears
+    // in JAAS config entries which are parsed at this package level.
     public static final String SERVICE_NAME = "serviceName";
 
     private JaasUtils() {}
