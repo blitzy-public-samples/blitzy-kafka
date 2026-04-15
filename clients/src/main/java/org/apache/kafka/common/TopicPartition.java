@@ -21,10 +21,27 @@ import java.util.Objects;
 
 /**
  * A topic name and partition number
+ *
+ * @implNote DECISION: Immutable Serializable value type serving as the canonical partition
+ * identity key across the entire Kafka ecosystem. Alternative: {@code Pair<String, Integer>}.
+ * Rationale: First-class type enables type-safe APIs and domain-specific semantics. Implements
+ * Serializable for RPC/serialization frameworks. Does NOT implement Comparable — ordering is
+ * not required for partition identity.
  */
 public final class TopicPartition implements Serializable {
+    // CROSS-CUTTING: THE most widely-used type in Kafka — present in virtually every module:
+    // Cluster partition indexing, producer batching (RecordAccumulator), consumer assignment
+    // (SubscriptionState, ConsumerCoordinator), offset management, replication (ReplicaManager,
+    // Partition), coordinator state, storage (Log, LogSegment), metadata (PartitionRegistration),
+    // and streams task identity. Any change to this class affects the entire codebase.
+
+    // DECISION: Explicit serialVersionUID for binary compatibility across Kafka versions when
+    // TopicPartition is serialized (e.g., in RPC frameworks, test fixtures).
     private static final long serialVersionUID = -613627415771699627L;
 
+    // DECISION: Lazy-cached hashCode with benign race pattern (same as Node). Initial value 0
+    // serves as "not computed" sentinel. This is performance-critical — TopicPartition is the
+    // most common map key in Kafka (used in millions of partition-to-X lookups).
     private int hash = 0;
     private final int partition;
     private final String topic;
@@ -42,6 +59,9 @@ public final class TopicPartition implements Serializable {
         return topic;
     }
 
+    // DECISION: Prime-based hash combining partition (int) and topic (String). Does not use
+    // Objects.hash() to avoid autoboxing partition to Integer in the varargs call — important
+    // for GC pressure reduction at scale.
     @Override
     public int hashCode() {
         if (hash != 0)
