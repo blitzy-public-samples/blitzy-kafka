@@ -23,8 +23,16 @@ import java.util.Optional;
 
 /**
  * Represents a broker endpoint.
+ *
+ * @implNote DECISION: Represents a broker listener endpoint with four fields (listener,
+ * securityProtocol, host, port). Alternative: Use InetSocketAddress + SecurityProtocol pair.
+ * Rationale: Named listener support (KIP-103) requires the listener name to be carried
+ * alongside the socket address — this enables multiple listeners on the same broker with
+ * different security protocols.
  */
-
+// CROSS-CUTTING: Used by server/authorizer/AuthorizerServerInfo to expose broker endpoints
+// to Authorizer plugins, and by core/BrokerServer for listener configuration. Also used in
+// InterBrokerSendThread for inter-broker communication endpoint resolution.
 public class Endpoint {
 
     private final String listener;
@@ -51,6 +59,8 @@ public class Endpoint {
      * to broker plugins, but may be empty when used in clients.
      * @deprecated Since 4.1. Use {@link #listener()} instead. This function will be removed in 5.0.
      */
+    // DECISION: Returns Optional rather than nullable to encourage safe access patterns.
+    // The listener name may be absent for legacy clients that don't support named listeners.
     @Deprecated(since = "4.1", forRemoval = true)
     public Optional<String> listenerName() {
         return Optional.ofNullable(listener);
