@@ -37,11 +37,22 @@ import java.util.concurrent.TimeoutException;
  * {@link CompletableFuture#thenApply(java.util.function.Function)} be aware that the returned
  * {@code KafkaFuture} will fail with an {@code ExecutionException}, whereas a {@code CompletionStage} fails
  * with a {@code CompletionException}.
+ *
+ * @implNote DECISION: Custom future abstraction (KafkaFuture) instead of CompletableFuture directly.
+ * Alternative: Use {@code CompletableFuture<T>} as the public API type. Rationale: KafkaFuture
+ * predates Java 8's widespread adoption in Kafka's public API; it wraps CompletionStage semantics
+ * while maintaining ExecutionException (not CompletionException) for backward compatibility with
+ * pre-existing error handling patterns. Cannot remove without breaking public API.
  */
+// CROSS-CUTTING: Primary async return type for AdminClient API (clients/admin/KafkaAdminClient).
+// All admin operations (createTopics, describeConfigs, listConsumerGroups, etc.) return KafkaFuture
+// or derivatives. Also consumed by Connect framework for async connector operations.
 public abstract class KafkaFuture<T> implements Future<T> {
     /**
      * A function which takes objects of type A and returns objects of type B.
      */
+    // DECISION: Custom functional interface rather than java.util.function.Function to maintain
+    // binary compatibility with clients compiled before Java 8 function types were stable in Kafka API.
     @FunctionalInterface
     public interface BaseFunction<A, B> {
         B apply(A a);
@@ -50,6 +61,7 @@ public abstract class KafkaFuture<T> implements Future<T> {
     /**
      * A consumer of two different types of object.
      */
+    // DECISION: Custom BiConsumer for same backward-compatibility reason as BaseFunction.
     @FunctionalInterface
     public interface BiConsumer<A, B> {
         void accept(A a, B b);
@@ -69,6 +81,8 @@ public abstract class KafkaFuture<T> implements Future<T> {
      * any future throws an exception, the returned future returns it.  If multiple futures throw
      * an exception, which one gets returned is arbitrarily chosen.
      */
+    // DECISION: Follows CompletableFuture.allOf() semantics -- completes when all futures complete.
+    // Implemented via KafkaFutureImpl to preserve exception wrapping contract.
     public static KafkaFuture<Void> allOf(KafkaFuture<?>... futures) {
         KafkaFutureImpl<Void> result = new KafkaFutureImpl<>();
         CompletableFuture.allOf(Arrays.stream(futures)
@@ -107,6 +121,8 @@ public abstract class KafkaFuture<T> implements Future<T> {
      *
      * @since Kafka 3.0
      */
+    // DECISION: Bridge method to standard CompletionStage added to enable modern async patterns
+    // (thenCompose, thenCombine) without breaking the KafkaFuture API contract.
     public abstract CompletionStage<T> toCompletionStage();
 
     /**
