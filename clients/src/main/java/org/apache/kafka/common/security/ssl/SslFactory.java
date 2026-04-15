@@ -53,7 +53,36 @@ import javax.net.ssl.SSLEngine;
 import javax.net.ssl.SSLEngineResult;
 import javax.net.ssl.SSLException;
 
+// SECURITY: (HIGH) Dynamic certificate rotation with atomic swap window (KIP-226).
+// Why: SslFactory supports runtime SSL reconfiguration — when certificates are
+// rotated, a new SslEngineFactory is created and atomically swapped for the old
+// one via reconfigure(). During the brief swap window, old and new factories coexist.
+// Exploit: During the atomic swap window, a client presenting a certificate valid
+// under the old CA but not the new CA could still authenticate if a connection was
+// initiated just before the swap completes. The old SslEngineFactory reference
+// remains in use for in-progress handshakes. Conversely, legitimate clients
+// presenting new certs could be rejected if their handshake started before the
+// swap but completed after.
+// Improvement: Consider a dual-validation approach during rotation that accepts
+// certificates valid under either old or new CA during a configurable transition
+// period. Also consider adding a metric for connections using the old factory.
+
+// DECISION: Implements Reconfigurable for hot-reload without broker restart.
+// Alternative: Require broker restart for certificate rotation. Rationale: In
+// production, certificate rotation is frequent (e.g., 90-day cert lifetimes) and
+// requiring restarts would cause availability impact. The volatile reference swap
+// pattern (reconfigure() replaces this.sslEngineFactory) provides thread-safe
+// factory replacement.
 public class SslFactory implements Reconfigurable, Closeable {
+    // CROSS-CUTTING: Central SSL lifecycle manager consumed by
+    // common/network/SslChannelBuilder for creating SSL channels on every new
+    // connection. Also consumed by core/DynamicBrokerConfig for runtime
+    // reconfiguration of SSL certificates. Depends on: auth/SslEngineFactory
+    // (plugin interface), common/Reconfigurable (reconfiguration lifecycle),
+    // common/config/SslConfigs (SSL configuration keys). The sslEngineFactory
+    // field is read by SslChannelBuilder on every new connection — the
+    // volatile-like semantics of the reconfigure() swap ensure visibility.
+
     private static final Logger log = LoggerFactory.getLogger(SslFactory.class);
 
     private final ConnectionMode connectionMode;
@@ -123,6 +152,12 @@ public class SslFactory implements Reconfigurable, Closeable {
         }
     }
 
+    // DECISION: Atomic swap of SslEngineFactory reference — new connections use
+    // new factory, existing connections continue with the SSLEngine they already
+    // created. Alternative: Close all existing connections and force reconnection.
+    // Rationale: Closing existing connections would cause a brief outage during
+    // rotation; the swap approach is zero-downtime. The old factory is closed only
+    // after the swap (Utils.closeQuietly).
     @Override
     public void reconfigure(Map<String, ?> newConfigs) throws KafkaException {
         SslEngineFactory newSslEngineFactory = createNewSslEngineFactory(newConfigs);
@@ -134,6 +169,11 @@ public class SslFactory implements Reconfigurable, Closeable {
         }
     }
 
+    // SECURITY: (MEDIUM) Reflective instantiation of SslEngineFactory
+    // implementations. The factory class is configured via
+    // SSL_ENGINE_FACTORY_CLASS_CONFIG. If this config is writable by untrusted
+    // users, a malicious class could be loaded that weakens TLS. The default
+    // fallback to DefaultSslEngineFactory is safe; custom factories require trust.
     private SslEngineFactory instantiateSslEngineFactory(Map<String, Object> configs) {
         @SuppressWarnings("unchecked")
         Class<? extends SslEngineFactory> sslEngineFactoryClass =
@@ -149,6 +189,21 @@ public class SslFactory implements Reconfigurable, Closeable {
         return sslEngineFactory;
     }
 
+    /* COMPLEXITY: 44 lines — Multi-phase SSL factory reconfiguration with
+     * validation. Control flow:
+     * 1. Check factory is initialized (throw IllegalStateException if not)
+     * 2. Merge new configs with existing configs (only reconfigurable keys)
+     * 3. Apply clientAuth override if configured
+     * 4. Check if factory needs rebuilding (shouldBeRebuilt) — early return
+     * 5. Instantiate new factory with merged configs
+     * 6. Validate keystore presence invariants (can't add/remove keystore)
+     * 7. Validate DN and SAN compatibility (unless explicitly allowed)
+     * 8. Validate truststore presence invariants
+     * 9. Optionally perform bidirectional handshake via SslEngineValidator
+     * Exit paths: (1) not initialized → IllegalStateException, (2) no rebuild
+     * needed → return current factory, (3) validation passes → return new
+     * factory, (4) any validation failure → throw ConfigException
+     */
     private SslEngineFactory createNewSslEngineFactory(Map<String, ?> newConfigs) {
         if (sslEngineFactory == null) {
             throw new IllegalStateException("SslFactory has not been configured.");
@@ -174,6 +229,14 @@ public class SslFactory implements Reconfigurable, Closeable {
                             "which a keystore was configured.");
                 }
 
+                // SECURITY: (MEDIUM) Certificate compatibility validation during
+                // reconfiguration. By default (ssl.allow.dn.changes=false,
+                // ssl.allow.san.changes=false), the new certificate must have
+                // the same DN and SANs as the old one. This prevents an
+                // operator from accidentally (or maliciously) rotating to a
+                // cert with a different identity, which could break
+                // inter-broker authentication or change the broker's identity
+                // in ACL checks.
                 boolean allowDnChanges = ConfigUtils.getBoolean(nextConfigs, BrokerSecurityConfigs.SSL_ALLOW_DN_CHANGES_CONFIG, BrokerSecurityConfigs.DEFAULT_SSL_ALLOW_DN_CHANGES_VALUE);
                 boolean allowSanChanges = ConfigUtils.getBoolean(nextConfigs, BrokerSecurityConfigs.SSL_ALLOW_SAN_CHANGES_CONFIG, BrokerSecurityConfigs.DEFAULT_SSL_ALLOW_SAN_CHANGES_VALUE);
 
@@ -295,6 +358,12 @@ public class SslFactory implements Reconfigurable, Closeable {
         Utils.closeQuietly(sslEngineFactory, "close engine factory");
     }
 
+    // DECISION: CertificateEntries validates DN/SAN compatibility between old
+    // and new keystores. Uses canonical Principal comparison (Objects.equals)
+    // with fallback to RFC2253 name comparison (getName().equalsIgnoreCase) to
+    // handle encoding differences between certificate providers. This dual
+    // comparison prevents false positives from tag encoding differences
+    // (printable string vs UTF-8 representations of the same DN).
     static class CertificateEntries {
         private final String alias;
         private final Principal subjectPrincipal;
@@ -396,6 +465,12 @@ public class SslFactory implements Reconfigurable, Closeable {
         }
     }
 
+    // SECURITY: (MEDIUM) Simulates a full TLS handshake between old and new
+    // SSL engine factories to validate compatibility before committing the
+    // swap. This prevents deploying a new cert/key combination that would
+    // break inter-broker communication. The validation creates both
+    // client→server and server→client handshake pairs to verify bidirectional
+    // compatibility (old-server↔new-client and new-server↔old-client).
     /**
      * Validator used to verify dynamic update of keystore used in inter-broker communication.
      * The validator checks that a successful handshake can be performed using the keystore and
@@ -408,6 +483,10 @@ public class SslFactory implements Reconfigurable, Closeable {
         private ByteBuffer appBuffer;
         private ByteBuffer netBuffer;
 
+        // CROSS-CUTTING: Bidirectional handshake validation — tests both
+        // old-server↔new-client and new-server↔old-client to ensure rolling
+        // certificate updates work in a mixed-version cluster where some
+        // brokers have the old cert and others have the new cert.
         static void validate(SslEngineFactory oldEngineBuilder,
                              SslEngineFactory newEngineBuilder) throws SSLException {
             validate(createSslEngineForValidation(oldEngineBuilder, ConnectionMode.SERVER),
@@ -450,6 +529,21 @@ public class SslFactory implements Reconfigurable, Closeable {
         void beginHandshake() throws SSLException {
             sslEngine.beginHandshake();
         }
+        /* COMPLEXITY: 42 lines — SSLEngine handshake state machine simulation.
+         * Control flow: Infinite loop driven by SSLEngineResult.HandshakeStatus:
+         * - NEED_WRAP: Wrap application data to network buffer; handle
+         *   BUFFER_OVERFLOW by waiting for peer consumption or growing buffer.
+         *   Return after wrap to let peer unwrap.
+         * - NEED_UNWRAP: Delegate to unwrap() with peer's network buffer.
+         *   Return null from unwrap means BUFFER_UNDERFLOW (need more data).
+         * - NEED_TASK: Execute delegated task synchronously, then continue.
+         * - FINISHED: Return — handshake complete.
+         * - NOT_HANDSHAKING: Verify handshake was actually finished. If peer
+         *   has remaining data, unwrap it (e.g., NewSessionTicket in TLS 1.3).
+         *   Throw if not finished.
+         * Key invariant: Buffer growth uses Utils.ensureCapacity to prevent
+         * unbounded allocation.
+         */
         void handshake(SslEngineValidator peerValidator) throws SSLException {
             SSLEngineResult.HandshakeStatus handshakeStatus = sslEngine.getHandshakeStatus();
             while (true) {
