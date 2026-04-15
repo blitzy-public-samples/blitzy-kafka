@@ -53,7 +53,28 @@ import javax.security.auth.x500.X500Principal;
  * These trust managers log the common name of an expired but otherwise valid (client) certificate before rejecting the connection attempt.
  * This allows to identify misconfigured clients in complex network environments, where the IP address is not sufficient.
  */
+// SECURITY: (LOW) CN information leakage in logs.
+// Why: Logs the Common Name (CN) of client certificates during TLS handshake for
+// audit/debugging. This is primarily used to identify clients presenting expired certs.
+// Exploit: If log files are accessible to unauthorized users, the CN information (which
+// may contain usernames, email addresses, or hostnames) could be used for reconnaissance
+// or targeted phishing attacks. Combined with certificate expiry dates from logs, an
+// attacker could time social engineering campaigns around certificate renewal periods.
+// Improvement: Consider making CN logging configurable (off by default in production)
+// and ensuring log files have restrictive permissions. Also consider hashing the CN
+// for log entries to enable correlation without exposing the actual identity.
+//
+// DECISION: Wraps TrustManagerFactory to add logging without modifying trust validation
+// logic. Alternative: Subclass X509TrustManager directly. Rationale: Wrapping at the
+// factory level ensures ALL X509TrustManager instances from the factory get CN logging,
+// regardless of how many trust managers the factory produces. This is less fragile than
+// individual wrapping.
 class CommonNameLoggingTrustManagerFactoryWrapper {
+    // CROSS-CUTTING: Instantiated by CommonNameLoggingSslEngineFactory.getTrustManagers().
+    // Depends on: javax.net.ssl.TrustManagerFactory, javax.net.ssl.X509TrustManager.
+    // The wrapped trust managers are passed to SSLContext.init() and participate in every
+    // TLS handshake on the configured listener. Logging output goes to SLF4J (info level)
+    // for the CommonNameLoggingTrustManagerFactoryWrapper category.
 
     private static final Logger log = LoggerFactory.getLogger(CommonNameLoggingTrustManagerFactoryWrapper.class);
 
@@ -89,6 +110,10 @@ class CommonNameLoggingTrustManagerFactoryWrapper {
         this.origTmf.init(ts);
     }
 
+    // DECISION: Wraps ONLY X509TrustManager instances, passing other TrustManager types
+    // through unchanged. Rationale: CN extraction is only meaningful for X.509
+    // certificate-based auth. Non-X509 trust managers (e.g., JSSE internal types) are left
+    // untouched to avoid breaking any custom trust manager implementations.
     public TrustManager[] getTrustManagers() {
         TrustManager[] origTrustManagers = this.origTmf.getTrustManagers();
         TrustManager[] wrappedTrustManagers = new TrustManager[origTrustManagers.length];
@@ -120,6 +145,11 @@ class CommonNameLoggingTrustManagerFactoryWrapper {
         public CommonNameLoggingTrustManager(X509TrustManager originalTrustManager, int nrOfRememberedBadCerts) {
             this.origTm = originalTrustManager;
             this.nrOfRememberedBadCerts = nrOfRememberedBadCerts;
+            // SECURITY: (LOW) LRU cache bounded to nrOfRememberedBadCerts entries (~2000
+            // default) to prevent memory exhaustion attacks. Without this bound, an attacker
+            // could flood connections with unique invalid certificates, causing unbounded
+            // HashMap growth and OOM. The LinkedHashMap with removeEldestEntry provides
+            // O(1) eviction of oldest entries.
             // Restrict maximal size of the LinkedHashMap to avoid security attacks causing OOM
             this.previouslyRejectedClientCertChains = new LinkedHashMap<>() {
                 @Override
@@ -133,9 +163,29 @@ class CommonNameLoggingTrustManagerFactoryWrapper {
             return this.origTm;
         }
 
+        // SECURITY: (MEDIUM) Client certificate validation with expiry-aware logging.
+        // This method first checks the LRU cache for previously rejected cert chains
+        // (fast-path rejection), then delegates to the original trust manager. If
+        // validation fails, it re-validates with a NeverExpiringX509Certificate wrapper
+        // to determine if expiry was the sole failure cause. This two-phase validation
+        // approach ensures original security semantics are preserved -- the original
+        // CertificateException is always rethrown regardless of the expiry check result.
         @Override
         public void checkClientTrusted(X509Certificate[] chain, String authType)
                 throws CertificateException {
+            /* COMPLEXITY: 41 lines -- Multi-phase certificate validation with caching.
+             * Control flow:
+             * 1. Compute SHA-256 digest of the cert chain for cache lookup
+             * 2. Check LRU cache for previously rejected chains (fast-path rejection)
+             * 3. Delegate to original trust manager for full validation
+             * 4. On failure: Re-validate with NeverExpiringX509Certificate wrapper
+             *    - If re-validation succeeds: expiry was only failure -> log CN, cache
+             *    - If re-validation fails: other issues -> cache rejection for fast-path
+             * 5. Always rethrow original exception if initial validation failed
+             * Exit paths: (1) Cache hit -> throw cached exception,
+             * (2) Validation success -> return,
+             * (3) Validation failure -> log if expired, then throw original exception
+             */
             CertificateException origException = null;
             ByteBuffer chainDigest = calcDigestForCertificateChain(chain);
             if (chainDigest != null) {
@@ -177,6 +227,10 @@ class CommonNameLoggingTrustManagerFactoryWrapper {
             }
         }
 
+        // SECURITY: (LOW) Uses SHA-256 for cert chain fingerprinting -- collision-resistant
+        // and computationally efficient. The digest is used as a cache key, not for security
+        // decisions; a collision would only cause a misleading cached error message, not a
+        // security bypass.
         public static ByteBuffer calcDigestForCertificateChain(X509Certificate[] chain) throws CertificateEncodingException {
             MessageDigest md;
             try {
@@ -215,6 +269,20 @@ class CommonNameLoggingTrustManagerFactoryWrapper {
          * @throws CertificateException
          */
         public static X509Certificate[] sortChainAnWrapEndCertificate(X509Certificate[] origChain) throws CertificateException {
+            /* COMPLEXITY: 50 lines -- Certificate chain sorting and end-entity wrapping.
+             * Control flow:
+             * 1. Build two maps: subject->cert and issuer->cert for chain traversal
+             * 2. Detect self-signed certs (subject == issuer), validate CA constraint
+             * 3. Find end certs (certs whose subject is not another cert's issuer)
+             * 4. Validate exactly one end certificate exists
+             * 5. Wrap end cert in NeverExpiringX509Certificate for expiry-blind check
+             * 6. Build sorted chain by following issuer->subject links
+             * Exit paths: (1) null/empty chain -> CertificateException,
+             * (2) self-signed non-CA -> CertificateException,
+             * (3) multiple end certs -> CertificateException,
+             * (4) broken chain -> CertificateException,
+             * (5) success -> sorted wrapped chain
+             */
             if (origChain == null || origChain.length < 1) {
                 throw new CertificateException("Certificate chain is null or empty");
             }
@@ -267,6 +335,12 @@ class CommonNameLoggingTrustManagerFactoryWrapper {
         }
     }
 
+    // DECISION: NeverExpiringX509Certificate overrides checkValidity() to suppress expiry
+    // checks. Alternative: Use a custom TrustManager that ignores CertificateExpiredException.
+    // Rationale: Wrapping the certificate preserves the original trust manager's full
+    // validation pipeline (signature verification, chain building, revocation checking) --
+    // only the date check is suppressed. This approach is more surgical than replacing the
+    // entire trust manager.
     static class NeverExpiringX509Certificate extends X509Certificate {
 
         private final X509Certificate origCertificate;
