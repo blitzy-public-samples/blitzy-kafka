@@ -46,9 +46,28 @@ import javax.security.auth.Subject;
  *
  * See <a href="https://issues.apache.org/jira/browse/KAFKA-14062">KAFKA-14062</a> for more detail.
  */
+// SECURITY: (MEDIUM) SASL extension key-value pairs carried alongside authentication.
+// Why: Extensions are transmitted in the initial SASL client message and propagated through
+// the auth pipeline. They can influence downstream behavior such as quota assignment,
+// principal enrichment, or custom authorization decisions.
+// Exploit: If extension keys/values are not validated by the callback handler or authenticator,
+// a malicious client could inject unexpected keys (e.g., mimicking internal extension names)
+// to influence quota assignments, bypass rate limits, or manipulate audit log entries.
+// Improvement: Consider validating extension keys against an allowed set in the authenticator
+// before propagating them. Also consider size limits on extension values to prevent
+// memory exhaustion from oversized extension payloads in the SASL exchange.
 public class SaslExtensions {
+    // CROSS-CUTTING: Consumed by SaslExtensionsCallback (this package) for JAAS callback transport,
+    // by authenticator/SaslServerAuthenticator for extracting client extensions post-auth,
+    // by oauthbearer/OAuthBearerLoginCallbackHandler for attaching token extensions.
+    // Stored in javax.security.auth.Subject.getPublicCredentials() during SASL login lifecycle.
+    // Contract: Immutable after construction. Identity-based equality for Subject credential storage.
     private final Map<String, String> extensionsMap;
 
+    // DECISION: Uses Map.copyOf() for defensive copy — ensures immutability after construction.
+    // Alternative: Store reference directly (cheaper) or use Collections.unmodifiableMap(new HashMap<>(...)).
+    // Rationale: Map.copyOf() rejects null keys/values and creates a truly unmodifiable snapshot,
+    // preventing callers from modifying the extensions after construction via the original map reference.
     public SaslExtensions(Map<String, String> extensionsMap) {
         this.extensionsMap = Map.copyOf(extensionsMap);
     }
@@ -88,6 +107,10 @@ public class SaslExtensions {
      * @param o Other object to compare
      * @return True if <code>o == this</code>
      */
+    // DECISION: Identity-based equals/hashCode (delegates to Object) rather than value-based.
+    // This is critical for Subject.getPublicCredentials() Set storage — see KAFKA-14062.
+    // Without identity semantics, token refresh would fail to add new SaslExtensions
+    // instances to the Subject when the extension map values are identical.
     @Override
     public final boolean equals(Object o) {
         return super.equals(o);
