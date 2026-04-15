@@ -31,7 +31,16 @@ import java.util.Set;
 
 /**
  * An immutable representation of a subset of the nodes, topics, and partitions in the Kafka cluster.
+ *
+ * @implNote DECISION: Immutable indexed snapshot chosen over mutable + synchronization for thread
+ * safety without lock contention. Alternatives: ConcurrentHashMap-based mutable cluster, copy-on-write.
+ * Rationale: Cluster metadata changes infrequently (on metadata refresh) but is read on every
+ * produce/fetch — immutable snapshot gives lock-free reads.
  */
+// CROSS-CUTTING: Core routing type consumed by ALL Kafka client modules (clients/NetworkClient,
+// clients/Metadata, clients/producer/*, clients/consumer/*, clients/admin/*) and transitively by
+// streams/, connect/, and core/ modules. Contract: Immutable after construction; safe for concurrent
+// reads without synchronization.
 public final class Cluster {
 
     private final boolean isBootstrapConfigured;
@@ -44,8 +53,11 @@ public final class Cluster {
     private final Map<String, List<PartitionInfo>> partitionsByTopic;
     private final Map<String, List<PartitionInfo>> availablePartitionsByTopic;
     private final Map<Integer, List<PartitionInfo>> partitionsByNode;
+    // CROSS-CUTTING: Used by NetworkClient.leastLoadedNode() and InFlightRequests for node lookup.
     private final Map<Integer, Node> nodesById;
     private final ClusterResource clusterResource;
+    // CROSS-CUTTING: Bidirectional topic-id mapping consumed by FetchSessionHandler (KIP-227)
+    // and metadata publishers.
     private final Map<String, Uuid> topicIds;
     private final Map<Uuid, String> topicNames;
 
@@ -107,6 +119,13 @@ public final class Cluster {
         this(clusterId, false, nodes, partitions, unauthorizedTopics, invalidTopics, internalTopics, controller, topicIds);
     }
 
+    // COMPLEXITY: 87 lines — Multi-phase immutable snapshot construction with four index-building
+    // stages. Structure: (1) Node indexing with shuffled copy for load balancing, (2) partition-by-
+    // topic-partition indexing, (3) partition-by-node indexing with leader validation, (4) available-
+    // partition filtering with optimization for the common case where all partitions have leaders.
+    // All collections wrapped in unmodifiableMap/List. Key paths: Normal path builds all indexes;
+    // leader=null partitions are skipped in node index; available partitions optimization avoids
+    // allocation when all partitions are available.
     private Cluster(String clusterId,
                     boolean isBootstrapConfigured,
                     Collection<Node> nodes,
@@ -119,6 +138,9 @@ public final class Cluster {
         this.isBootstrapConfigured = isBootstrapConfigured;
         this.clusterResource = new ClusterResource(clusterId);
         // make a randomized, unmodifiable copy of the nodes
+        // DECISION: Nodes are shuffled to distribute load when callers iterate in order (e.g.,
+        // leastLoadedNode). Alternative: round-robin index. Rationale: randomization prevents
+        // thundering herd on first node.
         List<Node> copy = new ArrayList<>(nodes);
         Collections.shuffle(copy);
         this.nodes = Collections.unmodifiableList(copy);
@@ -137,6 +159,8 @@ public final class Cluster {
         // index the partition infos by topic, topic+partition, and node
         // note that this code is performance sensitive if there are a large number of partitions so we are careful
         // to avoid unnecessary work
+        // DECISION: HashMap chosen over TreeMap for O(1) partition lookup. Performance-critical
+        // path — this constructor is called on every metadata update.
         Map<TopicPartition, PartitionInfo> tmpPartitionsByTopicPartition = new HashMap<>(partitions.size());
         Map<String, List<PartitionInfo>> tmpPartitionsByTopic = new HashMap<>();
         for (PartitionInfo p : partitions) {
@@ -165,6 +189,8 @@ public final class Cluster {
             List<PartitionInfo> partitionsForTopic = Collections.unmodifiableList(entry.getValue());
             tmpPartitionsByTopic.put(topic, partitionsForTopic);
             // Optimise for the common case where all partitions are available
+            // DECISION: Optimizes for common case where all partitions have leaders by reusing the
+            // same list. Avoids allocating a filtered copy when no unavailable partitions exist.
             boolean foundUnavailablePartition = partitionsForTopic.stream().anyMatch(p -> p.leader() == null);
             List<PartitionInfo> availablePartitionsForTopic;
             if (foundUnavailablePartition) {
@@ -208,6 +234,8 @@ public final class Cluster {
      * @param addresses The addresses
      * @return A cluster for these hosts/ports
      */
+    // DECISION: Bootstrap creates placeholder Node objects with sequential negative IDs to
+    // distinguish from real brokers. Negative IDs are never valid broker IDs in the protocol.
     public static Cluster bootstrap(List<InetSocketAddress> addresses) {
         List<Node> nodes = new ArrayList<>();
         int nodeId = -1;
@@ -220,6 +248,7 @@ public final class Cluster {
     /**
      * Return a copy of this cluster combined with `partitions`.
      */
+    // DECISION: Returns new Cluster instance rather than mutating — preserves immutability contract.
     public Cluster withPartitions(Map<TopicPartition, PartitionInfo> partitions) {
         Map<TopicPartition, PartitionInfo> combinedPartitions = new HashMap<>(this.partitionsByTopicPartition);
         combinedPartitions.putAll(partitions);
