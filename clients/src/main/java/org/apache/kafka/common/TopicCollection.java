@@ -22,11 +22,23 @@ import java.util.Collections;
 
 /**
  * A class used to represent a collection of topics. This collection may define topics by name or ID.
+ *
+ * @implNote DECISION: Sealed abstract class with two concrete subtypes (TopicIdCollection,
+ * TopicNameCollection) to support dual identification modes during the topic-name-to-topic-id
+ * transition (KIP-516). Alternative: Generic {@code TopicCollection<T>}. Rationale: Explicit
+ * subtypes enable type-safe dispatch in admin operations without instanceof checks — callers
+ * choose ID-based or name-based at call site.
  */
+// CROSS-CUTTING: Consumed by clients/admin/Admin.deleteTopics(), describeTopics(), and other
+// admin operations to specify topics by name or ID.
 public abstract class TopicCollection {
 
+    // DECISION: Private constructor prevents external subclassing — sealed hierarchy ensures
+    // only TopicIdCollection and TopicNameCollection exist.
     private TopicCollection() {}
 
+    // DECISION: Factory methods rather than public constructors for API consistency and to
+    // enable future caching or defensive copying.
     /**
      * @return a collection of topics defined by topic ID
      */
