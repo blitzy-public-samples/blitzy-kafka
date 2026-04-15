@@ -24,6 +24,20 @@ package org.apache.kafka.common.security.auth;
  * interfaces are respected if implemented. Additionally, implementations must provide a
  * default no-arg constructor.
  */
+// DECISION: Factory interface for constructing KafkaPrincipal from AuthenticationContext.
+// Alternative: Direct principal construction inside each authenticator (SaslServerAuthenticator,
+// SslChannelBuilder). Rationale: Pluggable builder enables custom principal mapping (e.g.,
+// extracting principal from custom SSL certificate fields, SASL extensions, or external
+// identity providers) without modifying core authentication logic. Extends KafkaPrincipalSerde
+// to combine build + serialize/deserialize in a single plugin contract.
+//
+// CROSS-CUTTING: Implemented by authenticator/DefaultKafkaPrincipalBuilder (default implementation).
+// Consumed by authenticator/SaslServerAuthenticator and common/network/SslChannelBuilder for
+// post-authentication principal construction. Custom implementations are loaded via reflection
+// from BrokerSecurityConfigs.PRINCIPAL_BUILDER_CLASS_CONFIG.
+// Contract: Implementations MUST provide a public no-arg constructor. May implement Configurable
+// for receiving Kafka configs, and Closeable for resource cleanup.
+// Impact: Changing this interface breaks all custom principal builders deployed in production.
 public interface KafkaPrincipalBuilder extends KafkaPrincipalSerde {
     /**
      * Build a kafka principal from the authentication context.
