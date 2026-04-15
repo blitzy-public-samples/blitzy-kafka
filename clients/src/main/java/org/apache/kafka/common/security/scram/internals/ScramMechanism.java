@@ -27,18 +27,69 @@ import java.util.Map;
  * is used both for passing ScramCredentialUpsertion and for the internal 
  * UserScramCredentialRecord. Do not change the type field.
  */
+// SECURITY: (MEDIUM) SCRAM mechanism variant definitions -- SHA-256 and SHA-512.
+// Why: Defines the cryptographic algorithm parameters and iteration count bounds for all SCRAM
+// authentication in Kafka. The minimum iteration count (4096) directly controls brute-force
+// resistance of SCRAM credentials.
+// Exploit: If only SCRAM-SHA-256 is offered and a future cryptanalytic breakthrough weakens
+// SHA-256, the mechanism becomes vulnerable to offline credential attacks. Additionally,
+// if the minIterations bound (4096) is reduced through code modification, existing credentials
+// would lose their brute-force resistance. An attacker who compromises the config to lower
+// max.iterations could create credentials with weak key derivation.
+// Improvement: (1) Default to SCRAM-SHA-512 when both variants are available for higher
+// security margin. (2) Consider increasing minIterations to 8192 or higher to reflect modern
+// GPU capabilities. (3) Add a mechanism version field to support future algorithm agility.
+//
+// DECISION: Enum-based mechanism definition with associated crypto algorithm names and
+// iteration bounds, supporting both SHA-256 and SHA-512 for algorithm agility per RFC 7677.
+// Alternatives: (1) Configuration-driven mechanism list, (2) Plugin-based mechanism registry.
+// Rationale: Enum provides compile-time type safety and exhaustive switch coverage. The fixed
+// set of mechanisms matches the Kafka protocol specification -- adding new mechanisms requires
+// a KIP and protocol version bump.
+// Risk: Enum values cannot be extended without code changes, unlike a plugin-based approach.
+//
+// CROSS-CUTTING: Foundational enum referenced by nearly all SCRAM-related classes:
+// - ScramSaslServer, ScramSaslClient: Algorithm selection and iteration validation
+// - ScramFormatter: Hash and MAC algorithm names for JCA initialization
+// - ScramSaslClientProvider, ScramSaslServerProvider: Mechanism name iteration for registration
+// - ScramCredentialUtils: Mechanism name enumeration for cache creation
+// - ScramServerCallbackHandler: Mechanism-specific credential lookup
+// - External: admin/ScramMechanism duplicates type codes for public API
+// - External: broker configuration (BrokerSecurityConfigs.SASL_ENABLED_MECHANISMS_CONFIG)
+// Contract: Type byte codes and mechanismName values MUST remain stable across Kafka versions.
+// Impact: Changing type codes breaks persisted UserScramCredentialRecord in KRaft metadata.
+// Impact: Changing mechanism names breaks JAAS configuration and SASL negotiation.
 public enum ScramMechanism {
 
+    // SECURITY: SHA-256 variant -- 256-bit hash output. Currently secure against known cryptanalysis.
+    // min=4096, max=16384 iterations. Type byte 1 -- persisted in metadata records, must not change.
+    // DECISION: Iteration bounds [4096, 16384]. The minimum (4096) follows RFC 5802 Section 5.1.
+    // The maximum (16384) balances security with authentication latency -- at 16384 iterations,
+    // PBKDF2 with SHA-256 takes ~20ms on modern hardware per authentication attempt.
     SCRAM_SHA_256((byte) 1, "SHA-256", "HmacSHA256", 4096, 16384),
+    // SECURITY: SHA-512 variant -- 512-bit hash output. Higher security margin than SHA-256.
+    // min=4096, max=16384 iterations. Type byte 2 -- persisted in metadata records, must not change.
+    // SHA-512 has slightly higher computational cost but provides stronger collision resistance.
     SCRAM_SHA_512((byte) 2, "SHA-512", "HmacSHA512", 4096, 16384);
 
+    // DECISION: Byte type codes (1=SHA-256, 2=SHA-512) are duplicated in admin/ScramMechanism
+    // (as noted in the comment block above). These codes are used in UserScramCredentialRecord
+    // and ScramCredentialUpsertion API messages. The duplication exists because admin/ is a
+    // public API package while this is an internal implementation class -- merging would expose
+    // internal details in the public API surface.
     private final byte type;
     private final String mechanismName;
     private final String hashAlgorithm;
     private final String macAlgorithm;
+    // SECURITY: Minimum iteration count for PBKDF2 key derivation. Set to 4096 per RFC 5802
+    // Section 5.1. Enforced in ScramSaslServer.evaluateResponse() and ScramSaslClient.evaluateChallenge().
+    // Lowering this value would reduce brute-force resistance of all SCRAM credentials.
     private final int minIterations;
     private final int maxIterations;
 
+    // DECISION: Unmodifiable map for mechanism name lookups, built once at class load.
+    // Using Collections.unmodifiableMap() instead of Map.of() for compatibility and explicit
+    // immutability signaling. The map is keyed by mechanism name (e.g., "SCRAM-SHA-256").
     private static final Map<String, ScramMechanism> MECHANISMS_MAP;
 
     static {
