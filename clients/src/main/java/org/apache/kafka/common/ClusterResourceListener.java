@@ -43,7 +43,15 @@ package org.apache.kafka.common;
  * KafkaMetricsReporter : The {@link ClusterResourceListener#onUpdate(ClusterResource)} method will be invoked during the bootup of the Kafka broker. The reporter may receive metric events from the network layer before this method is invoked.
  * <p>
  * {@link org.apache.kafka.common.metrics.MetricsReporter} : The {@link ClusterResourceListener#onUpdate(ClusterResource)} method will be invoked during the bootup of the Kafka broker. The reporter may receive metric events from the network layer before this method is invoked.
+ *
+ * @implNote DECISION: Single-method callback interface rather than multi-method observer pattern.
+ * Alternative: Full observer with add/remove/update lifecycle. Rationale: Cluster identity changes
+ * are rare and one-directional; a simple callback avoids registration/deregistration complexity and
+ * keeps the interceptor/reporter contract minimal.
  */
+// CROSS-CUTTING: Implemented by ProducerInterceptor, ConsumerInterceptor, MetricsReporter, and
+// Serializer/Deserializer implementations that need cluster identity awareness. Contract: onUpdate()
+// is called after successful metadata fetch; ordering among multiple listeners is not guaranteed.
 public interface ClusterResourceListener {
     /**
      * A callback method that a user can implement to get updates for {@link ClusterResource}.
