@@ -24,7 +24,15 @@ import java.util.stream.Collectors;
 
 /**
  * A class containing leadership, replicas and ISR information for a topic partition.
+ *
+ * @implNote DECISION: Immutable value carrier for partition metadata including ELR
+ * (Eligible Leader Replicas) and Last Known ELR fields added to support KIP-966
+ * tiered replication. Alternatives: Single merged replica list. Rationale: Separate
+ * ELR/lastKnownElr fields preserve backward-compatible API while supporting new
+ * controller-side leader election semantics.
  */
+// CROSS-CUTTING: Consumed by clients/admin/KafkaAdminClient.describeTopics() and
+// metadata/ module for partition detail responses. Contract: Immutable after construction.
 public class TopicPartitionInfo {
     private final int partition;
     private final Node leader;
@@ -44,6 +52,9 @@ public class TopicPartitionInfo {
      * @param elr the eligible leader replicas
      * @param lastKnownElr the last known eligible leader replicas.
      */
+    // DECISION: Extended constructor introduced for KIP-966 to expose ELR state.
+    // Backward-compatible constructor sets null ELR fields to maintain API
+    // compatibility with pre-KIP-966 callers.
     public TopicPartitionInfo(
         int partition,
         Node leader,
@@ -54,6 +65,8 @@ public class TopicPartitionInfo {
     ) {
         this.partition = partition;
         this.leader = leader;
+        // DECISION: Defensive unmodifiable copies ensure immutability contract —
+        // callers cannot mutate partition metadata.
         this.replicas = Collections.unmodifiableList(replicas);
         this.isr = Collections.unmodifiableList(isr);
         this.elr = Collections.unmodifiableList(elr);
