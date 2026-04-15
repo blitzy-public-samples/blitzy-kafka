@@ -22,6 +22,24 @@ import java.util.Optional;
 import javax.net.ssl.SSLSession;
 import javax.security.sasl.SaslServer;
 
+// SECURITY: (LOW) SaslAuthenticationContext carries the javax.security.sasl.SaslServer
+// instance for SASL-authenticated connections. The SaslServer.getAuthorizationID()
+// provides the authenticated identity used for ACL evaluation.
+// Why: This context bridges the SASL authentication result to the authorization layer.
+// The SaslServer instance encapsulates the completed SASL exchange state.
+// Exploit: If the SaslServer instance is replaced or its authorizationID is tampered
+// with after authentication completes, a different identity could be used for
+// authorization decisions. The immutable field storage mitigates this.
+// Improvement: Consider making the server field's type a read-only wrapper that only
+// exposes getAuthorizationID() and getMechanismName(), preventing access to
+// mutable SaslServer methods like unwrap()/wrap() post-authentication.
+//
+// CROSS-CUTTING: Created by authenticator/SaslServerAuthenticator after successful
+// SASL authentication. Passed to KafkaPrincipalBuilder.build() for principal construction.
+// The SaslServer instance provides mechanism-specific auth context (e.g., SCRAM server
+// state, OAUTHBEARER token data, GSSAPI context). Also carries optional SSLSession for
+// SASL_SSL protocol -- used when both SASL and mTLS identity are needed.
+// Depends on: auth/AuthenticationContext, auth/SecurityProtocol (this package).
 public class SaslAuthenticationContext implements AuthenticationContext {
     private final SaslServer server;
     private final SecurityProtocol securityProtocol;
@@ -29,6 +47,10 @@ public class SaslAuthenticationContext implements AuthenticationContext {
     private final String listenerName;
     private final Optional<SSLSession> sslSession;
 
+    // DECISION: Two constructors -- convenience (without sslSession) and full (with Optional).
+    // Alternative: Single constructor with nullable SSLSession. Rationale: The Optional pattern
+    // makes the SASL_PLAINTEXT vs SASL_SSL distinction explicit at construction time.
+    // The convenience constructor delegates to the full constructor with Optional.empty().
     public SaslAuthenticationContext(SaslServer server, SecurityProtocol securityProtocol, InetAddress clientAddress, String listenerName) {
         this(server, securityProtocol, clientAddress, listenerName, Optional.empty());
     }
@@ -44,6 +66,9 @@ public class SaslAuthenticationContext implements AuthenticationContext {
         this.sslSession = sslSession;
     }
 
+    // DECISION: Exposes raw SaslServer rather than just authorizationID string.
+    // Rationale: Custom KafkaPrincipalBuilder implementations may need mechanism-specific
+    // attributes from the SaslServer (e.g., negotiated QoP, SASL properties).
     public SaslServer server() {
         return server;
     }
