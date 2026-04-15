@@ -29,6 +29,12 @@ import javax.security.auth.callback.Callback;
  * 2.0 Authorization Framework</a>. Callback handlers should communicate other
  * problems by raising an {@code IOException}.
  */
+// CROSS-CUTTING: Used by OAuthBearerLoginCallbackHandler (client-side, sets token or error),
+// OAuthBearerLoginModule (reads token for Subject credential storage), and
+// internals/OAuthBearerSaslClientCallbackHandler (reads token from Subject for SASL exchange).
+// Also used by internals/unsecured/OAuthBearerUnsecuredLoginCallbackHandler (development).
+// Contract: Handler populates via token() or error(); consumer reads via token()/errorCode().
+// Depends on: OAuthBearerToken (token interface). Implements javax.security.auth.callback.Callback.
 public class OAuthBearerTokenCallback implements Callback {
     private OAuthBearerToken token = null;
     private String errorCode = null;
@@ -77,6 +83,11 @@ public class OAuthBearerTokenCallback implements Callback {
         return errorUri;
     }
 
+    // DECISION: Token and error are mutually exclusive — setting token(t) clears error fields,
+    // setting error(code, desc, uri) clears the token. Alternative: Separate result object
+    // (Either<Token, Error>). Rationale: Follows the JAAS Callback convention of mutable state
+    // set by the handler, where only one outcome (success or error) is meaningful. The mutual
+    // exclusion prevents inconsistent state where both token and error are set.
     /**
      * Set the token. All error-related values are cleared.
      * 
@@ -103,6 +114,8 @@ public class OAuthBearerTokenCallback implements Callback {
      *            the optional error URI to set
      */
     public void error(String errorCode, String errorDescription, String errorUri) {
+        // DECISION: Error code must be non-null and non-empty when setting an error. This follows
+        // RFC 6749 Section 5.2 which requires an error code. Description and URI are optional.
         if (Objects.requireNonNull(errorCode).isEmpty())
             throw new IllegalArgumentException("error code must not be empty");
         this.errorCode = errorCode;
