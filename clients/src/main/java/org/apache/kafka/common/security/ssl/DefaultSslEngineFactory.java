@@ -73,7 +73,27 @@ import javax.net.ssl.SSLParameters;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.TrustManagerFactory;
 
+// SECURITY: (HIGH) Default SSLEngine factory -- creates SSLContext, SSLEngine instances
+// for ALL TLS connections. Controls protocol version, cipher suite, and certificate handling.
+// Why: This factory configures the TLS stack that protects all Kafka network communication.
+// Incorrect configuration can silently weaken security for all connections on a listener.
+// Exploit: Protocol downgrade attack -- if TLS 1.0/1.1 is enabled alongside TLS 1.2/1.3
+// via ssl.enabled.protocols, an active MITM can force downgrade using ClientHello
+// manipulation (POODLE-style attack). Similarly, enabling weak cipher suites (RC4, DES,
+// NULL ciphers) via ssl.cipher.suites creates vulnerability to known cryptographic attacks.
+// Improvement: Default to TLSv1.2+ only and log a WARNING when weaker protocols or
+// cipher suites are enabled. Consider maintaining a deny-list of known-weak ciphers
+// that are rejected regardless of configuration.
 public class DefaultSslEngineFactory implements SslEngineFactory {
+
+    // CROSS-CUTTING: Default implementation of auth/SslEngineFactory -- used when no custom
+    // factory is configured (ssl.engine.factory.class=null). Instantiated by ssl/SslFactory
+    // via reflective lookup or direct construction. Provides SSLEngine instances to
+    // common/network/SslChannelBuilder for all TLS connections. The SSLContext created here
+    // determines the TLS parameters for the entire listener's lifetime (or until dynamic
+    // reconfiguration triggers a rebuild via shouldBeRebuilt()).
+    // Depends on: auth/SslEngineFactory (interface contract), config/SslConfigs (config keys),
+    // config/internals/BrokerSecurityConfigs (server-side config keys).
 
     private static final Logger log = LoggerFactory.getLogger(DefaultSslEngineFactory.class);
     public static final String PEM_TYPE = "PEM";
@@ -102,6 +122,11 @@ public class DefaultSslEngineFactory implements SslEngineFactory {
         return createSslEngine(ConnectionMode.SERVER, peerHost, peerPort, null);
     }
 
+    // DECISION: Rebuild detection uses config snapshot comparison AND file mtime checks.
+    // Alternative: Always rebuild on any config change. Rationale: SSLContext creation is
+    // expensive (KeyStore loading, SecureRandom seeding); lazy rebuild avoids overhead when
+    // only non-SSL configs change. File mtime detection supports certificate rotation without
+    // config changes -- operators can replace keystore/truststore files in-place.
     @Override
     public boolean shouldBeRebuilt(Map<String, Object> nextConfigs) {
         if (!nextConfigs.equals(configs)) {
@@ -128,9 +153,33 @@ public class DefaultSslEngineFactory implements SslEngineFactory {
         return this.truststore != null ? this.truststore.get() : null;
     }
 
+    // SECURITY: (HIGH) Configuration entry point -- processes ALL SSL/TLS settings including
+    // passwords, keystore paths, and protocol versions. Passwords are held as Password objects
+    // (which wrap char arrays for explicit zeroing on GC) but the char arrays may remain in
+    // memory until the Password is garbage collected. The configs map is stored as an
+    // unmodifiable reference -- any mutable Password values in the original map are shared,
+    // not defensively copied.
+    // Exploit: A heap dump or memory forensics attack could extract plaintext passwords from
+    // JVM memory if the Password char arrays are not yet garbage collected.
+    // Improvement: Defensively copy Password values and zero the originals immediately.
     @SuppressWarnings("unchecked")
     @Override
     public void configure(Map<String, ?> configs) {
+        /* COMPLEXITY: 42 lines -- Comprehensive SSL/TLS configuration initialization.
+         * Structure: Sequential property extraction from config map:
+         * 1. Store immutable config snapshot
+         * 2. Extract protocol version and provider name
+         * 3. Register custom security providers via SecurityUtils
+         * 4. Parse cipher suites list (null = JVM defaults)
+         * 5. Parse enabled protocols list (null = JVM defaults)
+         * 6. Initialize SecureRandom implementation (null = JVM default)
+         * 7. Parse SSL client auth mode (NONE/REQUESTED/REQUIRED)
+         * 8. Extract KeyManagerFactory and TrustManagerFactory algorithms
+         * 9. Create keystore SecurityStore (supports JKS/PKCS12/PEM)
+         * 10. Create truststore SecurityStore (supports JKS/PKCS12/PEM)
+         * 11. Create SSLContext with all components
+         * No branching -- purely sequential initialization with no early exits.
+         */
         this.configs = Collections.unmodifiableMap(configs);
         this.protocol = (String) configs.get(SslConfigs.SSL_PROTOCOL_CONFIG);
         this.provider = (String) configs.get(SslConfigs.SSL_PROVIDER_CONFIG);
@@ -184,6 +233,15 @@ public class DefaultSslEngineFactory implements SslEngineFactory {
         return this.sslContext;
     }
 
+    // SECURITY: (MEDIUM) SSLEngine creation with endpoint identification for clients.
+    // Why: Client-side endpoint identification (hostname verification via SNI) is controlled
+    // by ssl.endpoint.identification.algorithm. When set to "HTTPS" (default for clients),
+    // the client verifies the server's certificate CN/SAN matches the connection hostname.
+    // Server-side does NOT perform endpoint identification -- client auth is via
+    // setNeedClientAuth/setWantClientAuth instead.
+    // Exploit: Disabling endpoint identification (setting to empty string) removes hostname
+    // verification, enabling MITM attacks with any valid CA-signed certificate.
+    // Improvement: Log a WARNING when endpoint identification is disabled or empty.
     private SSLEngine createSslEngine(ConnectionMode connectionMode, String peerHost, int peerPort, String endpointIdentification) {
         SSLEngine sslEngine = sslContext.createSSLEngine(peerHost, peerPort);
         if (cipherSuites != null) sslEngine.setEnabledCipherSuites(cipherSuites);
@@ -211,6 +269,11 @@ public class DefaultSslEngineFactory implements SslEngineFactory {
         }
         return sslEngine;
     }
+    // DECISION: Unrecognized client auth values fall back to NONE with a warning, rather
+    // than throwing an exception. Alternative: Fail fast on invalid values. Rationale:
+    // Defensive fallback to NONE prevents broker startup failures from configuration typos,
+    // at the cost of potentially running without client auth when it was intended. The
+    // warning log ensures operators are alerted to the misconfiguration.
     private static SslClientAuth createSslClientAuth(String key) {
         SslClientAuth auth = SslClientAuth.forConfig(key);
         if (auth != null) {
@@ -235,6 +298,16 @@ public class DefaultSslEngineFactory implements SslEngineFactory {
     }
 
     private SSLContext createSSLContext(SecurityStore keystore, SecurityStore truststore) {
+        /* COMPLEXITY: 31 lines -- SSLContext assembly from KeyManagers and TrustManagers.
+         * Control flow:
+         * 1. Create SSLContext instance with specified protocol and optional provider
+         * 2. If keystore OR kmfAlgorithm is set: create KeyManagerFactory, init with keystore
+         * 3. Create TrustManagerFactory via getTrustManagers() (overridable hook)
+         * 4. Initialize SSLContext with KeyManagers, TrustManagers, and SecureRandom
+         * Exit paths: (1) Success -> return SSLContext, (2) Any exception -> wrap in KafkaException
+         * Design note: getTrustManagers() is protected to allow
+         * CommonNameLoggingSslEngineFactory to inject CN-logging trust managers.
+         */
         try {
             SSLContext sslContext;
             if (provider != null)
@@ -267,6 +340,13 @@ public class DefaultSslEngineFactory implements SslEngineFactory {
         }
     }
 
+    // DECISION: Protected visibility to allow CommonNameLoggingSslEngineFactory to override
+    // TrustManager creation and inject CN-logging wrappers. Alternative: Use a hook/callback
+    // mechanism. Rationale: Protected method override is simpler and follows standard OOP
+    // extension patterns. The interface contract is narrow (truststore + algorithm ->
+    // TrustManagers).
+    // CROSS-CUTTING: Extension point overridden by ssl/CommonNameLoggingSslEngineFactory to
+    // inject CommonNameLoggingTrustManagerFactoryWrapper for certificate CN logging.
     protected TrustManager[] getTrustManagers(SecurityStore truststore, String tmfAlgorithm) throws NoSuchAlgorithmException, KeyStoreException {
         TrustManagerFactory tmf = TrustManagerFactory.getInstance(tmfAlgorithm);
         KeyStore ts = truststore == null ? null : truststore.get();
@@ -274,6 +354,15 @@ public class DefaultSslEngineFactory implements SslEngineFactory {
         return tmf.getTrustManagers();
     }
 
+    // SECURITY: (MEDIUM) Multi-type keystore factory supporting JKS, PKCS12, and PEM formats.
+    // PEM format bypasses Java KeyStore file-level integrity protection (PKCS12 uses
+    // PBKDF2-HMAC for tamper detection; JKS uses SHA-1). For PEM, the private key may be
+    // encrypted (PKCS#8) or unencrypted -- unencrypted PEM keys have no protection at rest
+    // beyond filesystem permissions.
+    // Exploit: If keystore file permissions are misconfigured (world-readable), private keys
+    // can be extracted. PEM files are especially vulnerable as they are human-readable text.
+    // Improvement: Log a WARNING when PEM keystore files have overly permissive filesystem
+    // permissions (e.g., group/other readable).
     // Visibility to override for testing
     protected SecurityStore createKeystore(String type, String path, Password password, Password keyPassword, Password privateKey, Password certificateChain) {
         if (privateKey != null) {
@@ -327,12 +416,21 @@ public class DefaultSslEngineFactory implements SslEngineFactory {
             return null;
     }
 
+    // DECISION: SecurityStore abstraction unifies file-based (JKS, PKCS12), file-based PEM,
+    // and in-memory PEM keystores behind a common interface. Alternative: Separate factory
+    // methods for each type. Rationale: The abstraction allows createSSLContext() to be
+    // agnostic to the keystore format -- it only needs get(), keyPassword(), and modified().
     interface SecurityStore {
         KeyStore get();
         char[] keyPassword();
         boolean modified();
     }
 
+    // DECISION: Loads keystore eagerly in constructor and caches the KeyStore instance.
+    // Tracks file mtime at load time for staleness detection by shouldBeRebuilt().
+    // Alternative: Lazy loading on first access. Rationale: Eager loading fails fast at
+    // startup if the keystore file is missing or corrupted, rather than failing on the
+    // first TLS handshake which is harder to diagnose.
     // package access for testing
     static class FileBasedStore implements SecurityStore {
         private final String type;
@@ -421,9 +519,19 @@ public class DefaultSslEngineFactory implements SslEngineFactory {
         }
     }
 
+    // DECISION: Converts PEM certificates and keys into a PKCS12 KeyStore in-memory.
+    // Alternative: Use PEM-aware KeyManager/TrustManager directly. Rationale: The standard
+    // Java KeyManagerFactory/TrustManagerFactory APIs require a KeyStore object; converting
+    // PEM to PKCS12 reuses the existing Java security infrastructure without custom managers.
+    // The fixed alias "kafka" is used for the key entry.
     static class PemStore implements SecurityStore {
         private static final PemParser CERTIFICATE_PARSER = new PemParser("CERTIFICATE");
         private static final PemParser PRIVATE_KEY_PARSER = new PemParser("PRIVATE KEY");
+        // DECISION: Pre-instantiated KeyFactory list for RSA, DSA, EC key types. The
+        // privateKey() method tries each factory in order until one succeeds. Alternative:
+        // Detect key type from PEM header or ASN.1 structure. Rationale: PEM headers don't
+        // reliably indicate the key algorithm (e.g., "PRIVATE KEY" is generic PKCS#8);
+        // iterating over known factories is simpler and handles all standard key types.
         private static final List<KeyFactory> KEY_FACTORIES = Arrays.asList(
                 keyFactory("RSA"),
                 keyFactory("DSA"),
@@ -500,7 +608,25 @@ public class DefaultSslEngineFactory implements SslEngineFactory {
             return certs;
         }
 
+        // SECURITY: (HIGH) Private key loading from PEM data -- handles both encrypted
+        // (PKCS#8) and unencrypted keys. For encrypted keys, uses EncryptedPrivateKeyInfo
+        // with PBE cipher. The key password (char array) is passed to PBEKeySpec which may
+        // retain a copy internally.
+        // Exploit: The raw key bytes (keyBytes) are not explicitly zeroed after use; a heap
+        // dump could recover the private key material from JVM memory.
+        // Improvement: Zero keyBytes array in a finally block after KeySpec creation.
         private PrivateKey privateKey(String pem, char[] keyPassword) throws Exception {
+            /* COMPLEXITY: 31 lines -- PEM private key extraction with multi-algorithm
+             * fallback. Control flow:
+             * 1. Parse PEM to extract key bytes (exactly one private key required)
+             * 2. If no password: create PKCS8EncodedKeySpec directly from raw bytes
+             * 3. If password: decrypt via EncryptedPrivateKeyInfo -> PBE cipher -> keySpec
+             * 4. Try RSA, DSA, EC key factories in sequence (first success wins)
+             * 5. If all factories fail: throw with first exception
+             * Exit paths: (1) no key -> InvalidConfigurationException,
+             * (2) multiple keys -> exception, (3) key parsed -> return PrivateKey,
+             * (4) all factories fail -> exception
+             */
             List<byte[]> keyEntries = PRIVATE_KEY_PARSER.pemEntries(pem);
             if (keyEntries.isEmpty())
                 throw new InvalidConfigurationException("Private key not provided");
@@ -555,6 +681,12 @@ public class DefaultSslEngineFactory implements SslEngineFactory {
      *   Additional data may be included before headers, so we match all entries within the PEM.
      */
     static class PemParser {
+        // SECURITY: (LOW) PEM parsing using regex -- the pattern matches standard PEM block
+        // headers (-----BEGIN/END ...). The regex is applied to file content at configuration
+        // time, not to untrusted network input.
+        // Exploit: A regex denial-of-service (ReDoS) is unlikely given the simple pattern,
+        // but extremely large PEM files could cause excessive memory allocation.
+        // Improvement: Add a size limit check before applying the regex pattern.
         private final String name;
         private final Pattern pattern;
 
