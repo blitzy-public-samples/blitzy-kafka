@@ -32,6 +32,40 @@ import java.util.Properties;
  * </pre>
  *
  */
+// SECURITY: (MEDIUM) Credential serialization/deserialization for SCRAM credential persistence.
+// Why: This utility serializes ScramCredential (salt, storedKey, serverKey, iterations) to a
+// comma-delimited string format for storage in ZooKeeper or KRaft metadata records. The
+// serialized format contains security-sensitive derived cryptographic material.
+// Exploit: If credential data is not properly validated during deserialization, crafted
+// credential records could cause authentication bypass (e.g., zero-length storedKey causing
+// MessageDigest.isEqual() to trivially pass) or denial of service (e.g., extremely large
+// iteration count causing CPU exhaustion during PBKDF2, or negative iteration count causing
+// arithmetic errors). A malicious admin with ZooKeeper write access could inject crafted
+// credential records to compromise any user's authentication.
+// Improvement: (1) Validate all deserialized fields: non-null, non-empty byte arrays,
+// positive iteration count within mechanism bounds (4096-16384), correct key lengths for
+// the hash algorithm. (2) Add HMAC integrity protection to serialized credential format.
+//
+// DECISION: Properties-based serialization with Base64 encoding for byte arrays.
+// Format: "salt=<base64>,stored_key=<base64>,server_key=<base64>,iterations=<int>"
+// Alternatives: (1) JSON with Jackson, (2) Protobuf binary format, (3) Custom binary encoding.
+// Rationale: (1) Properties format is human-readable for debugging ZooKeeper/metadata content.
+// (2) Compatible with ZooKeeper's string-based storage without additional serialization libraries.
+// (3) No external dependency needed -- uses only java.util.Properties and java.util.Base64.
+// Risk: The comma-delimited format is fragile -- if Base64 values ever contain commas (they don't
+// in standard Base64), parsing would break. The format is stable and must not change without
+// a migration path, as it is used for persisted credentials.
+//
+// CROSS-CUTTING: Used by the metadata layer for credential persistence and by broker startup
+// for credential loading:
+// - metadata/ScramCredentialData uses this for credential-to-record conversion
+// - Broker credential initialization calls createCache() to set up per-mechanism caches
+// - tools/ CLI (kafka-storage, kafka-configs) uses this for credential string formatting
+// Depends on: ScramMechanism for mechanism name enumeration, CredentialCache for cache creation,
+// ScramCredential for the credential data model.
+// Contract: Serialization format MUST remain stable across Kafka versions for backward
+// compatibility with persisted credentials in ZooKeeper and KRaft metadata logs.
+// Impact: Changing the serialized format breaks credential restore on broker restart.
 public final class ScramCredentialUtils {
     private static final String SALT = "salt";
     private static final String STORED_KEY = "stored_key";
@@ -40,6 +74,9 @@ public final class ScramCredentialUtils {
 
     private ScramCredentialUtils() {}
 
+    // SECURITY: Serializes raw credential bytes as Base64. The output string contains storedKey
+    // and serverKey which are security-sensitive -- serverKey enables server impersonation.
+    // This string should be stored in access-controlled storage (ZooKeeper ACLs or KRaft metadata).
     public static String credentialToString(ScramCredential credential) {
         return String.format("%s=%s,%s=%s,%s=%s,%s=%d",
                SALT,
@@ -52,6 +89,10 @@ public final class ScramCredentialUtils {
                credential.iterations());
     }
 
+    // SECURITY: Deserialization performs size check (exactly 4 properties) and key presence check,
+    // but does NOT validate: (1) byte array lengths (salt, storedKey, serverKey could be empty),
+    // (2) iteration count bounds (could be 0, negative, or extremely large), (3) Base64 validity
+    // (invalid Base64 throws IllegalArgumentException from Base64.getDecoder().decode()).
     public static ScramCredential credentialFromString(String str) {
         Properties props = toProps(str);
         if (props.size() != 4 || !props.containsKey(SALT) || !props.containsKey(STORED_KEY) ||
@@ -65,6 +106,8 @@ public final class ScramCredentialUtils {
         return new ScramCredential(salt, storedKey, serverKey, iterations);
     }
 
+    // DECISION: Custom comma-split parser rather than Properties.load() because the format uses
+    // commas as delimiters (not newlines). Properties.load() expects newline-separated entries.
     private static Properties toProps(String str) {
         Properties props = new Properties();
         String[] tokens = str.split(",");
