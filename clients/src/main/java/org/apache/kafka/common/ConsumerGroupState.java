@@ -25,6 +25,13 @@ import java.util.stream.Collectors;
 
 /**
  * The consumer group state.
+ *
+ * @implNote DECISION: Deprecated in favor of {@link GroupState} which supports all group types
+ * (Classic, Consumer, Share, Streams). This enum was originally the only group state type when
+ * Kafka only had consumer groups. Kept for backward API compatibility. Alternative: Remove
+ * entirely. Rationale: Public API type used by existing admin tools — deprecation-then-removal
+ * follows Kafka's API evolution policy.
+ *
  * @deprecated Since 4.0. Use {@link GroupState} instead.
  */
 @Deprecated
@@ -50,6 +57,8 @@ public enum ConsumerGroupState {
     /**
      * Case-insensitive consumer group state lookup by string name.
      */
+    // DECISION: Returns UNKNOWN for unrecognized state strings rather than throwing —
+    // matches GroupState.parse() graceful degradation contract.
     public static ConsumerGroupState parse(String name) {
         ConsumerGroupState state = NAME_TO_ENUM.get(name.toUpperCase(Locale.ROOT));
         return state == null ? UNKNOWN : state;
