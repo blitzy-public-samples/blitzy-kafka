@@ -18,7 +18,15 @@ package org.apache.kafka.common;
 
 /**
  * A metric tracked for monitoring purposes.
+ *
+ * @implNote DECISION: Minimal interface with only metricName() and metricValue() methods.
+ * Alternative: Include description, type metadata, time-series data. Rationale: Lean interface
+ * keeps the metrics SPI simple for reporters; detailed metadata is available through
+ * MetricName.description() and the Metrics registry.
  */
+// CROSS-CUTTING: Implemented by common/metrics/KafkaMetric. Consumed by MetricsReporter
+// implementations (JmxReporter, custom reporters) and exposed via KafkaProducer.metrics(),
+// KafkaConsumer.metrics(), and Admin.metrics() for operational monitoring.
 public interface Metric {
 
     /**
