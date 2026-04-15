@@ -21,11 +21,23 @@ import java.util.Objects;
 /**
  * This represents universally unique identifier with topic id for a topic partition. This makes sure that topics
  * recreated with the same name will always have unique topic identifiers.
+ *
+ * @implNote DECISION: Combines Uuid-based topic identity with traditional TopicPartition to bridge the
+ * transition from topic-name-based to topic-id-based identification (KIP-516). The TopicPartition field
+ * provides backward compatibility while Uuid enables stable identity across topic renames/recreations.
+ * Alternative: Replace TopicPartition entirely with Uuid+partition. Rationale: Gradual migration requires
+ * both identifiers during transition period.
  */
+// CROSS-CUTTING: Consumed by share-consumer protocol (ShareConsumeRequestManager), fetch session handling
+// (FetchSessionHandler for KIP-227), and remote log management (storage/ module) where stable topic
+// identity across metadata changes is required.
 public class TopicIdPartition {
 
     private final Uuid topicId;
     private final TopicPartition topicPartition;
+
+    // DECISION: Two constructor forms — one taking TopicPartition for backward compatibility, one taking
+    // individual fields for convenience. Both ensure consistent Uuid+name+partition binding.
 
     /**
      * Create an instance with the provided parameters.
