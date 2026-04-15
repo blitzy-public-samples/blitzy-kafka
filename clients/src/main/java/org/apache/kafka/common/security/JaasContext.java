@@ -37,6 +37,25 @@ import static org.apache.kafka.common.security.JaasUtils.ALLOWED_LOGIN_MODULES_C
 import static org.apache.kafka.common.security.JaasUtils.DISALLOWED_LOGIN_MODULES_CONFIG;
 import static org.apache.kafka.common.security.JaasUtils.DISALLOWED_LOGIN_MODULES_DEFAULT;
 
+/**
+ * JAAS context for Kafka's SASL authentication, supporting dynamic per-listener
+ * and static file-based configuration resolution.
+ *
+ * @implSpec SECURITY: (MEDIUM) Login module allowlist/denylist enforcement.
+ * JaasContext controls which login modules can be loaded via SASL_JAAS_CONFIG.
+ * Exploit: A malicious admin injects "JndiLoginModule REQUIRED" into sasl.jaas.config,
+ * triggering JNDI lookups to attacker-controlled LDAP (CVE-2023-25194 pattern).
+ * Improvement: Restrict dynamic JAAS config to well-known Kafka login modules by default.
+ *
+ * @implNote DECISION: Separate server/client loading paths (loadServerContext vs
+ * loadClientContext) rather than a unified method. Server contexts require listener-name
+ * and mechanism-specific config resolution; client contexts use flat global config.
+ * Separate methods prevent cross-contamination of credential resolution strategies.
+ */
+// CROSS-CUTTING: Consumed by authenticator/LoginManager, SaslServerAuthenticator,
+// SaslClientAuthenticator, and all SASL mechanism implementations for context resolution.
+// Contract: Immutable after construction; thread-safe for concurrent reads.
+// Depends on: JaasConfig, JaasUtils, SaslConfigs (common/config), ListenerName (common/network).
 public class JaasContext {
 
     private static final Logger LOG = LoggerFactory.getLogger(JaasContext.class);
@@ -63,12 +82,18 @@ public class JaasContext {
      *
      * @throws IllegalArgumentException if listenerName or mechanism is not defined.
      */
+    // SECURITY: (MEDIUM) Server-side JAAS context loading uses mechanism-prefixed config keys
+    // to isolate per-mechanism credentials. Misconfigured prefix resolution could expose one
+    // mechanism's credentials to another.
     public static JaasContext loadServerContext(ListenerName listenerName, String mechanism, Map<String, ?> configs) {
         if (listenerName == null)
             throw new IllegalArgumentException("listenerName should not be null for SERVER");
         if (mechanism == null)
             throw new IllegalArgumentException("mechanism should not be null for SERVER");
         String listenerContextName = listenerName.value().toLowerCase(Locale.ROOT) + "." + GLOBAL_CONTEXT_NAME_SERVER;
+        // SECURITY: Dynamic JAAS config from Password type -- value is in-memory only, not
+        // persisted to disk. May appear in config dumps unless explicitly masked.
+        // The log.warn below correctly avoids logging the config value itself.
         Password dynamicJaasConfig = (Password) configs.get(mechanism.toLowerCase(Locale.ROOT) + "." + SaslConfigs.SASL_JAAS_CONFIG);
         if (dynamicJaasConfig == null && configs.get(SaslConfigs.SASL_JAAS_CONFIG) != null)
             LOG.warn("Server config {} should be prefixed with SASL mechanism name, ignoring config", SaslConfigs.SASL_JAAS_CONFIG);
@@ -88,6 +113,9 @@ public class JaasContext {
         return load(JaasContext.Type.CLIENT, null, GLOBAL_CONTEXT_NAME_CLIENT, dynamicJaasConfig);
     }
 
+    // DECISION: Enforces exactly 1 login module for dynamic configs but allows multiple for
+    // file-based JAAS. Rationale: Dynamic per-listener configs target a single mechanism;
+    // allowing multiple modules would create ambiguity about which handles authentication.
     static JaasContext load(JaasContext.Type contextType, String listenerContextName,
                             String globalContextName, Password dynamicJaasConfig) {
         if (dynamicJaasConfig != null) {
@@ -104,6 +132,17 @@ public class JaasContext {
             return defaultContext(contextType, listenerContextName, globalContextName);
     }
 
+    // SECURITY: (HIGH) Login module validation -- last line of defense against arbitrary class
+    // instantiation via JAAS config injection. Without this check, any class on the classpath
+    // could be loaded as a login module via dynamic SASL_JAAS_CONFIG.
+    // Exploit: If bypassed, attacker-specified login modules execute in the broker's JVM.
+    // Improvement: Validate at JaasConfig.getAppConfigurationEntry() as defense-in-depth.
+    //
+    // COMPLEXITY: ~30 lines -- dual-path validation with allowlist/denylist precedence.
+    // Control flow: (1) Check deprecated DISALLOWED property, log warning; (2) If ALLOWED
+    // property set, check membership -> return or throw; (3) If no ALLOWED, fall back to
+    // DISALLOWED with default denylist -> throw if disallowed.
+    // Exit paths: normal return, IllegalArgumentException.
     @SuppressWarnings("deprecation")
     // Visible for testing
      static void throwIfLoginModuleIsNotAllowed(AppConfigurationEntry appConfigurationEntry) {
@@ -138,6 +177,15 @@ public class JaasContext {
         }
     }
 
+    // DECISION: Falls back from listener-specific context name to global "KafkaServer" context.
+    // This two-tier lookup enables backward compatibility with pre-KIP-103 JAAS files that
+    // only define "KafkaServer".
+    //
+    // COMPLEXITY: ~40 lines -- multi-step JAAS context resolution with fallback.
+    // Structure: (1) Check system property for JAAS config file; (2) Get default Configuration;
+    // (3) Try listener-specific context name; (4) Fall back to global context name;
+    // (5) Validate all modules; (6) Construct JaasContext.
+    // Key paths: listener name found, global fallback, no config file. Each validates modules.
     private static JaasContext defaultContext(JaasContext.Type contextType, String listenerContextName,
                                               String globalContextName) {
         String jaasConfigFile = System.getProperty(JaasUtils.JAVA_LOGIN_CONFIG_PARAM);
@@ -183,6 +231,9 @@ public class JaasContext {
      * The type of the SASL login context, it should be SERVER for the broker and CLIENT for the clients (consumer, producer,
      * etc.). This is used to validate behaviour (e.g. some functionality is only available in the broker or clients).
      */
+    // DECISION: Simple CLIENT/SERVER enum rather than more granular types (INTER_BROKER,
+    // CONTROLLER, etc.). JAAS configuration is only differentiated at the client/server
+    // boundary; listener-based differentiation is handled by the context name, not type.
     public enum Type { CLIENT, SERVER }
 
     private final String name;
@@ -226,6 +277,9 @@ public class JaasContext {
      * Returns the configuration option for <code>key</code> from this context.
      * If login module name is specified, return option value only from that module.
      */
+    // CROSS-CUTTING: Called by KerberosLogin, ScramLoginModule, and OAUTHBEARER handlers
+    // to extract mechanism-specific options (e.g., serviceName, tokenEndpointUrl)
+    // from the JAAS configuration entries.
     public static String configEntryOption(List<AppConfigurationEntry> configurationEntries, String key, String loginModuleName) {
         for (AppConfigurationEntry entry : configurationEntries) {
             if (loginModuleName != null && !loginModuleName.equals(entry.getLoginModuleName()))
