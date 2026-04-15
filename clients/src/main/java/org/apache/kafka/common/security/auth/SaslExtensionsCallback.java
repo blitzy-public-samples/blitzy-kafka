@@ -25,7 +25,18 @@ import javax.security.auth.callback.Callback;
  * Optional callback used for SASL mechanisms if any extensions need to be set
  * in the SASL exchange.
  */
+// CROSS-CUTTING: Callback for passing SASL extensions between login modules and authenticators.
+// Used by OAuthBearerLoginCallbackHandler to attach token extensions during login,
+// and by SaslServerAuthenticator/SaslClientAuthenticator to extract extensions post-auth.
+// Contract: Callback handlers MUST call extensions(SaslExtensions) to populate; authenticators
+// read via extensions(). Depends on: auth/SaslExtensions (this package).
+// Impact: If extensions are not populated, downstream components (e.g., quota managers reading
+// principal extensions) will see empty extensions, not null -- safe but potentially incomplete.
 public class SaslExtensionsCallback implements Callback {
+    // DECISION: Default-initialized to SaslExtensions.empty() rather than null.
+    // Alternative: Initialize to null and require explicit setting. Rationale: Non-null default
+    // ensures unhandled callbacks produce a safe empty extensions object rather than NPE.
+    // This follows the "null-safe by default" pattern used across Kafka's callback framework.
     private SaslExtensions extensions = SaslExtensions.empty();
 
     /**
@@ -45,6 +56,10 @@ public class SaslExtensionsCallback implements Callback {
      * @param extensions
      *            the mandatory extensions to set
      */
+    // SECURITY: (LOW) Extensions set here are carried through the SASL exchange and may
+    // influence downstream behavior (e.g., quota assignment based on extension keys).
+    // The Objects.requireNonNull guard prevents null injection but does not validate
+    // individual extension keys or values against an allowlist.
     public void extensions(SaslExtensions extensions) {
         this.extensions = Objects.requireNonNull(extensions, "extensions must not be null");
     }
