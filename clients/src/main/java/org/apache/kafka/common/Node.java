@@ -20,9 +20,25 @@ import java.util.Objects;
 
 /**
  * Information about a Kafka node
+ *
+ * @implNote DECISION: Mutable-ish value type representing a broker endpoint. Uses lazy-cached
+ * hashCode (Integer field {@code hash}) and pre-computed {@code idString}. Alternative: Fully
+ * immutable with eager hashCode. Rationale: Node instances are created frequently during
+ * metadata updates and used as map keys in performance-sensitive paths
+ * (RecordAccumulator.ready, NetworkClient.leastLoadedNode) — lazy hash avoids computation
+ * when not used as key; pre-computed idString avoids repeated Integer.toString() in
+ * logging/debug paths.
  */
+// CROSS-CUTTING: Most widely-used broker identity type across ALL Kafka modules. Consumed by
+// Cluster (node indexing), NetworkClient (connection management), Metadata (leader tracking),
+// RecordAccumulator (partition-to-node mapping), and all admin/consumer/producer request
+// routing. Also used in streams/ for task assignment and connect/ for worker coordination.
 public class Node {
 
+    // DECISION: Sentinel NO_NODE with id=-1 represents "no broker available" rather than
+    // using null. Alternative: Optional<Node>. Rationale: Sentinel avoids NullPointerException
+    // in chained calls and predates Optional's introduction. Used by Cluster.leaderFor() and
+    // leastLoadedNode().
     private static final Node NO_NODE = new Node(-1, "", -1);
 
     private final int id;
@@ -30,9 +46,15 @@ public class Node {
     private final String host;
     private final int port;
     private final String rack;
+    // DECISION: Fenced flag (KIP-841) indicates broker is in controlled shutdown or
+    // pre-start. Alternative: Separate FencedNode subclass. Rationale: Inline boolean avoids
+    // type hierarchy complexity; fenced brokers are still valid network targets for certain
+    // operations.
     private final boolean isFenced;
 
     // Cache hashCode as it is called in performance sensitive parts of the code (e.g. RecordAccumulator.ready)
+    // DECISION: Integer (boxed) rather than int to use null as "not yet computed" sentinel.
+    // Benign race on concurrent lazy init produces same value.
     private Integer hash;
 
     public Node(int id, String host, int port) {
