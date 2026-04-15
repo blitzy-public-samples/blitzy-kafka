@@ -24,7 +24,26 @@ import javax.security.auth.callback.Callback;
  * set authenticated flag to true if the client provided password in the callback
  * matches the expected password.
  */
+// SECURITY: (MEDIUM) Carries plaintext username/password during SASL/PLAIN authentication.
+// Why: This callback transports raw credentials (char[] password) between the SaslServer
+// and the CallbackHandler. The password field is a final reference but its contents are
+// mutable and never zeroed after use.
+// Exploit: If this callback object is inadvertently logged, serialized, or retained beyond
+// the authentication exchange, the plaintext password is exposed. A malicious or buggy
+// callback handler could store the reference, leaking credentials to unauthorized code paths.
+// Improvement: Implement Destroyable interface to enable explicit credential zeroing
+// (Arrays.fill(password, '\0')) after authentication completes. Add @SensitiveData annotation
+// or override toString() to prevent accidental logging of password contents.
+//
+// CROSS-CUTTING: Consumed by plain/internals/PlainSaslServer (creates callback in
+// evaluateResponse()) and plain/internals/PlainServerCallbackHandler (reads password()
+// and sets authenticated() result).
+// Contract: CallbackHandler MUST call authenticated(true/false) after validation.
+// Impact: If callback is not handled, authentication silently fails (authenticated=false).
+// Also consumed by authenticator/SaslServerAuthenticator via PLAIN mechanism delegation.
 public class PlainAuthenticateCallback implements Callback {
+    // SECURITY: (MEDIUM) Raw credential storage -- char[] chosen over String to allow zeroing,
+    // but this class does not implement zeroing. Callers must manage credential lifecycle.
     private final char[] password;
     private boolean authenticated;
 
@@ -36,6 +55,12 @@ public class PlainAuthenticateCallback implements Callback {
         this.password = password;
     }
 
+    // DECISION: Exposes raw char[] reference rather than a defensive copy.
+    // Alternatives: (1) Return Arrays.copyOf(password) for immutability, (2) Wrap in
+    // ReadOnlyCharBuffer.
+    // Rationale: Defensive copy would create additional copies of sensitive material in memory.
+    // Direct reference allows the CallbackHandler to read and validate without extra allocations.
+    // Risk: Caller could modify array contents, corrupting the credential mid-validation.
     /**
      * Returns the password provided by the client during SASL/PLAIN authentication
      */
