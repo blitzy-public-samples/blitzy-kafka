@@ -32,9 +32,26 @@ import javax.security.auth.callback.Callback;
  * OAuth Extensions Error Registry</a>. Callback handlers should communicate
  * other problems by raising an {@code IOException}.
  */
+// SECURITY: (MEDIUM) Broker-side validation callback — carries the raw JWT token value
+// from the SASL exchange to the callback handler for validation. The tokenValue field
+// contains the full bearer token in cleartext. Care must be taken to avoid logging
+// this value or exposing it in error messages.
+// Exploit: If tokenValue is included in exception messages or debug logs, an attacker
+// with log access could capture valid tokens for replay attacks.
+// Improvement: Consider wrapping tokenValue in a Password-like type that masks toString().
+//
+// CROSS-CUTTING: Used by internals/OAuthBearerSaslServer (creates callback with tokenValue
+// from client, passes to handler), OAuthBearerValidatorCallbackHandler (validates token,
+// sets result), and internals/unsecured/OAuthBearerUnsecuredValidatorCallbackHandler (dev).
+// Contract: SaslServer creates with tokenValue, handler sets token() or error().
+// Depends on: OAuthBearerToken. Implements javax.security.auth.callback.Callback.
 public class OAuthBearerValidatorCallback implements Callback {
     private final String tokenValue;
     private OAuthBearerToken token = null;
+    // DECISION: Three-part error model (status, scope, openIDConfiguration) matching RFC 6749
+    // Section 5.2 and RFC 6750 Section 3.1 error response format. Alternative: Single error
+    // message string. Rationale: Structured error enables the SASL server to construct a
+    // spec-compliant error response to the client, including WWW-Authenticate header fields.
     private String errorStatus = null;
     private String errorScope = null;
     private String errorOpenIDConfiguration = null;
@@ -105,6 +122,8 @@ public class OAuthBearerValidatorCallback implements Callback {
         return errorOpenIDConfiguration;
     }
 
+    // DECISION: Same mutual exclusion pattern as OAuthBearerTokenCallback — token() clears
+    // errors, error() clears token. Maintains single-outcome invariant.
     /**
      * Set the token. The token value is unchanged and is expected to match the
      * provided token's value. All error values are cleared.
