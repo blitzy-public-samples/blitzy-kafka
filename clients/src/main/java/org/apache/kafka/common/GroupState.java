@@ -49,6 +49,12 @@ import java.util.stream.Collectors;
  */
 @InterfaceStability.Evolving
 public enum GroupState {
+    // CROSS-CUTTING: Consumed by clients/admin/KafkaAdminClient for group state filtering,
+    // group-coordinator/ for lifecycle management, and console tools for display.
+    // Contract: parse() always returns a valid enum (UNKNOWN for unrecognized).
+
+    // DECISION: UNKNOWN serves as a sentinel for unrecognized state strings rather than throwing.
+    // Rationale: Graceful degradation when server sends a state unknown to the client version.
     UNKNOWN("Unknown"),
     PREPARING_REBALANCE("PreparingRebalance"),
     COMPLETING_REBALANCE("CompletingRebalance"),
@@ -59,6 +65,10 @@ public enum GroupState {
     RECONCILING("Reconciling"),
     NOT_READY("NotReady");
 
+    // DECISION: Eagerly-built immutable lookup map using Locale.ROOT for case-insensitive parsing.
+    // Alternative: switch/if-else chain.
+    // Rationale: O(1) lookup, locale-safe (avoids Turkish-I problem), and built at class-load
+    // time to avoid synchronization on concurrent reads.
     private static final Map<String, GroupState> NAME_TO_ENUM = Arrays.stream(values())
             .collect(Collectors.toMap(state -> state.name.toUpperCase(Locale.ROOT), Function.identity()));
 
@@ -76,6 +86,10 @@ public enum GroupState {
         return state == null ? UNKNOWN : state;
     }
 
+    // DECISION: Hardcoded state sets per group type rather than metadata on each enum constant.
+    // Alternative: Each GroupState could carry a Set<GroupType>.
+    // Rationale: Group types were added incrementally (Classic first, then Consumer/Share/Streams)
+    // — hardcoded sets are easier to verify against the specification table in Javadoc.
     public static Set<GroupState> groupStatesForType(GroupType type) {
         if (type == GroupType.CLASSIC) {
             return Set.of(PREPARING_REBALANCE, COMPLETING_REBALANCE, STABLE, DEAD, EMPTY);
