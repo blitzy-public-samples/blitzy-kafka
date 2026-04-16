@@ -30,8 +30,28 @@ import org.slf4j.spi.LocationAwareLogger;
  * all of the dependent components in order to build new loggers. This removes the need to manually
  * add the groupId to each message.
  */
+// CROSS-CUTTING: Created by every Kafka client (KafkaProducer, KafkaConsumer,
+// KafkaAdminClient, KafkaStreams, Connect Worker) during initialization. Passed to all
+// internal components for consistent log context. The logPrefix typically includes clientId,
+// groupId, and/or transactional ID for operational log correlation.
+// Depends on SLF4J API (org.slf4j:slf4j-api:1.7.36).
+//
+// DECISION: Custom LogContext with prefix-based log enrichment rather than SLF4J MDC.
+// Alternative: Use MDC (Mapped Diagnostic Context) for structured logging context.
+// Rationale: Kafka's threading model (single thread per consumer/producer, shared threads
+// in server) makes MDC unreliable -- MDC is thread-local and does not propagate correctly
+// when callbacks execute on different threads (e.g., CompletableFuture callbacks in admin
+// client, or selector threads processing multiple connections). Prefix-based logging
+// (prepending "[Consumer clientId=X, groupId=Y]") is attached to the logger instance
+// itself, making it independent of thread context. This design is simpler and more
+// reliable for Kafka's use case.
 public class LogContext {
 
+    // DECISION: Immutable prefix string set at construction. Alternative: Mutable context
+    // with add/remove key support. Rationale: LogContext is created once per client
+    // lifecycle (during construction of KafkaProducer, KafkaConsumer, etc.) and never
+    // modified -- immutability avoids synchronization concerns when the logger is shared
+    // across threads.
     private final String logPrefix;
 
     public LogContext(String logPrefix) {
@@ -50,6 +70,12 @@ public class LogContext {
         return logger(LoggerFactory.getLogger(clazz));
     }
 
+    // DECISION: Two wrapper implementations -- LocationAwareKafkaLogger (for LocationAware
+    // SLF4J implementations like Logback) and LocationIgnorantKafkaLogger (for others).
+    // Alternative: Single wrapper using reflection. Rationale: LocationAwareLogger preserves
+    // correct source file/line information in log output by passing the FQCN of the wrapper
+    // class. Without this, all log lines would show LogContext as the source rather than the
+    // actual calling class.
     private Logger logger(Logger logger) {
         if (logger instanceof LocationAwareLogger) {
             return new LocationAwareKafkaLogger(logPrefix, (LocationAwareLogger) logger);
@@ -74,6 +100,10 @@ public class LogContext {
         }
     }
 
+    // DECISION: Wraps LocationAwareLogger.log() with FQCN for correct caller location.
+    // The fqcn field is set to LocationAwareKafkaLogger.class.getName() -- SLF4J's
+    // location-aware backends (Logback, Log4j2) use this to walk the stack trace and find
+    // the actual caller above this class.
     private static class LocationAwareKafkaLogger extends AbstractKafkaLogger {
         private final LocationAwareLogger logger;
         private final String fqcn;
@@ -429,6 +459,10 @@ public class LogContext {
             writeLog(marker, LocationAwareLogger.INFO_INT, msg, null, t);
         }
 
+        // DECISION: Uses SLF4J's MessageFormatter.format() to apply {} placeholders before
+        // prepending prefix. Alternative: Prepend prefix to format string. Rationale:
+        // Prepending to format string would break placeholder indexing if prefix contained
+        // {} characters.
         private void writeLog(Marker marker, int level, String format, Object[] args, Throwable exception) {
             String message = format;
             if (args != null && args.length > 0) {
@@ -442,6 +476,10 @@ public class LogContext {
         }
     }
 
+    // DECISION: Fallback wrapper for non-LocationAware SLF4J implementations. Simply
+    // prepends prefix to all messages. Location information is not available -- log lines
+    // will show LocationIgnorantKafkaLogger as the source. This is acceptable for simple
+    // SLF4J backends.
     private static class LocationIgnorantKafkaLogger extends AbstractKafkaLogger {
         private final Logger logger;
 
