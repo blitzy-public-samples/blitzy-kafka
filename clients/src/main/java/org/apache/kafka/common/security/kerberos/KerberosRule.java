@@ -24,6 +24,15 @@ import java.util.regex.Pattern;
 /**
  * An encoding of a rule for translating kerberos names.
  */
+// SECURITY (MEDIUM): Implements a single auth_to_local rule for Kerberos principal-to-short-name mapping.
+// User-configured regex patterns (match and fromPattern) are compiled in the constructor.
+// Exploit: A complex auth_to_local regex rule (e.g., with nested quantifiers) supplied via
+// configuration could cause catastrophic backtracking (ReDoS) on crafted principal names,
+// leading to CPU exhaustion and denial-of-service on the broker.
+// Improvement: Add regex complexity limits (e.g., max pattern length, reject nested quantifiers)
+// or compile with a timeout (available in some regex libraries).
+// CROSS-CUTTING: Used by KerberosShortNamer to evaluate ordered rule lists.
+// Throws BadFormatString and NoMatchingRule to control mapping error flow.
 class KerberosRule {
 
     /**
@@ -61,6 +70,9 @@ class KerberosRule {
         toUpperCase = false;
     }
 
+    // SECURITY (MEDIUM): Constructor compiles user-supplied regex patterns (match, fromPattern).
+    // These patterns originate from broker configuration (sasl.kerberos.principal.to.local.rules).
+    // No validation is performed on pattern complexity before compilation.
     KerberosRule(String defaultRealm, int numOfComponents, String format, String match, String fromPattern,
                  String toPattern, boolean repeat, boolean toLowerCase, boolean toUpperCase) {
         this.defaultRealm = defaultRealm;
@@ -76,6 +88,9 @@ class KerberosRule {
         this.toUpperCase = toUpperCase;
     }
 
+    // COMPLEXITY: Method size ~33 lines — reconstructs the rule string representation.
+    // Branches: isDefault path (line 82-83), then sequential append for numOfComponents, format,
+    // optional match, optional s/from/to/ with repeat flag, optional case flags.
     @Override
     public String toString() {
         StringBuilder buf = new StringBuilder();
@@ -158,6 +173,9 @@ class KerberosRule {
      * @param repeat whether the substitution should be repeated
      * @return
      */
+    // SECURITY (LOW): Applies regex substitution on the mapped base string.
+    // The 'to' pattern may contain backreferences ($1, $2) that reference captured groups from 'from'.
+    // Risk: If 'to' contains unexpected backreferences, substitution could produce unintended mappings.
     static String replaceSubstitution(String base, Pattern from, String to,
                                       boolean repeat) {
         Matcher match = from.matcher(base);
@@ -176,6 +194,11 @@ class KerberosRule {
      * @return the short name if this rule applies or null
      * @throws IOException throws if something is wrong with the rules
      */
+    // DECISION: DEFAULT rules match only when realm equals defaultRealm and return the service component.
+    // Parameterized rules match when component count equals numOfComponents, then apply format substitution,
+    // optional regex match validation, optional s/from/to/ substitution, and case conversion.
+    // NON_SIMPLE_PATTERN check (line 195) enforces that results contain no '/' or '@' characters,
+    // preventing injection of multi-component principals into short names.
     String apply(String[] params) throws IOException {
         String result = null;
         if (isDefault) {
