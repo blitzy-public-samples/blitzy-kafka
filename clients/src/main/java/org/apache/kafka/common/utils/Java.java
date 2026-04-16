@@ -16,6 +16,13 @@
  */
 package org.apache.kafka.common.utils;
 
+// DECISION: JVM vendor/version detection at class-load time. Uses System.getProperty("java.vendor")
+// and Runtime.version(). Alternative: Dynamic detection on each call. Rationale: JVM vendor/version
+// is constant for the process lifetime — eager detection at class load avoids repeated string
+// parsing. Used to gate JVM-specific behaviors (e.g., IBM J9 vs HotSpot differences in
+// MappedByteBuffer unmapping).
+// CROSS-CUTTING: Consumed by ByteBufferUnmapper for JVM-specific unmap strategy selection,
+// and by SslFactory for vendor-specific SSL engine configuration.
 public final class Java {
 
     private Java() { }
