@@ -22,9 +22,21 @@ import java.util.Objects;
  * Defines the context in which an {@link Authenticator} is to be created during
  * a re-authentication.
  */
+// SECURITY: (MEDIUM) Carries re-authentication state between old and new Authenticator instances.
+// The previous authenticator reference allows the new authenticator to close the old one after
+// extracting any required state (e.g., subject, login context). The in-flight NetworkReceive
+// (if present) is the SaslHandshakeRequest that triggered re-authentication — it must be
+// forwarded to the new authenticator for processing.
+// Risk: If the previous authenticator's credentials are not properly cleared during the swap,
+// stale credentials could persist in memory longer than necessary.
+// Improvement: Consider explicit zeroing of credential material in the previous authenticator
+// after the new authenticator has extracted the needed state.
 public class ReauthenticationContext {
     private final NetworkReceive networkReceive;
     private final Authenticator previousAuthenticator;
+    // DECISION: Captures the timestamp at re-authentication initiation for latency measurement.
+    // This is separate from the system clock to avoid clock skew issues — nanosecond timestamps
+    // from System.nanoTime() are used for relative timing only (latency), not absolute time.
     private final long reauthenticationBeginNanos;
 
     /**
