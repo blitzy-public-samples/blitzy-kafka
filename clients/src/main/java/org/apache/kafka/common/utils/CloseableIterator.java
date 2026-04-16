@@ -25,6 +25,15 @@ import java.util.Iterator;
  * Warning: before implementing this interface, consider if there are better options. The chance of misuse is
  * a bit high since people are used to iterating without closing.
  */
+// DECISION: Combines Iterator<T> + Closeable into single interface. Alternative: Use
+// Iterator<T> with separate close tracking. Rationale: Many Kafka iterators hold resources
+// (file handles, buffers, network connections) that must be released — combining interfaces
+// enables try-with-resources usage. The static wrap() method adapts plain iterators to this
+// interface with a no-op close() for uniform handling.
+//
+// CROSS-CUTTING: Used by record/RecordBatchIterator, storage/log segment iterators, and
+// state store iterators in Kafka Streams. Contract: close() must be called to release
+// underlying resources; not calling close() risks resource leaks.
 public interface CloseableIterator<T> extends Iterator<T>, Closeable {
     void close();
 
