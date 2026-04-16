@@ -49,6 +49,23 @@ import javax.security.auth.login.AppConfigurationEntry;
  *   </li>
  * </ol>
  */
+// DECISION: Unified lifecycle contract for all OAUTHBEARER components — combines configure()
+// with Closeable. Alternative: (1) Use Kafka's existing Configurable interface, (2) Use
+// AuthenticateCallbackHandler interface directly. Rationale: Configurable doesn't have the
+// SASL-specific signature (saslMechanism, jaasConfigEntries). AuthenticateCallbackHandler
+// extends CallbackHandler which adds unwanted callback-handling methods. This interface
+// provides the exact lifecycle methods needed: configure(configs, mechanism, jaas) + close().
+// Both methods have default no-op implementations, allowing implementers to override only
+// what they need. Risk: Implementing classes must remember to override close() if they
+// allocate resources — the default no-op silently leaks if forgotten.
+//
+// CROSS-CUTTING: Implemented by all configurable OAUTHBEARER components:
+// CloseableVerificationKeyResolver (key resolvers), RefreshingHttpsJwks (JWKS refresher),
+// and any class instantiated by ConfigurationUtils.getConfiguredInstance().
+// Used by: ConfigurationUtils.getConfiguredInstance() which calls configure() on any
+// instantiated object that implements this interface, and Utils.maybeCloseQuietly() for
+// cleanup on failure. The configure() signature mirrors AuthenticateCallbackHandler.configure().
+// Extends: Closeable (from java.io) — enables try-with-resources and Utils.closeQuietly().
 public interface OAuthBearerConfigurable extends Closeable {
 
     /**
@@ -75,6 +92,8 @@ public interface OAuthBearerConfigurable extends Closeable {
      *        only the configuration entry corresponding to `saslMechanism` will be provided
      *        in `jaasConfigEntries`.
      */
+    // DECISION: Default no-op configure() allows implementations that don't need configuration
+    // (e.g., StaticAssertionJwtTemplate) to skip overriding. The default is safe — no side effects.
     default void configure(Map<String, ?> configs, String saslMechanism, List<AppConfigurationEntry> jaasConfigEntries) {
 
     }
@@ -82,6 +101,8 @@ public interface OAuthBearerConfigurable extends Closeable {
     /**
      * Closes any resources that were initialized by {@link #configure(Map, String, List)}.
      */
+    // DECISION: Default no-op close() inherits from Closeable. This means Closeable contracts
+    // (try-with-resources) work with all implementers, even those without resources to close.
     default void close() throws IOException {
         // Do nothing...
     }
