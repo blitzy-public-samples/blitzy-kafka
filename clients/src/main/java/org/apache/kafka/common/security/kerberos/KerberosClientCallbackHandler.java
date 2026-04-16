@@ -33,6 +33,14 @@ import javax.security.sasl.RealmCallback;
 /**
  * Callback handler for SASL/GSSAPI clients.
  */
+// SECURITY (MEDIUM): Handles SASL/GSSAPI client-side callbacks during Kerberos authentication.
+// Stateless and thread-safe. Rejects PasswordCallback to enforce ticket-based auth only.
+// Exploit: If this handler were to accept PasswordCallback, credentials could be intercepted in
+// plaintext during GSSAPI negotiation. The current rejection is a security safeguard.
+// Improvement: Verify that callback handler does not leak credential context in log messages.
+// CROSS-CUTTING: Implements AuthenticateCallbackHandler (org.apache.kafka.common.security.auth).
+// Registered by LoginManager for GSSAPI mechanism. SaslClientAuthenticator invokes handle() during
+// SASL negotiation.
 public class KerberosClientCallbackHandler implements AuthenticateCallbackHandler {
 
     @Override
@@ -47,6 +55,10 @@ public class KerberosClientCallbackHandler implements AuthenticateCallbackHandle
             if (callback instanceof NameCallback) {
                 NameCallback nc = (NameCallback) callback;
                 nc.setName(nc.getDefaultName());
+            // DECISION: PasswordCallback is explicitly rejected with a detailed error message.
+            // Kerberos/GSSAPI should never require a password callback — if requested, it indicates
+            // misconfiguration (missing ticket cache or keytab). Fail-fast with guidance is preferred
+            // over silent fallback which could expose credentials.
             } else if (callback instanceof PasswordCallback) {
                 String errorMessage = "Could not login: the client is being asked for a password, but the Kafka" +
                              " client code does not currently support obtaining a password from the user.";
@@ -58,6 +70,9 @@ public class KerberosClientCallbackHandler implements AuthenticateCallbackHandle
             } else if (callback instanceof RealmCallback) {
                 RealmCallback rc = (RealmCallback) callback;
                 rc.setText(rc.getDefaultText());
+            // SECURITY (MEDIUM): AuthorizeCallback compares authenticationID with authorizationID.
+            // Only authorizes if they are equal. This prevents impersonation where a
+            // client authenticates as one principal but requests authorization as another.
             } else if (callback instanceof AuthorizeCallback) {
                 AuthorizeCallback ac = (AuthorizeCallback) callback;
                 String authId = ac.getAuthenticationID();
