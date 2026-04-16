@@ -31,6 +31,22 @@ import java.util.concurrent.ExecutionException;
  * @param <R> Result type
  */
 
+// DECISION: Simple retry loop with Thread.sleep() rather than ScheduledExecutorService.
+// Alternatives: (1) ScheduledExecutorService for async retry, (2) Resilience4j or
+// Failsafe library for retry + circuit breaker. Rationale: The OAUTHBEARER token retrieval
+// and JWKS refresh are synchronous operations running in dedicated threads (Login thread for
+// token retrieval, ScheduledExecutorService thread for JWKS refresh). Thread.sleep() via
+// Time.sleep() is the simplest blocking retry that avoids additional thread pool overhead.
+// Time abstraction enables deterministic testing. Risk: Thread.sleep() blocks the calling
+// thread — acceptable for dedicated threads, but would be problematic on Kafka network threads.
+
+// CROSS-CUTTING: Used by HttpJwtRetriever (token endpoint HTTP calls) and RefreshingHttpsJwks
+// (JWKS endpoint refresh). Depends on: Time (testable clock + sleep), Retryable (operation
+// interface), UnretryableException (short-circuit signal). No external library dependency.
+// Contract: execute() blocks until success, unretryable error, or timeout. Thread-safe —
+// no shared state between execute() calls (each creates its own retry state).
+// Impact: Changes to backoff timing or retry classification affect all HTTP-based OAuth
+// operations (token retrieval and JWKS refresh).
 public class Retry<R> {
 
     private static final Logger log = LoggerFactory.getLogger(Retry.class);
@@ -60,7 +76,21 @@ public class Retry<R> {
             throw new IllegalArgumentException(String.format("retryBackoffMaxMs value (%d) is less than retryBackoffMs value (%d)", retryBackoffMaxMs, retryBackoffMs));
     }
 
+    // COMPLEXITY: 44 lines — Retry loop with exponential backoff and exception classification.
+    // Structure: (1) Calculate endMs = now + retryBackoffMaxMs (line 64). (2) While loop
+    // checking time <= endMs (line 68). (3) Call retryable.call() — on success, return
+    // immediately (line 72). (4) UnretryableException → capture error, break immediately
+    // (lines 73-79). (5) ExecutionException → log warning, compute exponential backoff
+    // waitMs = backoffMs * 2^(attempt-1) capped at remaining time (lines 86-88), sleep if
+    // waitMs > 0 else break (lines 90-98). (6) After loop, throw captured error or synthetic
+    // IllegalStateException (lines 101-105). Key branches: success return, unretryable break,
+    // retryable with sleep, retryable with timeout break. Exit: return R, throw ExecutionException.
     public R execute(Retryable<R> retryable) throws ExecutionException {
+        // DECISION: retryBackoffMaxMs is used as the TOTAL retry window (endMs = now + maxMs), not
+        // as the maximum single-backoff duration. Alternative: Use maxMs as the cap for individual
+        // sleep durations. Rationale: Total window provides a hard upper bound on retry duration,
+        // which is important for token retrieval during login (the Login thread blocks until success
+        // or exhaustion). Constructor validates maxMs >= backoffMs to prevent impossible configurations.
         long endMs = time.milliseconds() + retryBackoffMaxMs;
         int currAttempt = 0;
         ExecutionException error = null;
@@ -83,6 +113,12 @@ public class Retry<R> {
                 if (error == null)
                     error = e;
 
+                // DECISION: Exponential backoff: waitMs = retryBackoffMs * 2^(attempt-1), capped at
+                // remaining time (endMs - current). Alternative: (1) Fixed delay, (2) Jittered backoff
+                // (add random component). Rationale: Exponential backoff reduces load on failing endpoints.
+                // No jitter is applied — in a cluster with many clients, all clients may retry simultaneously
+                // (thundering herd). Risk: Without jitter, correlated retries can overwhelm the OAuth provider.
+                // Consider adding jitter in a future enhancement.
                 long waitMs = retryBackoffMs * (long) Math.pow(2, currAttempt - 1);
                 long diff = endMs - time.milliseconds();
                 waitMs = Math.min(waitMs, diff);
