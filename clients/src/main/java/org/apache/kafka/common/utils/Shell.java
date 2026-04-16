@@ -35,6 +35,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
  */
 public abstract class Shell {
 
+    // DECISION: Subprocess execution utility with timeout, stderr draining, and exit code checking.
+    // Alternative: Apache Commons Exec or ProcessBuilder directly. Rationale: Kafka needs minimal
+    // subprocess execution (auth_to_local rule testing, Kerberos kinit) -- a self-contained utility
+    // avoids adding a dependency for a handful of shell commands.
+    //
+    // CROSS-CUTTING: Used by KerberosName for auth_to_local rule evaluation via shell commands,
+    // and by test utilities for subprocess-based integration testing.
+
     private static final Logger LOG = LoggerFactory.getLogger(Shell.class);
 
     /** Return an array containing the command name and its parameters */
@@ -77,6 +85,13 @@ public abstract class Shell {
         runCommand();
     }
 
+    // COMPLEXITY: Method size 73 lines -- multi-step subprocess lifecycle management.
+    // Structure: (1) ProcessBuilder start, (2) optional timeout timer scheduling,
+    // (3) async stderr drain thread, (4) stdout parsing via parseExecResult callback,
+    // (5) process.waitFor + errThread.join, (6) exit code check -> ExitCodeException.
+    // Finally block: timer cancel, stream close, errThread interrupt, process destroy.
+    // Key paths: normal exit (code 0), non-zero exit (throws ExitCodeException),
+    // InterruptedException (wrapped as IOException), timeout (process destroyed by timer).
     /** Run a command */
     private void runCommand() throws IOException {
         ProcessBuilder builder = new ProcessBuilder(execString());
@@ -97,6 +112,10 @@ public abstract class Shell {
 
         // read error and input streams as this would free up the buffers
         // free the error stream buffer
+        // DECISION: Drains stderr asynchronously in a separate thread to prevent deadlock when the
+        // subprocess fills its stderr buffer. Alternative: Redirect stderr to stdout. Rationale:
+        // Keeping stderr separate allows distinguishing error output from normal output, which is
+        // important for diagnostics when shell commands fail.
         Thread errThread = KafkaThread.nonDaemon("kafka-shell-thread", () -> {
             try {
                 String line = errReader.readLine();
@@ -241,6 +260,11 @@ public abstract class Shell {
         }
     }
 
+    // SECURITY: Executes arbitrary shell commands. Risk: If command strings contain user-controlled
+    // input without sanitization, this is a command injection vector. A bad actor who can influence
+    // auth_to_local rules in JAAS config could inject arbitrary commands. Mitigation: Shell
+    // execution is only used internally for Kerberos principal translation. Improvement: Validate
+    // command arguments against allowlist of expected patterns.
     /**
      * Static method to execute a shell command.
      * Covers most of the simple cases without requiring the user to implement
