@@ -47,6 +47,18 @@ import java.util.Set;
  *
  * This set does not allow null elements.  It does not have internal synchronization.
  */
+// DECISION: Custom collection combining HashMap O(1) lookup with insertion-order
+// iteration without extra Node wrapper objects. Alternative: java.util.LinkedHashMap.
+// Rationale: LinkedHashMap allocates a Map.Entry per element (32-40 bytes overhead).
+// This collection embeds prev/next indices directly in the Element, eliminating
+// per-entry allocation -- critical for high-cardinality collections like in-flight
+// requests, partition metadata, and coordinator group member tracking.
+//
+// CROSS-CUTTING: Foundational collection used across the Kafka broker for
+// high-cardinality element tracking: metadata/authorizer/AclCache for ACL entries,
+// metadata/PartitionRegistration for partition metadata, coordinator runtime for
+// group members, and InFlightRequests for tracking pending network requests.
+// ImplicitLinkedHashMultiCollection extends this for multi-set semantics.
 public class ImplicitLinkedHashCollection<E extends ImplicitLinkedHashCollection.Element> extends AbstractCollection<E> {
     /**
      * The interface which elements of this collection must implement.  The prev,
@@ -55,6 +67,10 @@ public class ImplicitLinkedHashCollection<E extends ImplicitLinkedHashCollection
      * elementKeysAreEqual() is the function which this collection uses to compare
      * elements.
      */
+    // DECISION: Intrusive linked list -- elements carry their own prev/next indices.
+    // Alternative: External node wrappers. Rationale: Avoids GC pressure from millions
+    // of short-lived wrapper objects in broker-side partition tracking. The int indices
+    // (not object references) save 8 bytes per link on 64-bit JVMs with compressed oops.
     public interface Element {
         int prev();
         void setPrev(int prev);
@@ -64,6 +80,12 @@ public class ImplicitLinkedHashCollection<E extends ImplicitLinkedHashCollection
             return equals(other);
         }
     }
+
+    // DECISION: Sentinel indices using negative values to distinguish from valid
+    // array positions. HEAD_INDEX (-1) marks the circular list head; INVALID_INDEX
+    // (-2) marks unlinked elements. Alternative: Use null checks. Rationale: Null
+    // checks require additional Element[] lookups; integer comparison is a single
+    // CPU instruction.
 
     /**
      * A special index value used to indicate that the next or previous field is
@@ -88,6 +110,10 @@ public class ImplicitLinkedHashCollection<E extends ImplicitLinkedHashCollection
     private static final Element[] EMPTY_ELEMENTS = new Element[0];
 
     private static class HeadElement implements Element {
+        // DECISION: Shared empty HeadElement and empty Element[] array for
+        // zero-element collections. Avoids allocating a head node and array when
+        // the collection is unused -- important since many collections are created
+        // speculatively and may never receive elements.
         static final HeadElement EMPTY = new HeadElement();
 
         private int prev = HEAD_INDEX;
@@ -305,6 +331,11 @@ public class ImplicitLinkedHashCollection<E extends ImplicitLinkedHashCollection
         return new ImplicitLinkedHashCollectionIterator(index);
     }
 
+    // DECISION: Open-addressing with linear probing instead of separate chaining.
+    // Alternative: Separate chaining (linked list per bucket). Rationale: Open
+    // addressing has better cache locality -- probing consecutive array slots hits
+    // the same cache line. With load factor <50% (enforced by resize at
+    // size >= length/2), expected probe count is ~1.5.
     final int slot(Element[] curElements, Object e) {
         return (e.hashCode() & 0x7fffffff) % curElements.length;
     }
@@ -374,6 +405,10 @@ public class ImplicitLinkedHashCollection<E extends ImplicitLinkedHashCollection
         return findIndexOfEqualElement(key) != INVALID_INDEX;
     }
 
+    // DECISION: Capacity = 2 * expectedElements + 1 (always odd). Alternative:
+    // Power-of-two sizing. Rationale: Odd capacity avoids clustering with hash codes
+    // that have common factors with the table size. The 50% max load factor ensures
+    // O(1) average probe length.
     private static int calculateCapacity(int expectedNumElements) {
         // Avoid using even-sized capacities, to get better key distribution.
         int newCapacity = (2 * expectedNumElements) + 1;
@@ -423,6 +458,10 @@ public class ImplicitLinkedHashCollection<E extends ImplicitLinkedHashCollection
      * @return              The index at which the element was inserted, or INVALID_INDEX
      *                      if the element could not be inserted.
      */
+    // DECISION: Linear probing on collision rather than quadratic or double hashing.
+    // Alternative: Quadratic probing. Rationale: Linear probing is cache-friendly
+    // (sequential memory access) and simpler. With 50% load factor, probe sequences
+    // are short.
     int addInternal(Element newElement, Element[] addElements) {
         int slot = slot(addElements, newElement);
         for (int seen = 0; seen < addElements.length; seen++) {
@@ -439,6 +478,10 @@ public class ImplicitLinkedHashCollection<E extends ImplicitLinkedHashCollection
         throw new RuntimeException("Not enough hash table slots to add a new element.");
     }
 
+    // DECISION: Rehash by iterating the linked list (not the array) and
+    // re-inserting into a new array. This preserves insertion order in the new
+    // linked list. Alternative: Array iteration with sorting. Rationale: Linked
+    // list iteration gives O(n) rehash in insertion order.
     private void changeCapacity(int newCapacity) {
         Element[] newElements = new Element[newCapacity];
         HeadElement newHead = new HeadElement();
@@ -482,6 +525,18 @@ public class ImplicitLinkedHashCollection<E extends ImplicitLinkedHashCollection
      *
      * @return          True if an element was removed; false otherwise.
      */
+    // COMPLEXITY: 25 lines -- Three-phase removal: (1) unlink from doubly-linked
+    // list, (2) find next empty slot to determine reseat range, (3) reseat all
+    // elements in the cluster to maintain denseness invariant. Control flow:
+    // decrement size, remove from list, scan forward for null, then loop reseating.
+    //
+    // DECISION: After removal, reseat all elements between the removed slot and
+    // the next empty slot to maintain the denseness invariant. This invariant
+    // guarantees that any element is reachable from its hash slot by linear
+    // probing without crossing a null. Alternative: Tombstone markers. Rationale:
+    // Tombstones accumulate and degrade lookup performance over time; reseating
+    // maintains optimal probe lengths at the cost of O(k) work per removal where
+    // k is the cluster length.
     private boolean removeElementAtSlot(int slot) {
         size--;
         removeFromList(head, elements, slot);
