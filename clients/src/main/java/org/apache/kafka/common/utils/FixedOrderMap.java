@@ -29,6 +29,12 @@ import java.util.Map;
  * @param <K> The key type
  * @param <V> The value type
  */
+// DECISION: LinkedHashMap subclass that forbids remove() and clone() operations, enforcing
+// stable insertion order. Alternative: Collections.unmodifiableMap(LinkedHashMap). Rationale:
+// unmodifiableMap prevents ALL mutations including put(); FixedOrderMap allows put() (to add
+// new entries) while preventing removal (which would disrupt ordering). This is used where
+// the map grows monotonically but iteration order must remain stable (e.g., ConfigDef key
+// ordering for documentation generation).
 public final class FixedOrderMap<K, V> extends LinkedHashMap<K, V> {
     private static final long serialVersionUID = -6504110858733236170L;
 
