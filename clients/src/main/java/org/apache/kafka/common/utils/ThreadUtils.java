@@ -30,6 +30,12 @@ import static java.lang.Thread.UncaughtExceptionHandler;
 /**
  * Utilities for working with threads.
  */
+// DECISION: Thread factory and ExecutorService lifecycle utilities. Alternative: Use Guava's
+// ThreadFactoryBuilder. Rationale: Avoids Guava dependency in clients/ while providing the
+// two most-needed features: named ThreadFactory creation and two-phase ExecutorService shutdown.
+// CROSS-CUTTING: Used by KafkaProducer, KafkaConsumer, Connect Worker, and Streams StreamThread
+// for thread pool management. The shutdown utilities are critical for clean client lifecycle
+// management -- improper shutdown can cause message loss or duplicate processing.
 public class ThreadUtils {
 
     private static final Logger log = LoggerFactory.getLogger(ThreadUtils.class);
@@ -43,6 +49,9 @@ public class ThreadUtils {
      * @param daemon        True if we want daemon threads.
      * @return              The new ThreadFactory.
      */
+    // DECISION: Returns a ThreadFactory that creates named daemon threads with pattern "name-N".
+    // Alternative: Non-daemon threads. Rationale: Daemon threads don't prevent JVM shutdown --
+    // Kafka client threads should not block JVM exit when the application's main thread completes.
     public static ThreadFactory createThreadFactory(final String pattern,
                                                     final boolean daemon) {
         return createThreadFactory(pattern, daemon, null);
@@ -92,6 +101,9 @@ public class ThreadUtils {
      * @param timeout         The timeout of the shutdown.
      * @param timeUnit        The time unit of the shutdown timeout.
      */
+    // DECISION: Two-phase shutdown: (1) shutdown() for graceful task completion, (2) shutdownNow()
+    // if graceful timeout expires. Follows the ExecutorService shutdown pattern recommended in
+    // java.util.concurrent Javadoc. The timeout ensures resources are released even if tasks hang.
     public static void shutdownExecutorServiceQuietly(ExecutorService executorService,
                                                       long timeout,
                                                       TimeUnit timeUnit) {
