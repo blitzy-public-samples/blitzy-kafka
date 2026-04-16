@@ -48,6 +48,22 @@ import static org.apache.kafka.common.config.internals.BrokerSecurityConfigs.ALL
  * logic and is separated out here for easier, more direct testing.
  */
 
+// CROSS-CUTTING: Central configuration utility for ALL OAUTHBEARER components. Used by:
+// HttpJwtRetriever (URL/timeout validation), VerificationKeyResolverFactory (URL validation),
+// JwksFileVerificationKeyResolver (file URL validation), ClientCredentialsJwtRetriever,
+// JwtBearerJwtRetriever, and assertion/* classes for config access.
+// Depends on: BrokerSecurityConfigs (URL/file allowlist system properties),
+// ListenerName (mechanism prefix calculation), Utils (string utilities).
+// Contract: Stateless validators -- each method reads from the configs map and throws
+// ConfigException on validation failure. Thread-safe for read-only access.
+// Impact: Validation changes here affect ALL OAUTHBEARER configuration across the cluster.
+
+// DECISION: SASL mechanism-prefixed config resolution for listener isolation. When a
+// saslMechanism is provided, configs are looked up first with the mechanism prefix (e.g.,
+// "OAUTHBEARER.key") then without. Alternatives: (1) Only prefixed lookup, (2) Separate
+// config objects per listener. Rationale: Fallback to unprefixed enables shared defaults
+// while allowing per-mechanism overrides. This pattern is consistent with Kafka's
+// ListenerName-based config layering.
 public class ConfigurationUtils {
 
     private static final Logger LOG = LoggerFactory.getLogger(ConfigurationUtils.class);
@@ -211,6 +227,12 @@ public class ConfigurationUtils {
      * No effort is made to connect to the URL in the validation step.
      */
 
+    // SECURITY: (MEDIUM) URL protocol validation -- only http, https, and file protocols
+    // allowed. This prevents SSRF (Server-Side Request Forgery) via exotic protocols like
+    // ftp://, jar://, or ldap:// which could be used to access internal resources.
+    // The additional allowlist check via throwIfURLIsNotAllowed() validates the specific URL
+    // against a configurable system property (ALLOWED_SASL_OAUTHBEARER_URLS_CONFIG).
+    // Default: all URLs allowed.
     public URL validateUrl(String name) {
         String value = validateString(name);
         URL url;
@@ -271,6 +293,11 @@ public class ConfigurationUtils {
         return value;
     }
 
+    // SECURITY: (LOW) Config lookup with SASL mechanism prefix fallback. First checks for
+    // mechanism-prefixed key (e.g., "OAUTHBEARER.sasl.login.retry.backoff.ms"), then falls
+    // back to the unprefixed key. This enables per-listener isolation of OAUTHBEARER
+    // configuration. The prefix is set by ListenerName.saslMechanismPrefix() during
+    // construction.
     @SuppressWarnings("unchecked")
     public <T> T get(String name) {
         T value = (T) configs.get(prefix + name);
@@ -281,6 +308,28 @@ public class ConfigurationUtils {
         return (T) configs.get(name);
     }
 
+    // SECURITY: (MEDIUM) Reflective class instantiation from configuration value.
+    // Why: This method instantiates arbitrary classes specified in configuration. If the
+    // config is controlled by an attacker (e.g., via dynamic config update or JAAS option
+    // injection), they could specify a malicious class that executes arbitrary code during
+    // construction or configure().
+    // Exploit: Set SASL_OAUTHBEARER_JWT_VALIDATOR_CLASS to a class that exfiltrates
+    // credentials in its constructor or configure() method. The method calls
+    // Utils.newInstance() which uses Class.forName() and newInstance() -- standard
+    // reflection-based instantiation.
+    // Improvement: Validate the class implements the expected interface BEFORE instantiation.
+    // Currently, the type check (expectedClass.isInstance()) happens AFTER instantiation --
+    // the constructor may have already executed side effects. Consider a class allowlist for
+    // security-sensitive configs.
+    //
+    // COMPLEXITY: 88 lines -- Reflective class instantiation with config-value polymorphism.
+    // Structure: (1) Read configValue from configs. (2) Branch on type: String ->
+    // Class.forName + newInstance, Class -> newInstance, non-null other type -> throw
+    // ConfigException, null -> throw ConfigException.
+    // (3) Type check: verify instance is expectedClass. (4) If OAuthBearerConfigurable,
+    // call configure() with error handling and cleanup. (5) Cast and return.
+    // Key branches: String vs Class vs other vs null config value types.
+    // Exit paths: return configured instance, throw ConfigException (5 different paths).
     public static <T> T getConfiguredInstance(Map<String, ?> configs,
                                               String saslMechanism,
                                               List<AppConfigurationEntry> jaasConfigEntries,
@@ -344,6 +393,11 @@ public class ConfigurationUtils {
             );
         }
 
+        // DECISION: If the instantiated object implements OAuthBearerConfigurable, configure()
+        // is called immediately after construction. On configure() failure, the object is
+        // closed via Utils.maybeCloseQuietly() to prevent resource leaks. Alternative: Leave
+        // lifecycle to caller. Rationale: Encapsulating create + configure + error handling
+        // ensures no leaked resources.
         if (o instanceof OAuthBearerConfigurable) {
             try {
                 ((OAuthBearerConfigurable) o).configure(configs, saslMechanism, jaasConfigEntries);
@@ -394,6 +448,14 @@ public class ConfigurationUtils {
         );
     }
 
+    // SECURITY: (MEDIUM) Resource allowlist enforcement. URLs and files are checked against
+    // a system property-based allowlist. The default allows ALL resources (empty allowlist =
+    // allow all).
+    // Exploit: If the system property is not configured, any URL/file can be used as JWKS
+    // endpoint or token endpoint. An attacker with config access could point to an
+    // attacker-controlled URL.
+    // Improvement: Default to an empty allowlist (deny all) and require explicit
+    // configuration of allowed URLs/files. Log a WARN when using the permissive default.
     private void throwIfResourceIsNotAllowed(String resourceType,
                                              String configName,
                                              String configValue,
