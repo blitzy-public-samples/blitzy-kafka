@@ -43,7 +43,26 @@ import javax.security.sasl.RealmCallback;
  * for the list of SASL callback handlers required for each SASL mechanism.
  *
  * For adding custom SASL extensions, a {@link SaslExtensions} may be added to the subject's public credentials
+ *
+ * @implSpec SECURITY: (MEDIUM) Client-side SASL callback handler receives and dispatches
+ * credential callbacks from the JAAS/SASL framework. This handler extracts plaintext
+ * credentials (username from public credentials, password from private credentials) from
+ * the current JAAS Subject and passes them to the SASL mechanism.
+ * Exploit: (1) Credential scope leakage -- if a callback handler retains references to
+ * credentials beyond the mechanism scope, they persist in memory longer than necessary.
+ * This handler does not retain references (credentials are extracted per-callback).
+ * (2) Debug logging -- if SLF4J logging is at TRACE level and a custom callback handler
+ * logs callback arguments, plaintext passwords could appear in log files.
+ * Improvement: Consider zeroing the password char[] after SASL mechanism consumption
+ * to minimize the time credentials exist in memory.
  */
+// CROSS-CUTTING: Used by SaslClientAuthenticator for client-side credential provisioning
+// during SASL exchange. Depends on: auth/AuthenticateCallbackHandler (interface),
+// auth/SaslExtensions and SaslExtensionsCallback (extension passing), scram/
+// ScramExtensionsCallback (SCRAM-specific extensions), scram/ScramMechanism (mechanism
+// detection). The JAAS Subject is injected via SecurityManagerCompatibility.current().
+// Contract: Must handle all callback types required by the configured SASL mechanism.
+// Impact: If a callback type is unhandled, UnsupportedCallbackException causes auth failure.
 public class SaslClientCallbackHandler implements AuthenticateCallbackHandler {
 
     private String mechanism;
@@ -53,8 +72,18 @@ public class SaslClientCallbackHandler implements AuthenticateCallbackHandler {
         this.mechanism  = saslMechanism;
     }
 
+    // DECISION: Single handle() method with instanceof chain for 6 callback types rather
+    // than separate handler methods per callback type. Alternatives: (1) Map<Class, Handler>
+    // dispatch, (2) Visitor pattern. Rationale: SASL framework invokes handle() with mixed
+    // callback arrays -- a linear scan with instanceof is the standard JAAS pattern and
+    // matches the Java SASL API reference guide (linked in class Javadoc).
     @Override
     public void handle(Callback[] callbacks) throws UnsupportedCallbackException {
+        // SECURITY: (MEDIUM) Uses SecurityManagerCompatibility.get().current() to obtain
+        // the Subject from the current execution context. This replaces the deprecated
+        // Subject.getSubject(AccessController.getContext()). If no Subject is available
+        // (subject == null), NameCallback falls back to getDefaultName() and PasswordCallback
+        // throws UnsupportedCallbackException -- preventing silent anonymous authentication.
         Subject subject = SecurityManagerCompatibility.get().current();
         for (Callback callback : callbacks) {
             if (callback instanceof NameCallback) {
@@ -64,6 +93,15 @@ public class SaslClientCallbackHandler implements AuthenticateCallbackHandler {
                 } else
                     nc.setName(nc.getDefaultName());
             } else if (callback instanceof PasswordCallback) {
+                // SECURITY: (HIGH) Extracts plaintext password from Subject's private
+                // credentials. The password is converted to char[] from String, but the
+                // source String remains in the Subject's credential set and in the JVM
+                // string pool.
+                // Exploit: A memory dump of the JVM heap could reveal the plaintext
+                // password even after authentication completes. Java's String immutability
+                // means the password cannot be zeroed in memory -- only the char[] copy
+                // could be overwritten.
+                // Improvement: Consider using char[] as the private credential type.
                 if (subject != null && !subject.getPrivateCredentials(String.class).isEmpty()) {
                     char[] password = subject.getPrivateCredentials(String.class).iterator().next().toCharArray();
                     ((PasswordCallback) callback).setPassword(password);
@@ -76,6 +114,13 @@ public class SaslClientCallbackHandler implements AuthenticateCallbackHandler {
                 RealmCallback rc = (RealmCallback) callback;
                 rc.setText(rc.getDefaultText());
             } else if (callback instanceof AuthorizeCallback) {
+                // SECURITY: (MEDIUM) Authorization check compares authenticationID ==
+                // authorizationID. This prevents a client from requesting authorization
+                // as a different identity than it authenticated as.
+                // Exploit: If setAuthorized(true) were called unconditionally, any
+                // authenticated client could impersonate any other identity via the
+                // authorizationID.
+                // Improvement: Consider logging failed authorization attempts for audit.
                 AuthorizeCallback ac = (AuthorizeCallback) callback;
                 String authId = ac.getAuthenticationID();
                 String authzId = ac.getAuthorizationID();
@@ -83,6 +128,16 @@ public class SaslClientCallbackHandler implements AuthenticateCallbackHandler {
                 if (ac.isAuthorized())
                     ac.setAuthorizedID(authzId);
             } else if (callback instanceof ScramExtensionsCallback) {
+                // DECISION: ScramExtensionsCallback checked before SaslExtensionsCallback
+                // because SCRAM extensions are a superset of SASL extensions. If the
+                // mechanism is SCRAM, extensions are delivered via ScramExtensionsCallback;
+                // for non-GSSAPI mechanisms, SaslExtensionsCallback is used. This ordering
+                // prevents double-delivery of extension data.
+                // SECURITY: (LOW) SCRAM extensions and SASL extensions are extracted from
+                // Subject's public credentials. Extensions are key-value pairs passed
+                // during SASL exchange. GSSAPI is explicitly excluded from SaslExtensions
+                // because GSSAPI uses a binary token format that doesn't support extension
+                // key-value pairs.
                 if (ScramMechanism.isScram(mechanism) && subject != null && !subject.getPublicCredentials(Map.class).isEmpty()) {
                     @SuppressWarnings("unchecked")
                     Map<String, String> extensions = (Map<String, String>) subject.getPublicCredentials(Map.class).iterator().next();
