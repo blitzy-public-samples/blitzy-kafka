@@ -50,7 +50,29 @@ import static org.apache.kafka.common.config.SaslConfigs.SASL_OAUTHBEARER_TOKEN_
  *
  * The configuration required by the individual {@code JwtRetriever} classes will likely differ. Please refer to the
  * official Apache Kafka documentation for more information on these, and related configuration.
+ *
+ * @implNote DECISION: Uses delegation pattern — selects concrete JwtRetriever based on URL scheme
+ * rather than using a registry or SPI. Alternatives: (1) ServiceLoader-based retriever discovery,
+ * (2) Config-driven class name (which is now available via SASL_OAUTHBEARER_JWT_RETRIEVER_CLASS).
+ * Rationale: Simple conditional logic handles the two known URL schemes without over-engineering.
+ * This class exists as the default when no explicit retriever class is configured.
  */
+// SECURITY: (MEDIUM) Default retriever selection — routes to FileJwtRetriever or
+// ClientCredentialsJwtRetriever based on token endpoint URL scheme.
+// Why: The URL scheme determines the security properties of token retrieval. "file:"
+// reads from local filesystem (subject to file permission risks), while "http(s):"
+// performs network communication (subject to network security risks).
+// Exploit: If the token endpoint URL is set to "http:" (not "https:"), the
+// ClientCredentialsJwtRetriever will transmit client credentials in cleartext.
+// This class does not validate the scheme beyond "file:" vs other.
+// Improvement: Add explicit validation rejecting "http:" URLs — require "https:"
+// for non-file endpoints and log a CRITICAL warning if HTTP is detected.
+//
+// CROSS-CUTTING: Depends on FileJwtRetriever (file-based retrieval), ClientCredentialsJwtRetriever
+// (HTTP-based retrieval), internals/secured/ConfigurationUtils (URL validation).
+// This is the default JwtRetriever implementation used by OAuthBearerLoginCallbackHandler
+// when no explicit sasl.oauthbearer.jwt.retriever.class is configured.
+// Contract: configure() must be called before retrieve(). Delegates lifecycle to chosen retriever.
 public class DefaultJwtRetriever implements JwtRetriever {
 
     private static final Logger LOG = LoggerFactory.getLogger(DefaultJwtRetriever.class);
@@ -62,6 +84,13 @@ public class DefaultJwtRetriever implements JwtRetriever {
         ConfigurationUtils cu = new ConfigurationUtils(configs, saslMechanism);
         URL tokenEndpointUrl = cu.validateUrl(SASL_OAUTHBEARER_TOKEN_ENDPOINT_URL);
 
+        // SECURITY: (MEDIUM) Case-insensitive protocol check using Locale.ROOT avoids
+        // Turkish-I locale issue. However, only "file" is checked — "http" vs "https"
+        // distinction is not enforced here, leaving it to HttpJwtRetriever.
+        //
+        // DECISION: "file:" protocol -> FileJwtRetriever, everything else -> ClientCredentialsJwtRetriever.
+        // No support for other schemes (e.g., "classpath:", "s3:") — custom schemes require a custom
+        // JwtRetriever implementation via SASL_OAUTHBEARER_JWT_RETRIEVER_CLASS config.
         if (tokenEndpointUrl.getProtocol().toLowerCase(Locale.ROOT).equals("file"))
             delegate = new FileJwtRetriever();
         else
