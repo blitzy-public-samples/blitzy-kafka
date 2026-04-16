@@ -18,4 +18,14 @@
  * Provides common utilities for Kafka server and clients.
  * <strong>This package is not a supported Kafka API; the implementation may change without warning between minor or patch releases.</strong>
  */
+// DECISION: This package is marked as internal (non-public API) -- classes here may change
+// without notice between Kafka versions. Alternative: Expose utilities as public API.
+// Rationale: Keeping utils internal prevents external callers from depending on implementation
+// details that may change (e.g., buffer pooling strategy, iterator patterns), while allowing
+// rapid internal evolution.
+//
+// CROSS-CUTTING: This package is the most widely-imported package across all Kafka modules.
+// Utils, Time, Timer, ByteUtils, LogContext, and Bytes are imported by virtually every
+// module in the repository (clients, core, streams, connect, metadata, storage, coordinator,
+// raft, tools).
 package org.apache.kafka.common.utils;
