@@ -29,15 +29,43 @@ import javax.security.auth.Subject;
  * <p>This class's motivation and expected behavior is defined in
  * <a href="https://cwiki.apache.org/confluence/display/KAFKA/KIP-1006%3A+Remove+SecurityManager+Support">KIP-1006</a>
  */
+// DECISION: Interface-based abstraction (KIP-1006) for SecurityManager/Subject APIs that
+// are being removed across JDK versions. Three strategies implement this interface:
+// LegacyStrategy (JRE 8-17: AccessController + Subject.doAs), ModernStrategy (JRE 18+:
+// Subject.current + Subject.callAs), and UnsupportedStrategy (fallback diagnostic).
+// Alternative: Preprocessor-style conditional compilation or multi-release JAR.
+// Rationale: Strategy pattern with runtime detection is simpler to build, test, and
+// maintain in Kafka's Gradle build system. A single compiled artifact works across all
+// supported JRE versions without build-time JRE detection.
+//
+// CROSS-CUTTING: Public entry point for all JRE security API abstraction in Kafka.
+// Consumed by common/security/authenticator/SaslServerAuthenticator (SASL authentication),
+// common/security/authenticator/SaslClientAuthenticator (client auth),
+// common/security/kerberos/KerberosLogin (TGT refresh with Subject context),
+// and connect/runtime/ (connector plugin privileged operations). Any code that needs
+// AccessController.doPrivileged(), Subject.getSubject()/current(), or Subject.doAs()/callAs()
+// MUST use this interface — direct JDK API calls will break on future JRE versions.
+// Contract: get() never returns null; thread-safe; may silently switch strategies on
+// first call if legacy APIs are degraded.
 public interface SecurityManagerCompatibility {
 
     /**
      * @return an implementation of this interface which conforms to the functionality available in the current JRE.
      */
+    // DECISION: Static factory returning CompositeStrategy.INSTANCE singleton. Alternative:
+    // Service provider interface (SPI) with META-INF/services. Rationale: The strategy
+    // selection is fully deterministic based on JRE reflection — no user configuration or
+    // extensibility needed. Direct singleton reference is simpler and avoids SPI classloading
+    // overhead in the authentication hot path.
     static SecurityManagerCompatibility get() {
         return CompositeStrategy.INSTANCE;
     }
 
+    // DECISION: doPrivileged() is included in the interface even though the modern JRE makes
+    // it a no-op (pass-through). Alternative: Remove doPrivileged from the interface and
+    // replace call sites with direct action.run(). Rationale: Maintaining the method in the
+    // interface preserves the calling convention across all JRE versions — call sites don't
+    // need conditional logic. The ModernStrategy implementation simply calls action.run().
     /**
      * Performs the specified {@code PrivilegedAction} with privileges
      * enabled. The action is performed with <i>all</i> of the permissions
