@@ -53,7 +53,21 @@ import org.apache.kafka.common.errors.AuthenticationException;
  *   <li>Security misconfiguration with older broker: NOT_CONNECTED => AUTHENTICATE, disconnected in AUTHENTICATE state</li>
  * </ul>
  */
+// DECISION: Immutable state carrier combining an enum State with optional context (remote
+// host string or AuthenticationException). Predefined singleton constants (READY, AUTHENTICATE,
+// NOT_CONNECTED, EXPIRED, FAILED_SEND, LOCAL_CLOSE) avoid allocation for common states.
+// States requiring context (AUTHENTICATION_FAILED with exception, NOT_CONNECTED with remote
+// host) use constructor overloads.
+// Alternative: Simple enum without context — rejected because authentication failures need
+// to carry the exception message for client-side error reporting, and NOT_CONNECTED states
+// need the remote host for logging.
 public class ChannelState {
+    // DECISION: Seven-state lifecycle model. The state is set by KafkaChannel and read by Selector
+    // and NetworkClient. Key transitions:
+    // NOT_CONNECTED -> AUTHENTICATE -> READY -> EXPIRED/FAILED_SEND/LOCAL_CLOSE
+    // NOT_CONNECTED -> AUTHENTICATE -> AUTHENTICATION_FAILED (terminal)
+    // The distinction between EXPIRED (idle timeout), FAILED_SEND (write failure), and LOCAL_CLOSE
+    // (explicit close) enables precise disconnect reason reporting to the application layer.
     public enum State {
         NOT_CONNECTED,
         AUTHENTICATE,
