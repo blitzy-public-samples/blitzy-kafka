@@ -32,8 +32,19 @@ import java.nio.ByteBuffer;
  * So, it's best to assume that buffer expansion can always happen. An improvement would be to create a separate class
  * that throws an error if buffer expansion is required to avoid the issue altogether.
  */
+// DECISION: Auto-expanding OutputStream backed by ByteBuffer. Alternative: Fixed-capacity
+// ByteArrayOutputStream. Rationale: Record batches have variable sizes — auto-expansion with
+// REALLOCATION_FACTOR (~1.1) provides amortized O(1) writes while minimizing over-allocation.
+// Preserves initialPosition and initialCapacity for BufferSupplier pooling integration.
+//
+// CROSS-CUTTING: Used by RecordAccumulator and MemoryRecordsBuilder for record batch
+// serialization. The buffer is later sent via Selector -> KafkaChannel -> SocketChannel.
 public class ByteBufferOutputStream extends OutputStream {
 
+    // DECISION: 1.1x growth factor (10% over-allocation). Alternative: 2x doubling
+    // (like ArrayList). Rationale: Kafka record batches have predictable sizes based on
+    // batch.size config — 10% over-allocation is sufficient while 2x would waste
+    // significant memory for large batches.
     private static final float REALLOCATION_FACTOR = 1.1f;
 
     private final int initialCapacity;
@@ -117,6 +128,9 @@ public class ByteBufferOutputStream extends OutputStream {
             expandBuffer(remainingBytesRequired);
     }
 
+    // DECISION: Allocates new buffer, copies existing data, preserves position. Uses heap
+    // allocation (ByteBuffer.allocate) not direct allocation — record serialization happens
+    // in user threads where heap buffers have better locality than off-heap.
     private void expandBuffer(int remainingRequired) {
         int expandSize = Math.max((int) (buffer.limit() * REALLOCATION_FACTOR), buffer.position() + remainingRequired);
         ByteBuffer temp = ByteBuffer.allocate(expandSize);
