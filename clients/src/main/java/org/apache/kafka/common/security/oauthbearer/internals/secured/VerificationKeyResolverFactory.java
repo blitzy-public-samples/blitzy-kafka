@@ -50,10 +50,38 @@ import static org.apache.kafka.common.config.SaslConfigs.SASL_OAUTHBEARER_JWKS_E
  * a new instance for each particular set of configuration. Because each set of configuration
  * may have multiple instances, we want to reuse the single instance.
  */
+// CROSS-CUTTING: Depends on ConfigurationUtils (URL validation), JaasOptionsUtils (SSL config),
+// RefreshingHttpsJwks (HTTPS JWKS refresh), RefreshingHttpsJwksVerificationKeyResolver,
+// JwksFileVerificationKeyResolver, jose4j HttpsJwks and Get (HTTP client).
+// Used by: OAuthBearerValidatorCallbackHandler which calls get() during configure() to
+// obtain a shared CloseableVerificationKeyResolver for JWT signature validation.
+// Contract: get() returns a configured, ref-counted resolver. Callers must call close()
+// when done. Thread-safe via synchronized get() method.
+// Impact: This factory is the single entry point for all JWKS resolver creation in the
+// OAUTHBEARER stack. Changes here affect all broker-side JWT validation.
+//
+// DECISION: Factory pattern with static HashMap cache keyed by (configs, saslMechanism,
+// moduleOptions). Alternatives: (1) Create new resolver per callback handler, (2) Dependency
+// injection container. Rationale: JWKS resolvers spawn background threads and HTTP connections
+// -- creating one per handler would waste resources. The cache ensures a single resolver per
+// unique configuration. The RefCountingVerificationKeyResolver wraps the delegate to manage
+// lifecycle across multiple consumers -- configure() only runs once, close() only runs when
+// the last consumer disconnects. Risk: Static cache means resolvers live for the JVM lifetime
+// unless explicitly closed. Memory leak if configs change frequently (unlikely in practice).
 public class VerificationKeyResolverFactory {
 
+    // SECURITY: (MEDIUM) Global static cache of resolver instances keyed by config. This means
+    // all OAuthBearerValidatorCallbackHandler instances sharing the same config share a single
+    // resolver (and its JWKS cache). A compromised handler could poison the shared resolver's
+    // state, affecting all other handlers using the same config.
+    // Exploit: In a multi-listener broker with shared OAUTHBEARER config, a vulnerability in
+    // one listener's authentication path could corrupt the shared resolver, causing all
+    // listeners to accept forged tokens or reject legitimate ones.
+    // Improvement: Consider per-listener resolver isolation or immutable resolver instances.
     private static final Map<VerificationKeyResolverKey, CloseableVerificationKeyResolver> CACHE = new HashMap<>();
 
+    // SECURITY: (LOW) Synchronized on class -- serializes resolver creation/retrieval.
+    // Prevents race conditions during concurrent callback handler initialization.
     public static synchronized CloseableVerificationKeyResolver get(Map<String, ?> configs,
                                                                     String saslMechanism,
                                                                     List<AppConfigurationEntry> jaasConfigEntries) {
@@ -70,6 +98,11 @@ public class VerificationKeyResolverFactory {
         );
     }
 
+    // SECURITY: (MEDIUM) Resolver type determined by JWKS URL protocol: file:// -> JwksFile,
+    // https:// or http:// -> RefreshingHttpsJwks. No validation that https:// is preferred
+    // over http:// -- an http:// JWKS endpoint sends keys in cleartext, vulnerable to MITM.
+    // Exploit: Attacker intercepts cleartext http:// JWKS response, injects forged signing keys.
+    // Improvement: Log a WARN when JWKS endpoint uses http:// (not https://) protocol.
     static CloseableVerificationKeyResolver create(Map<String, ?> configs,
                                                    String saslMechanism,
                                                    List<AppConfigurationEntry> jaasConfigEntries) {
@@ -114,6 +147,13 @@ public class VerificationKeyResolverFactory {
      * to keep a single instance per key.
      */
 
+    // DECISION: Cache key uses (configs, saslMechanism, moduleOptions) tuple. Alternatives:
+    // (1) Just saslMechanism, (2) Config hash. Rationale: Full config equality ensures
+    // different JWKS endpoints or SSL configurations get separate resolvers. moduleOptions
+    // are extracted from JAAS config entries via JaasOptionsUtils.getOptions() for stable
+    // comparison. Note: configs Map equality uses Map.equals() which compares all entries
+    // -- expensive for large config maps but only called during resolver creation (not in
+    // the hot path).
     private static class VerificationKeyResolverKey {
 
         private final Map<String, ?> configs;
@@ -157,6 +197,12 @@ public class VerificationKeyResolverFactory {
      * appropriate number of times.
      */
 
+    // DECISION: Reference-counting wrapper for shared resolver lifecycle management.
+    // configure() increments count -- only first configure() initializes the delegate.
+    // close() decrements count -- only last close() tears down the delegate.
+    // Alternative: Use AtomicReference with lazy init. Rationale: Explicit reference counting
+    // is simple and deterministic. Risk: If a consumer skips close(), the count never reaches
+    // zero and the delegate leaks (background threads continue running).
     private static class RefCountingVerificationKeyResolver implements CloseableVerificationKeyResolver {
 
         private final CloseableVerificationKeyResolver delegate;
