@@ -25,7 +25,17 @@ import java.util.concurrent.ScheduledExecutorService;
  *
  * Implementations of this class should be thread-safe.
  */
+// DECISION: Separated scheduling concern from time-keeping (Time) to allow independent test
+// substitution. Alternative: Combine scheduling into the Time interface. Rationale: Scheduling
+// requires a ScheduledExecutorService (heavyweight), whereas Time is lightweight and widely used.
+// Keeping them separate allows MockTime without requiring a mock executor for every test.
+//
+// CROSS-CUTTING: Used by core/DynamicBrokerConfig for scheduling delayed config reconfiguration
+// tasks. SystemScheduler is the sole production implementation; test code can substitute a mock
+// that executes scheduled callables immediately for deterministic testing.
 public interface Scheduler {
+    // DECISION: Companion singleton like Time.SYSTEM. Uses SystemScheduler which delegates to
+    // ScheduledExecutorService.schedule() with real wall-clock delays.
     Scheduler SYSTEM = new SystemScheduler();
 
     /**
