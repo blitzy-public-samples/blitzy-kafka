@@ -67,10 +67,28 @@ import java.util.Map;
  * template file with the new value, or simply remove the claim from the file altogether so that the
  * original, static claim value is restored.
  */
+// DECISION: Layering strategy: later layers override earlier layers' claims via Map.putAll().
+// The layering order is determined by AssertionUtils.layeredAssertionJwtTemplate(): static base ->
+// file-based -> dynamic (iat/exp/jti). This means dynamic claims take highest priority, ensuring
+// time-based claims are always fresh and cannot be overridden by stale file or config values.
+// Alternative: Merge with conflict detection (throw on duplicate keys). Rationale: Override
+// semantics are more operationally flexible -- admins can override claims by adding a file template
+// without changing broker config. Silent override avoids operational disruptions.
+// CROSS-CUTTING: Composes multiple AssertionJwtTemplate instances. Created by
+// AssertionUtils.layeredAssertionJwtTemplate() which assembles static -> file -> dynamic layers.
+// Used by DefaultAssertionCreator.create() which calls header()/payload() to get merged claims.
+// Depends on: Utils.closeQuietly() for safe lifecycle cleanup. Each child template
+// (StaticAssertionJwtTemplate, FileAssertionJwtTemplate, DynamicAssertionJwtTemplate) is
+// independently configurable and closeable.
+// Impact: Changes to layering order in AssertionUtils affect claim override precedence for
+// all jwt-bearer OAuth assertion flows.
 public class LayeredAssertionJwtTemplate implements AssertionJwtTemplate {
 
     private final List<AssertionJwtTemplate> templates;
 
+    // DECISION: Two constructor overloads: varargs (for programmatic construction) and List (for
+    // AssertionUtils factory). The varargs version wraps in Arrays.asList() (fixed-size list).
+    // The List version wraps in Collections.unmodifiableList() to prevent external modification.
     public LayeredAssertionJwtTemplate(AssertionJwtTemplate... templates) {
         this.templates = Arrays.asList(templates);
     }
@@ -79,6 +97,12 @@ public class LayeredAssertionJwtTemplate implements AssertionJwtTemplate {
         this.templates = Collections.unmodifiableList(templates);
     }
 
+    // DECISION: Recomputes merged header map on every call rather than caching the merged result.
+    // Alternative: Cache merged map and invalidate on template change. Rationale: Template sources
+    // (DynamicAssertionJwtTemplate, FileAssertionJwtTemplate) may return different values on each
+    // call (time-based claims, file modifications). Caching would require change detection across
+    // all child templates. Fresh computation is simpler and correct -- the overhead of HashMap
+    // allocation + putAll() for 2-4 templates is negligible compared to the HTTP token request.
     @Override
     public Map<String, Object> header() {
         Map<String, Object> header = new HashMap<>();
@@ -99,6 +123,10 @@ public class LayeredAssertionJwtTemplate implements AssertionJwtTemplate {
         return Collections.unmodifiableMap(payload);
     }
 
+    // DECISION: Delegates close() to all child templates via Utils.closeQuietly(). This ensures
+    // proper lifecycle propagation in the composite -- each child's resources (e.g., CachedFile
+    // in FileAssertionJwtTemplate) are released. Utils.closeQuietly() suppresses exceptions to
+    // ensure all children are closed even if one throws.
     @Override
     public void close() {
         for (AssertionJwtTemplate template : templates) {
