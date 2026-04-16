@@ -19,11 +19,26 @@ package org.apache.kafka.common.security.kerberos;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+// SECURITY (MEDIUM): Parses Kerberos principal names (user@REALM, user/host@REALM) into components.
+// Malformed principals could cause incorrect identity mapping downstream in KerberosShortNamer.
+// Exploit: A crafted principal with embedded special characters could manipulate the NAME_PARSER
+// regex, producing an incorrect serviceName that maps to a different user's identity
+// in the auth_to_local rules, potentially granting elevated privileges.
+// Improvement: Strict validation of principal components against allowed character sets per RFC 4120
+// (Section 5.2.1 — principal names should contain only alphanumeric, '.', '-', '_' characters).
+// DECISION: Regex-based parsing (NAME_PARSER) vs structured tokenizer.
+// Rationale: Regex is concise for the three Kerberos principal forms (bare, service@REALM,
+// service/host@REALM). Alternative: recursive descent parser — rejected for simplicity.
+// CROSS-CUTTING: Used by DefaultKafkaPrincipalBuilder (authenticator/) for GSSAPI principal
+// resolution, and by KerberosShortNamer for auth_to_local rule application.
 public class KerberosName {
 
     /**
      * A pattern that matches a Kerberos name with at most 3 components.
      */
+    // SECURITY (LOW): NAME_PARSER regex uses [^/@]* which accepts any characters except '/' and '@'.
+    // This means principal components can contain spaces, control characters, or other unexpected chars.
+    // Risk: Unusual characters in serviceName could confuse downstream authorization systems.
     private static final Pattern NAME_PARSER = Pattern.compile("([^/@]*)(/([^/@]*))?@([^/@]*)");
 
     /** The first component of the name */
@@ -44,6 +59,10 @@ public class KerberosName {
         this.realm = realm;
     }
 
+    // DECISION: parse() handles three principal forms: (1) service/host@REALM (full match against
+    // NAME_PARSER), (2) bare name without '@' (fallback to simple name with null host/realm),
+    // (3) malformed with '@' but not matching pattern (throws IllegalArgumentException).
+    // This three-way classification ensures deterministic parsing with fail-fast on ambiguous input.
     /**
      * Create a name from the full Kerberos principal name.
      */
