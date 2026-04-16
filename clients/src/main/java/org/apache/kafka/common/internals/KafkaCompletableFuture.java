@@ -27,6 +27,19 @@ import java.util.function.Supplier;
  * Kafka API to a client application.
  * @param <T> The type of the future value.
  */
+// DECISION: Guarded CompletableFuture subclass that blocks all public completion methods
+// (complete, completeExceptionally, obtrudeValue, obtrudeException, completeAsync,
+// completeOnTimeout) by throwing UnsupportedOperationException. Only internal
+// kafkaComplete()/kafkaCompleteExceptionally() (package-private) can resolve the future.
+// Alternative: Return CompletableFuture directly from admin API. Rationale: Without this
+// guard, user code could call complete() on futures returned from KafkaAdminClient methods,
+// causing other waiters to receive spoofed results. This class enforces the contract that
+// only Kafka internals control future completion.
+// CROSS-CUTTING: Backing future type for all KafkaFutureImpl instances. Indirectly used by
+// every KafkaAdminClient operation, Connect framework async calls, and any code that
+// receives a KafkaFuture from the Kafka client API. Contract: Public completion methods
+// always throw UnsupportedOperationException; only internal kafkaComplete/
+// kafkaCompleteExceptionally can resolve. Thread-safe (inherits CompletableFuture safety).
 public class KafkaCompletableFuture<T> extends CompletableFuture<T> {
 
     /**
@@ -35,6 +48,10 @@ public class KafkaCompletableFuture<T> extends CompletableFuture<T> {
      * @return {@code true} if this invocation caused this CompletableFuture
      * to transition to a completed state, else {@code false}
      */
+    // DECISION: Package-private access (not public, not protected) restricts completion to
+    // code within common.internals package — specifically KafkaFutureImpl. Alternative:
+    // Protected access for subclass extensibility. Rationale: No external subclass should
+    // complete these futures; package-private is the narrowest useful visibility.
     boolean kafkaComplete(T value) {
         return super.complete(value);
     }
@@ -69,6 +86,11 @@ public class KafkaCompletableFuture<T> extends CompletableFuture<T> {
         throw erroneousCompletionException();
     }
 
+    // DECISION: Override newIncompleteFuture() (Java 9+) to return KafkaCompletableFuture
+    // instead of plain CompletableFuture. This ensures that child stages created by
+    // thenApply/thenCompose/whenComplete also have the guarded semantics — without this,
+    // CompletableFuture.thenApply() would return an unguarded CompletableFuture allowing
+    // user completion of derived futures.
     @Override
     public <U> CompletableFuture<U> newIncompleteFuture() {
         return new KafkaCompletableFuture<>();
@@ -89,6 +111,9 @@ public class KafkaCompletableFuture<T> extends CompletableFuture<T> {
         throw erroneousCompletionException();
     }
 
+    // DECISION: Centralized error message factory for consistent messaging across all blocked
+    // methods. The message "User code should not complete futures returned from Kafka clients"
+    // is intentionally user-facing and diagnostic.
     private UnsupportedOperationException erroneousCompletionException() {
         return new UnsupportedOperationException("User code should not complete futures returned from Kafka clients");
     }
