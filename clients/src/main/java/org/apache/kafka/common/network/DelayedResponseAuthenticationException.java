@@ -18,6 +18,16 @@ package org.apache.kafka.common.network;
 
 import org.apache.kafka.common.errors.AuthenticationException;
 
+// SECURITY: (MEDIUM) Marker exception wrapping an AuthenticationException to signal that the
+// authentication failure response should be delayed before the channel is closed. This delay
+// prevents timing-based credential enumeration attacks where an attacker measures the time
+// between connection and disconnect to determine whether a username is valid.
+// Risk: Without delayed response, an attacker could probe the system with usernames and observe
+// that invalid usernames are rejected faster than valid usernames with wrong passwords (because
+// credential lookup takes time). The delay normalizes the response timing.
+// Improvement: Consider adding jitter to the delay to further obscure timing patterns.
+// Used by: KafkaChannel.prepare() wraps AuthenticationException in this type to
+// trigger Selector.maybeDelayCloseOnAuthenticationFailure() instead of immediate close.
 public class DelayedResponseAuthenticationException extends AuthenticationException {
     private static final long serialVersionUID = 1L;
 
