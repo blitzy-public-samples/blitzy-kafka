@@ -44,11 +44,28 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.function.Function;
 
+// DECISION: Static factory class for creating ChannelBuilder instances based on SecurityProtocol.
+// This class centralizes the security protocol -> ChannelBuilder mapping, ensuring consistent
+// builder selection across clients, brokers, and inter-broker connections.
+// Alternative: Each component (client, broker, inter-broker) could instantiate builders directly.
+// This was rejected to avoid duplicating the protocol-to-builder mapping logic and to ensure
+// consistent listener-prefix config merging across all connection types.
+//
+// CROSS-CUTTING: Factory consumed by NetworkClient (clients/), SocketServer (core/kafka/network/),
+// Connect Worker, and Streams ThreadCache. Any change to the factory method signatures or
+// SecurityProtocol -> ChannelBuilder mapping affects all network-using components.
+// Contract: Returned ChannelBuilder must be configured (configure() called) before buildChannel().
+// Impact: Adding a new SecurityProtocol requires updating the switch/mapping in create().
 public class ChannelBuilders {
     private static final Logger log = LoggerFactory.getLogger(ChannelBuilders.class);
 
     private ChannelBuilders() { }
 
+    // DECISION: Separate factory methods for client-side and server-side channel builders because
+    // server-side builders require additional parameters (listenerName, DelegationTokenCache,
+    // CredentialCache, SASL mechanisms list) that are not applicable to client connections.
+    // The ConnectionMode enum (CLIENT vs SERVER) determines the authenticator role (initiator vs
+    // acceptor) within the created ChannelBuilder.
     /**
      * @param securityProtocol the securityProtocol
      * @param contextType the contextType, it must be non-null if `securityProtocol` is SASL_*; it is ignored otherwise
@@ -189,6 +206,12 @@ public class ChannelBuilders {
         return channelBuilder;
     }
 
+    // DECISION: Server-side configs are merged with listener-prefixed overrides (e.g.,
+    // "listener.name.INTERNAL.ssl.keystore.location" overrides "ssl.keystore.location").
+    // This enables per-listener security configuration, allowing different TLS certificates
+    // and authentication mechanisms on different broker listeners.
+    // The merging logic in the create() method applies listener-prefixed configs on top of
+    // global configs using a prefix-stripping transformation.
     /**
      * @return a mutable RecordingMap. The elements got from RecordingMap are marked as "used".
      */
@@ -216,6 +239,12 @@ public class ChannelBuilders {
             throw new IllegalArgumentException("`mode` must be non-null if `securityProtocol` is `" + securityProtocol + "`");
     }
 
+    // DECISION: KafkaPrincipalBuilder is loaded reflectively from configuration, with a default
+    // fallback to DefaultKafkaPrincipalBuilder. This plugin mechanism allows operators to customize
+    // principal extraction (e.g., mapping DN fields to Kafka principals, integrating with LDAP).
+    // Alternative: Hardcoded principal extraction -- rejected for extensibility.
+    // Risk: Custom KafkaPrincipalBuilder implementations could introduce security vulnerabilities
+    // if they incorrectly map or elevate principals.
     public static KafkaPrincipalBuilder createPrincipalBuilder(Map<String, ?> configs,
                                                                KerberosShortNamer kerberosShortNamer,
                                                                SslPrincipalMapper sslPrincipalMapper) {
