@@ -18,6 +18,17 @@ package org.apache.kafka.common.network;
 
 import java.io.Closeable;
 
+// DECISION: Per-channel metadata registry for tracking cipher suite (CipherInformation) and
+// client version (ClientInformation) data. Implemented as Selector.SelectorChannelMetadataRegistry
+// which integrates with IntGaugeSuite metrics for real-time monitoring.
+// The Closeable extension ensures that metrics counters are decremented when a channel closes.
+// Alternative: Global registry with channel-ID lookup — rejected for locality of reference;
+// each KafkaChannel holds its own registry instance, avoiding map lookups.
+
+// CROSS-CUTTING: Consumed by KafkaChannel (holds reference), SslTransportLayer (registers
+// CipherInformation after TLS handshake), and Selector (registers ClientInformation from
+// ApiVersionsRequest). Changes to this interface affect TLS and client metadata tracking.
+
 /**
  * Metadata about a channel is provided in various places in the network stack. This
  * registry is used as a common place to collect them.
