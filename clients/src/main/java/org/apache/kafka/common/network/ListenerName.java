@@ -23,6 +23,12 @@ import org.apache.kafka.common.utils.Utils;
 import java.util.Locale;
 import java.util.Objects;
 
+// DECISION: Named listener abstraction introduced by KIP-103 to support multiple listeners
+// with different security protocols on the same broker (e.g., INTERNAL on port 9092 with
+// SASL_SSL, EXTERNAL on port 9093 with SSL). The listener name is stored as a case-insensitive
+// uppercase string and used as a config prefix for per-listener configuration overrides.
+// Alternative: Index-based listener identification — rejected because named listeners are
+// more readable in configuration and logs, and support arbitrary naming conventions.
 public final class ListenerName {
 
     private static final String CONFIG_STATIC_PREFIX = "listener.name";
@@ -73,6 +79,10 @@ public final class ListenerName {
         return "ListenerName(" + value + ")";
     }
 
+    // DECISION: configPrefix() derives a lowercase form from the uppercase-stored listener name
+    // for consistent use as config prefixes. normalised() canonicalizes input to uppercase for
+    // case-insensitive matching. Config prefix format: "listener.name.<lowercase_name>." — this
+    // convention is used by ChannelBuilders to merge per-listener config overrides with global configs.
     public String configPrefix() {
         return CONFIG_STATIC_PREFIX + "." + value.toLowerCase(Locale.ROOT) + ".";
     }
