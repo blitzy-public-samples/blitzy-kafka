@@ -18,6 +18,9 @@ package org.apache.kafka.common.security.kerberos;
 
 import java.io.IOException;
 
+// Package-private exception thrown by KerberosRule when an auth_to_local format string contains
+// invalid parameter references (e.g., $n where n is out of range) or malformed numeric placeholders.
+// CROSS-CUTTING: Caught by KerberosShortNamer during rule evaluation to propagate mapping errors.
 public class BadFormatString extends IOException {
     BadFormatString(String msg) {
         super(msg);
