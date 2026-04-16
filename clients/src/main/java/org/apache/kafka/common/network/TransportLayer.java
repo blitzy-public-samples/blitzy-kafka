@@ -32,7 +32,29 @@ import java.nio.channels.SelectionKey;
 import java.nio.channels.SocketChannel;
 import java.security.Principal;
 
+// DECISION: Transport abstraction that adds handshake(), ready(), hasBytesBuffered(), and
+// principal extraction to the standard ScatteringByteChannel/TransferableChannel contracts.
+// This enables KafkaChannel to work uniformly with both plaintext (PlaintextTransportLayer)
+// and TLS-encrypted (SslTransportLayer) connections. The handshake() method is the key
+// extension — it drives TLS negotiation for SSL channels and is a no-op for plaintext.
+// Alternative: No abstraction — have KafkaChannel use SocketChannel directly and conditionally
+// wrap with SSLEngine. Rejected because the conditional logic would be scattered throughout
+// the read/write paths, making the code fragile and hard to test.
+//
+// CROSS-CUTTING: Core abstraction consumed by KafkaChannel. Implementations in this package:
+// PlaintextTransportLayer, SslTransportLayer. Created by ChannelBuilder implementations
+// (PlaintextChannelBuilder, SslChannelBuilder, SaslChannelBuilder).
+// Impact: Adding a new method to TransportLayer requires updates to both implementations
+// and potentially to tests that mock this interface.
 public interface TransportLayer extends ScatteringByteChannel, TransferableChannel {
+
+    // DECISION: ready() = true means the transport is capable of application data transfer.
+    // For PlaintextTransportLayer, always true. For SslTransportLayer, true only after TLS
+    // handshake completes. hasBytesBuffered() indicates data is available in intermediate
+    // buffers (SSL decryption buffer) that won't trigger a SelectionKey readable event.
+    // hasPendingWrites() (inherited from TransferableChannel) indicates data in the write
+    // buffer that hasn't been flushed to the socket, which prevents the channel from being
+    // marked as send-complete prematurely.
 
     /**
      * Returns true if the channel has handshake and authentication done.
