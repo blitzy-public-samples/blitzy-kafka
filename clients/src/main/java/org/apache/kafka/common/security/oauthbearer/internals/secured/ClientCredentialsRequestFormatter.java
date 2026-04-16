@@ -28,8 +28,28 @@ import java.util.Map;
 import static org.apache.kafka.common.config.SaslConfigs.SASL_OAUTHBEARER_CLIENT_CREDENTIALS_CLIENT_ID;
 import static org.apache.kafka.common.config.SaslConfigs.SASL_OAUTHBEARER_CLIENT_CREDENTIALS_CLIENT_SECRET;
 
+// SECURITY: (MEDIUM) Formats client_credentials grant request body and Basic Authorization header.
+// Why: Client secret is included in both the request body parameters and the Basic Authorization
+// header (Base64-encoded clientId:clientSecret). These credentials must be transmitted over HTTPS.
+// Exploit: (1) If the token endpoint URL uses HTTP instead of HTTPS, the client secret is sent
+// in cleartext. (2) The Basic Authorization header uses non-URL-safe Base64 (per RFC 7617) --
+// a misconfigured proxy that logs Authorization headers would capture the encoded credentials.
+// (3) The client secret is held in a String field which cannot be zeroed -- it persists in
+// memory until garbage collected, vulnerable to heap dump extraction.
+// Improvement: Use char[] instead of String for clientSecret to enable explicit zeroing.
+// Log a WARNING if the token endpoint URL protocol is not HTTPS.
+
+// CROSS-CUTTING: Implements HttpRequestFormatter interface -- used by HttpJwtRetriever to
+// format the HTTP request to the token endpoint. Created by ClientCredentialsJwtRetriever
+// during configure(). The formatted request body and headers are passed to
+// HttpJwtRetriever.post().
+// Depends on: SaslConfigs (config key names), Utils (blank checking, UTF-8 encoding).
+// Impact: Changes to header formatting or body encoding affect all client_credentials
+// OAuth flows.
 public class ClientCredentialsRequestFormatter implements HttpRequestFormatter {
 
+    // DECISION: Static constant for "client_credentials" grant type. Ensures consistency
+    // and enables grep/search across the codebase for this OAuth flow.
     public static final String GRANT_TYPE = "client_credentials";
 
     private final String clientId;
@@ -38,6 +58,12 @@ public class ClientCredentialsRequestFormatter implements HttpRequestFormatter {
 
     private final String scope;
 
+    // DECISION: URL-encoding is configurable via the urlencode constructor parameter
+    // rather than always applied. Alternative: Always URL-encode per RFC 6749 spec.
+    // Rationale: Some OAuth providers may not correctly decode URL-encoded credentials
+    // in the Basic header. The flag allows backward compatibility. In practice, urlencode
+    // should always be true for spec compliance.
+    // Risk: Setting urlencode=false violates RFC 6749 Section 2.3.1.
     public ClientCredentialsRequestFormatter(String clientId, String clientSecret, String scope, boolean urlencode) {
         if (Utils.isBlank(clientId))
             throw new ConfigException(SASL_OAUTHBEARER_CLIENT_CREDENTIALS_CLIENT_ID, clientId);
@@ -49,6 +75,10 @@ public class ClientCredentialsRequestFormatter implements HttpRequestFormatter {
         clientSecret = clientSecret.trim();
         scope = Utils.isBlank(scope) ? null : scope.trim();
 
+        // SECURITY: (LOW) URL-encoding of clientId, clientSecret, and scope per
+        // RFC 6749 Section 2.3.1. This prevents injection of additional form parameters
+        // via special characters in credentials. Without URL encoding, a clientId
+        // containing "&scope=admin" could inject an admin scope.
         // according to RFC-6749 clientId & clientSecret must be urlencoded, see https://tools.ietf.org/html/rfc6749#section-2.3.1
         if (urlencode) {
             clientId = URLEncoder.encode(clientId, StandardCharsets.UTF_8);
@@ -66,6 +96,11 @@ public class ClientCredentialsRequestFormatter implements HttpRequestFormatter {
     @Override
     public Map<String, String> formatHeaders() {
         String s = String.format("%s:%s", clientId, clientSecret);
+        // SECURITY: (MEDIUM) Per RFC 7617 / KAFKA-14496, uses non-URL-safe Base64
+        // encoder for the Basic Authorization header. The clientId:clientSecret string
+        // is UTF-8 encoded then Base64 encoded. Note: Base64.getEncoder() (not
+        // getUrlEncoder()) is used intentionally. The encoded string is prefixed with
+        // "Basic " per HTTP Basic authentication standard.
         // Per RFC-7617, we need to use the *non-URL safe* base64 encoder. See KAFKA-14496.
         String encoded = Base64.getEncoder().encodeToString(Utils.utf8(s));
         String authorizationHeader = String.format("Basic %s", encoded);
