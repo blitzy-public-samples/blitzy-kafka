@@ -25,7 +25,34 @@ import java.util.Objects;
  * Immutable refresh-related configuration for expiring credentials that can be
  * parsed from a producer/consumer/broker config.
  */
+// SECURITY: (MEDIUM) Configuration values directly affect token availability and refresh timing.
+// Why: Refresh parameters (window factor, jitter, min period, buffer) control when tokens are
+// refreshed relative to their expiry. Misconfiguration can cause premature refreshes (DoS on
+// the OAuth provider) or late refreshes (expired token errors, authentication failures).
+// Exploit: If an attacker modifies the SASL config (e.g., via the dynamic config API on the
+// broker with ALTER_CONFIGS permission), they could set loginRefreshWindowFactor to 0.0
+// (refresh immediately after obtaining token) causing a tight loop of token requests that
+// DoS the OAuth provider, or set it to 1.0 (refresh exactly at expiry time) causing all
+// tokens to expire before refresh completes -- resulting in cluster-wide auth failures.
+// Improvement: Validate refresh parameter ranges at construction time -- reject values outside
+// reasonable bounds (e.g., factor must be in [0.5, 0.95], jitter must be in [0.0, 0.25]).
+// Currently, range validation is performed at a higher level by SaslConfigs ConfigDef, but
+// direct construction bypassing ConfigDef (e.g., in tests) can create invalid configs.
+//
+// CROSS-CUTTING: Consumed by ExpiringCredentialRefreshingLogin (in this package) which uses
+// these config values for refresh scheduling -- window factor, jitter, min period, and buffer
+// seconds drive the refresh timestamp computation in refreshMs(). Config keys are defined in
+// org.apache.kafka.common.config.SaslConfigs: SASL_LOGIN_REFRESH_WINDOW_FACTOR,
+// SASL_LOGIN_REFRESH_WINDOW_JITTER, SASL_LOGIN_REFRESH_MIN_PERIOD_SECONDS,
+// SASL_LOGIN_REFRESH_BUFFER_SECONDS. Changes to these config defaults in SaslConfigs affect
+// all OAUTHBEARER and Kerberos refresh timing across all clients and brokers.
 public class ExpiringCredentialRefreshConfig {
+    // DECISION: Immutable value object constructed from a raw config map. No range validation is
+    // performed here -- values are validated at a higher level by SaslConfigs ConfigDef definitions.
+    // Alternative: Validate ranges in this constructor (throw IllegalArgumentException for out-of-
+    // range values). Rationale: Separation of validation (ConfigDef) from storage (this class).
+    // Risk: Direct construction bypassing ConfigDef (e.g., in tests or custom integrations) could
+    // create configs with invalid values (e.g., negative jitter, factor > 1.0).
     private final double loginRefreshWindowFactor;
     private final double loginRefreshWindowJitter;
     private final short loginRefreshMinPeriodSeconds;
@@ -54,6 +81,11 @@ public class ExpiringCredentialRefreshConfig {
      */
     public ExpiringCredentialRefreshConfig(Map<String, ?> configs, boolean clientReloginAllowedBeforeLogout) {
         Objects.requireNonNull(configs);
+        // DECISION: Raw map lookups with casting to wrapper types (Double, Short) rather than using
+        // a typed config accessor (e.g., AbstractConfig.getDouble()). Alternative: Accept
+        // AbstractConfig instead of Map<String, ?>. Rationale: Avoids dependency on AbstractConfig
+        // for this small value object, keeping it lightweight and testable with plain Maps. Risk:
+        // ClassCastException or NullPointerException if the map contains wrong types or missing keys.
         this.loginRefreshWindowFactor = (Double) configs.get(SaslConfigs.SASL_LOGIN_REFRESH_WINDOW_FACTOR);
         this.loginRefreshWindowJitter = (Double) configs.get(SaslConfigs.SASL_LOGIN_REFRESH_WINDOW_JITTER);
         this.loginRefreshMinPeriodSeconds = (Short) configs.get(SaslConfigs.SASL_LOGIN_REFRESH_MIN_PERIOD_SECONDS);
