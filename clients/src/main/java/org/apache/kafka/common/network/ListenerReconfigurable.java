@@ -18,6 +18,19 @@ package org.apache.kafka.common.network;
 
 import org.apache.kafka.common.Reconfigurable;
 
+// DECISION: Extends Reconfigurable with a listenerName() method to enable per-listener
+// dynamic reconfiguration. This is used by SslChannelBuilder and SaslChannelBuilder to
+// support dynamic SSL certificate rotation and SASL configuration updates on a per-listener
+// basis without broker restart.
+// Alternative: Single global Reconfigurable — rejected because different listeners may have
+// different SSL certificates and SASL configurations that need independent reconfiguration.
+// The listenerName() enables DynamicBrokerConfig (core/) to route reconfiguration events
+// to the correct ChannelBuilder.
+
+// CROSS-CUTTING: Consumed by DynamicBrokerConfig in core/src/main/scala/kafka/server/ which
+// manages runtime configuration changes. Implementations: SslChannelBuilder, SaslChannelBuilder.
+// Contract: reconfigure() must be atomic — either fully applied or rolled back.
+
 /**
  * Interface for reconfigurable entities associated with a listener.
  */
