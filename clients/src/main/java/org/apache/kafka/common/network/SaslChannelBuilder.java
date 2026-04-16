@@ -76,6 +76,34 @@ import java.util.function.Supplier;
 import javax.security.auth.Subject;
 import javax.security.auth.kerberos.KerberosPrincipal;
 
+// SECURITY: (HIGH) SaslChannelBuilder constructs authenticated SASL channels
+// for both SASL_PLAINTEXT and SASL_SSL security protocols. This builder
+// orchestrates the JAAS configuration, LoginManager lifecycle, per-mechanism
+// callback handler instantiation, and SASL authenticator creation.
+// Why: This class is the entry point for all SASL authentication
+// configuration — a misconfiguration here (wrong JAAS config, missing
+// callback handler, incorrect mechanism list) can silently disable
+// authentication or weaken the security posture.
+// Risk: If the LoginManager is shared across mechanisms without proper
+// isolation, a compromise of one mechanism's credentials could affect
+// others. The reflective instantiation of callback handlers (via
+// Utils.newInstance) could load malicious classes if the classpath is
+// compromised.
+// Improvement: Consider validating callback handler class names against
+// an allowlist before reflective instantiation to prevent classloading
+// attacks.
+//
+// CROSS-CUTTING: Depends on security/authenticator/ (SaslServerAuthenticator,
+// SaslClientAuthenticator, LoginManager, CredentialCache),
+// security/kerberos/ (KerberosLogin, KerberosShortNamer),
+// security/oauthbearer/ (OAuthBearerSaslClientCallbackHandler),
+// security/scram/ (ScramMechanism, ScramServerCallbackHandler),
+// security/plain/ (PlainSaslServer, PlainServerCallbackHandler),
+// and security/token/delegation/ (DelegationTokenCache).
+// Contract: LoginManager must be successfully created before
+// buildChannel() is called.
+// Impact: Changes to any SASL mechanism's callback handler interface
+// break this builder.
 public class SaslChannelBuilder implements ChannelBuilder, ListenerReconfigurable {
     static final String GSS_NATIVE_PROP = "sun.security.jgss.native";
 
@@ -136,6 +164,16 @@ public class SaslChannelBuilder implements ChannelBuilder, ListenerReconfigurabl
         }
     }
 
+    // COMPLEXITY: Method size ~45 lines — multi-phase SASL configuration
+    // covering server/client callback handler creation, Kerberos realm
+    // resolution, LoginManager acquisition per mechanism, and optional
+    // SSL factory setup.
+    // Structure: (1) Server/client branch for callback handler creation,
+    // (2) Kerberos short-namer initialization if GSSAPI is configured,
+    // (3) LoginManager loop per JAAS context with native GSS credential
+    // injection, (4) SASL_SSL SslFactory initialization.
+    // Key paths: Happy path completes all four phases; any exception in
+    // phases 1-4 triggers close() cleanup and re-throws as KafkaException.
     @SuppressWarnings("unchecked")
     @Override
     public void configure(Map<String, ?> configs) throws KafkaException {
@@ -163,6 +201,18 @@ public class SaslChannelBuilder implements ChannelBuilder, ListenerReconfigurabl
                 if (principalToLocalRules != null)
                     kerberosShortNamer = KerberosShortNamer.fromUnparsedRules(defaultRealm, principalToLocalRules);
             }
+            // SECURITY: (HIGH) LoginManager instances are reference-counted
+            // singletons per mechanism. Sharing LoginManagers across
+            // connections for the same mechanism improves performance
+            // (avoids repeated Kerberos TGT acquisition) but means a
+            // credential compromise affects all connections. The
+            // DelegationTokenCache and CredentialCache parameters inject
+            // server-side token/credential stores that the authenticator
+            // uses for validation.
+            // Risk: A single compromised LoginManager allows an attacker
+            // to hijack all connections using that mechanism.
+            // Improvement: Consider per-connection LoginManager isolation
+            // for high-security deployments at the cost of performance.
             for (Map.Entry<String, JaasContext> entry : jaasContexts.entrySet()) {
                 String mechanism = entry.getKey();
                 // With static JAAS configuration, use KerberosLogin if Kerberos is enabled. With dynamic JAAS configuration,
@@ -211,6 +261,20 @@ public class SaslChannelBuilder implements ChannelBuilder, ListenerReconfigurabl
         return listenerName;
     }
 
+    // DECISION: Channel construction creates a Supplier<Authenticator>
+    // (lazy authenticator creation) rather than an Authenticator instance
+    // directly. This supports re-authentication — when a channel needs
+    // to re-authenticate, KafkaChannel
+    // .swapAuthenticatorsAndBeginReauthentication() invokes the supplier
+    // to create a fresh authenticator while the old one handles cleanup.
+    // Alternative: Eager authenticator creation — rejected because
+    // re-authentication requires fresh state (new SASL handshake) that
+    // cannot be achieved by resetting an existing authenticator.
+    //
+    // COMPLEXITY: Method size ~35 lines — builds transport layer, then
+    // branches on server/client mode to create authenticator supplier,
+    // finally constructs KafkaChannel. Error path closes transport layer
+    // if KafkaChannel creation fails.
     @Override
     public KafkaChannel buildChannel(String id, SelectionKey key, int maxReceiveSize,
                                      MemoryPool memoryPool, ChannelMetadataRegistry metadataRegistry) throws KafkaException {
@@ -259,6 +323,14 @@ public class SaslChannelBuilder implements ChannelBuilder, ListenerReconfigurabl
         if (sslFactory != null) sslFactory.close();
     }
 
+    // DECISION: SASL_SSL wraps an SslTransportLayer for encryption before
+    // SASL authentication. SASL_PLAINTEXT uses PlaintextTransportLayer —
+    // SASL credentials are sent without encryption. The SecurityProtocol
+    // enum determines which transport is used. For SASL_PLAINTEXT, the
+    // SASL mechanism itself must provide credential protection (e.g.,
+    // SCRAM uses challenge-response). PLAIN over SASL_PLAINTEXT sends
+    // credentials in cleartext — see PlainSaslServer SECURITY warning.
+    //
     // Visible to override for testing
     protected TransportLayer buildTransportLayer(String id, SelectionKey key, SocketChannel socketChannel,
                                                  ChannelMetadataRegistry metadataRegistry) throws IOException {
@@ -305,6 +377,16 @@ public class SaslChannelBuilder implements ChannelBuilder, ListenerReconfigurabl
         return new KerberosPrincipal("tmp", 1).getRealm();
     }
 
+    // SECURITY: (MEDIUM) Client callback handler is loaded via reflection
+    // from the SASL_CLIENT_CALLBACK_HANDLER_CLASS config. If not set,
+    // a default handler is selected based on the mechanism. Reflective
+    // class loading from user-provided config means a misconfigured or
+    // malicious class name could execute arbitrary code at instantiation.
+    // Risk: An attacker who can modify client configuration could inject
+    // a malicious AuthenticateCallbackHandler implementation.
+    // Improvement: Validate that the configured class implements
+    // AuthenticateCallbackHandler before instantiation, and consider
+    // restricting class loading to trusted packages.
     private void createClientCallbackHandler(Map<String, ?> configs) {
         @SuppressWarnings("unchecked")
         Class<? extends AuthenticateCallbackHandler> clazz = (Class<? extends AuthenticateCallbackHandler>) configs.get(SaslConfigs.SASL_CLIENT_CALLBACK_HANDLER_CLASS);
@@ -314,6 +396,19 @@ public class SaslChannelBuilder implements ChannelBuilder, ListenerReconfigurabl
         saslCallbackHandlers.put(clientSaslMechanism, callbackHandler);
     }
 
+    // SECURITY: Callback handlers are instantiated via reflection from
+    // class names specified in SASL configuration. For PLAIN mechanism,
+    // PlainServerCallbackHandler is used by default on the server side.
+    // For SCRAM, ScramServerCallbackHandler retrieves stored credentials
+    // from CredentialCache. For OAUTHBEARER,
+    // OAuthBearerUnsecuredValidatorCallbackHandler handles JWT
+    // validation (WARNING: unsecured validator — development only).
+    // Each handler class has different security properties and trust
+    // assumptions.
+    // Risk: Custom handler classes loaded via config could bypass
+    // standard authentication checks if not properly validated.
+    // Improvement: Log a warning when a custom (non-default) callback
+    // handler is loaded, and consider a security audit hook.
     private void createServerCallbackHandlers(Map<String, ?> configs) {
         for (String mechanism : jaasContexts.keySet()) {
             AuthenticateCallbackHandler callbackHandler;
@@ -346,6 +441,16 @@ public class SaslChannelBuilder implements ChannelBuilder, ListenerReconfigurabl
         }
     }
 
+    // DECISION: Login class selection follows a priority chain:
+    // (1) If GSSAPI is configured, use KerberosLogin — which manages TGT
+    // renewal via a background thread and Subject re-login.
+    // (2) If OAUTHBEARER is the client mechanism, use
+    // OAuthBearerRefreshingLogin — which handles OAuth token refresh.
+    // (3) Otherwise, use DefaultLogin — a minimal login that performs a
+    // single JAAS login without renewal.
+    // Alternative: A unified login class with pluggable refresh — rejected
+    // because Kerberos and OAuth have fundamentally different renewal
+    // lifecycles (TGT ticket granting vs. token refresh grant).
     protected Class<? extends Login> defaultLoginClass() {
         if (jaasContexts.containsKey(SaslConfigs.GSSAPI_MECHANISM))
             return KerberosLogin.class;
@@ -354,6 +459,14 @@ public class SaslChannelBuilder implements ChannelBuilder, ListenerReconfigurabl
         return DefaultLogin.class;
     }
 
+    // DECISION: Default client callback handler is selected by SASL
+    // mechanism: GSSAPI uses KerberosClientCallbackHandler (handles
+    // Kerberos-specific callbacks), OAUTHBEARER uses
+    // OAuthBearerSaslClientCallbackHandler (handles OAuth token
+    // retrieval), and all other mechanisms fall back to the generic
+    // SaslClientCallbackHandler.
+    // Alternative: A single polymorphic handler — rejected because each
+    // mechanism has unique callback types requiring specialized logic.
     private Class<? extends AuthenticateCallbackHandler> clientCallbackHandlerClass() {
         switch (clientSaslMechanism) {
             case SaslConfigs.GSSAPI_MECHANISM:
@@ -365,6 +478,19 @@ public class SaslChannelBuilder implements ChannelBuilder, ListenerReconfigurabl
         }
     }
 
+    // SECURITY: (MEDIUM) Native GSSCredential is acquired for Kerberos
+    // (GSSAPI) server-mode operation. The GSSCredential is stored as a
+    // private credential in the Subject and shared across all connections
+    // using the same Kerberos principal. If GSSCredential expires and
+    // renewal fails, all new connections will fail authentication until
+    // the credential is refreshed by LoginManager.
+    // Risk: Stale GSSCredential can cause cascading authentication
+    // failures. Additionally, the GSSCredential stored in the Subject's
+    // private credential set could be extracted by code running in the
+    // same JVM with access to the Subject.
+    // Improvement: Monitor GSSCredential remaining lifetime and trigger
+    // proactive renewal before expiry to avoid authentication outages.
+    //
     // As described in http://docs.oracle.com/javase/8/docs/technotes/guides/security/jgss/jgss-features.html:
     // "To enable Java GSS to delegate to the native GSS library and its list of native mechanisms,
     // set the system property "sun.security.jgss.native" to true"
