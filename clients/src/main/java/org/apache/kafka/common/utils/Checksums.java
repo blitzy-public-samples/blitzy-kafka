@@ -24,6 +24,11 @@ import java.util.zip.Checksum;
  *
  * NOTE: This class is intended for INTERNAL usage only within Kafka.
  */
+// DECISION: Utility class bridging java.util.zip.Checksum with ByteBuffer operations.
+// Alternative: Require callers to extract byte[] from ByteBuffer before checksumming.
+// Rationale: Many Kafka buffers are direct (off-heap) ByteBuffers from network I/O —
+// extracting byte[] would require a copy. This class handles array-backed vs direct
+// buffers transparently.
 public final class Checksums {
 
     private Checksums() {
@@ -41,6 +46,10 @@ public final class Checksums {
      * Uses {@link Checksum#update} on {@code buffer}'s content, starting from the given {@code offset}
      * by the provided {@code length}, without modifying its position and limit.
      */
+    // DECISION: Three-branch strategy: (1) array-backed → direct array access (fastest),
+    // (2) JDK 9+ direct buffers → Checksum.update(ByteBuffer) (zero-copy), (3) fallback →
+    // byte-at-a-time update. Alternative: Always copy to temp array. Rationale: Branch (1)
+    // and (2) avoid allocation entirely for the common cases.
     public static void update(Checksum checksum, ByteBuffer buffer, int offset, int length) {
         if (buffer.hasArray()) {
             checksum.update(buffer.array(), buffer.position() + buffer.arrayOffset() + offset, length);
@@ -67,6 +76,8 @@ public final class Checksums {
         }
     }
     
+    // DECISION: Big-endian byte order for checksum updates. Rationale: Kafka wire protocol
+    // uses big-endian (network byte order) — checksums must match across different-endian hosts.
     public static void updateInt(Checksum checksum, int input) {
         checksum.update((byte) (input >> 24));
         checksum.update((byte) (input >> 16));
