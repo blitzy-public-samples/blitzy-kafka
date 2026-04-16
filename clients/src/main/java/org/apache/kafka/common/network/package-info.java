@@ -14,6 +14,17 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+// CROSS-CUTTING: This package is the core NIO networking layer consumed by:
+// - clients/NetworkClient (client-side I/O)
+// - core/kafka/network/SocketServer (broker-side I/O)
+// - connect/runtime (Connect distributed coordination)
+// - streams internals (state store restoration)
+// Key abstractions: Selector (event loop), KafkaChannel (per-connection), TransportLayer
+// (encryption), Authenticator (SASL/SSL auth), ChannelBuilder (factory).
+// Security perimeter: SslTransportLayer provides TLS, SaslChannelBuilder provides SASL.
+// All modifications to this package affect the entire Kafka ecosystem.
+
 /**
  * Provides the network API used by the Kafka clients
  * <strong>This package is not a supported Kafka API; the implementation may change without warning between minor or patch releases.</strong>
