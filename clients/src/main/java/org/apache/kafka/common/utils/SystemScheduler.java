@@ -26,6 +26,13 @@ import java.util.concurrent.TimeUnit;
  *
  * Use Scheduler.SYSTEM instead of constructing an instance of this class.
  */
+// DECISION: Thin delegation to ScheduledExecutorService rather than a custom scheduling
+// implementation. Alternative: Timer-based scheduling or custom thread pool. Rationale:
+// ScheduledExecutorService is the JDK standard for delayed/periodic tasks — reusing it
+// avoids reinventing scheduling semantics and benefits from JDK performance optimizations.
+// CROSS-CUTTING: Production implementation of Scheduler interface. Used by
+// DynamicBrokerConfig for delayed reconfiguration tasks. Test code injects
+// mock Scheduler implementations.
 public class SystemScheduler implements Scheduler {
     SystemScheduler() {
     }
