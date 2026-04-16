@@ -31,6 +31,28 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.function.Supplier;
 
+// DECISION: PlaintextChannelBuilder creates unencrypted, unauthenticated channels for the
+// PLAINTEXT security protocol. This is the simplest ChannelBuilder — no TLS handshake, no
+// SASL authentication. The PlaintextAuthenticator inner class is a no-op that always
+// reports complete() = true.
+// Alternative: Require at least SASL_PLAINTEXT for all connections — rejected because
+// Kafka supports development/testing use cases where encryption overhead is undesirable.
+//
+// SECURITY: (CRITICAL) PLAINTEXT protocol provides NO encryption and NO authentication.
+// All data (including credentials if SASL_PLAINTEXT mechanism configs are inadvertently
+// used) is transmitted in cleartext. The principal is always KafkaPrincipal.ANONYMOUS.
+// Risk: Any network observer (tcpdump, Wireshark, network tap) can read all Kafka
+// messages including produce/fetch data, consumer group membership, and admin operations.
+// An attacker on the same network segment can inject, modify, or replay messages.
+// Improvement: This protocol should only be used in isolated development/test
+// environments. Production deployments should use SSL, SASL_SSL, or at minimum
+// SASL_PLAINTEXT.
+//
+// CROSS-CUTTING: Implements ChannelBuilder (common/network/ChannelBuilder.java), which
+// is consumed by Selector (common/network/Selector.java) for NIO-based I/O multiplexing.
+// Contract: Must return a fully constructed KafkaChannel from buildChannel().
+// Impact: If this builder's behavior changes, all PLAINTEXT listeners across broker and
+// client connections are affected.
 public class PlaintextChannelBuilder implements ChannelBuilder {
     private final ListenerName listenerName;
     private Map<String, ?> configs;
@@ -47,6 +69,12 @@ public class PlaintextChannelBuilder implements ChannelBuilder {
         this.configs = configs;
     }
 
+    // DECISION: Resource cleanup uses catch-block rather than finally because KafkaChannel
+    // takes ownership of transportLayer on success. Closing in finally would destroy the
+    // transport even when KafkaChannel was successfully created.
+    // CROSS-CUTTING: Creates KafkaChannel (common/network/KafkaChannel.java) which is
+    // registered with the Selector for read/write I/O. Also creates PlaintextTransportLayer
+    // (common/network/PlaintextTransportLayer.java) as the raw NIO transport.
     @Override
     public KafkaChannel buildChannel(String id, SelectionKey key, int maxReceiveSize,
                                      MemoryPool memoryPool, ChannelMetadataRegistry metadataRegistry) throws KafkaException {
@@ -78,6 +106,17 @@ public class PlaintextChannelBuilder implements ChannelBuilder {
     @Override
     public void close() {}
 
+    // DECISION: No-op authenticator that immediately reports authentication as complete.
+    // The principal is derived from the KafkaPrincipalBuilder (default: ANONYMOUS).
+    // This authenticator never throws AuthenticationException — all connections succeed.
+    //
+    // CROSS-CUTTING: Implements Authenticator (common/network/Authenticator.java) and
+    // delegates principal construction to KafkaPrincipalBuilder via
+    // ChannelBuilders.createPrincipalBuilder(). The principalBuilder instance is shared
+    // across the authenticator's lifetime and closed explicitly in close().
+    // Contract: complete() always returns true; authenticate() is intentionally empty.
+    // Impact: Any change to the Authenticator interface contract requires updating this
+    // class. Re-authentication (reauthenticate()) is not supported for PLAINTEXT.
     private static class PlaintextAuthenticator implements Authenticator {
         private final PlaintextTransportLayer transportLayer;
         private final KafkaPrincipalBuilder principalBuilder;
@@ -92,6 +131,14 @@ public class PlaintextChannelBuilder implements ChannelBuilder {
         @Override
         public void authenticate() {}
 
+        // SECURITY: (MEDIUM) The principal is constructed from client IP address only,
+        // with no cryptographic identity verification. Any client can connect and is
+        // assigned the principal built by KafkaPrincipalBuilder (default: ANONYMOUS).
+        // Risk: An attacker can impersonate any client since there is no identity
+        // verification — authorization relies entirely on ACLs applied to ANONYMOUS or
+        // IP-based principals, which are trivially spoofable on shared networks.
+        // Improvement: Use SASL_PLAINTEXT or SASL_SSL to bind principals to
+        // authenticated identities rather than unauthenticated IP addresses.
         @Override
         public KafkaPrincipal principal() {
             InetAddress clientAddress = transportLayer.socketChannel().socket().getInetAddress();
