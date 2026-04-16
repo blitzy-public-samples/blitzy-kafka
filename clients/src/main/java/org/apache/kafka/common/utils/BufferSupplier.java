@@ -29,6 +29,16 @@ import java.util.Map;
  * batches, allocating a potentially large buffer (64 KB for LZ4) will dominate the cost of decompressing and
  * iterating over the records in the batch.
  */
+// DECISION: Abstract ByteBuffer pool with three strategies: NO_CACHING (always allocate),
+// DefaultSupplier (size-bucketed Deque<ByteBuffer> pool), GrowableBufferSupplier (single reusable
+// growing buffer). Alternative: Fixed-size buffer pool or Netty's PooledByteBufAllocator.
+// Rationale: Kafka's decompression paths need temporary buffers of varying sizes -- the bucketed
+// pool (DefaultSupplier) avoids repeated allocation for common sizes while the growable variant
+// is optimal for single-threaded record batch processing where one buffer suffices.
+//
+// CROSS-CUTTING: Consumed by common/record/DefaultRecordBatch for decompression buffer
+// management, and by ChunkedBytesStream for pooled I/O buffering. Passed through the
+// record deserialization pipeline from Selector -> SocketServer -> FetchProcessor.
 public abstract class BufferSupplier implements AutoCloseable {
 
     public static final BufferSupplier NO_CACHING = new BufferSupplier() {
@@ -63,6 +73,10 @@ public abstract class BufferSupplier implements AutoCloseable {
      */
     public abstract void close();
 
+    // DECISION: Map<Integer, Deque<ByteBuffer>> keyed by exact capacity. Alternative: Power-of-2
+    // size classes. Rationale: Kafka protocol messages have well-known sizes -- exact-match pooling
+    // avoids wasting memory on oversized buffers. NOT thread-safe -- designed for single-threaded
+    // per-connection processing in Selector/Processor threads.
     private static class DefaultSupplier extends BufferSupplier {
         // We currently use a single block size, so optimise for that case
         private final Map<Integer, Deque<ByteBuffer>> bufferMap = new HashMap<>(1);
@@ -94,6 +108,10 @@ public abstract class BufferSupplier implements AutoCloseable {
      * Simple buffer supplier for single-threaded usage. It caches a single buffer, which grows
      * monotonically as needed to fulfill the allocation request.
      */
+    // DECISION: Single buffer that grows to max observed size. Alternative: Shrinking buffer.
+    // Rationale: In record batch decompression, buffer sizes tend to stabilize -- keeping the
+    // high-water-mark buffer avoids repeated reallocation. Memory is reclaimed when the supplier
+    // is closed (e.g., channel close).
     public static class GrowableBufferSupplier extends BufferSupplier {
         private ByteBuffer cachedBuffer;
 
