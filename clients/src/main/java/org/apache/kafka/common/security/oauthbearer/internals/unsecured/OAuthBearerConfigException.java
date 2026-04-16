@@ -22,6 +22,14 @@ import org.apache.kafka.common.KafkaException;
  * Exception thrown when there is a problem with the configuration (an invalid
  * option in a JAAS config, for example).
  */
+// DECISION: KafkaException subclass for configuration errors rather than using the
+// existing org.apache.kafka.common.config.ConfigException. Alternative: Reuse ConfigException
+// from the common config package. Rationale: This keeps the unsecured OAUTHBEARER package
+// self-contained — callers can catch OAuthBearerConfigException specifically for JAAS option
+// validation errors without conflating them with general Kafka configuration errors.
+// OAuthBearerUnsecuredLoginCallbackHandler uses this for invalid claim values, reserved
+// claim names, and malformed lifetime/number options. OAuthBearerValidationUtils uses
+// this for negative clock skew values. OAuthBearerScopeUtils uses it for invalid scope items.
 public class OAuthBearerConfigException extends KafkaException {
     private static final long serialVersionUID = -8056105648062343518L;
 
