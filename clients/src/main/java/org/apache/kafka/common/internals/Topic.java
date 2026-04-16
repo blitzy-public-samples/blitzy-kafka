@@ -22,11 +22,30 @@ import org.apache.kafka.common.errors.InvalidTopicException;
 import java.util.Set;
 import java.util.function.Consumer;
 
+// DECISION: Centralized topic name validation and internal topic registry. Alternative:
+// Distribute validation into each module that creates topics. Rationale: Single validation
+// point prevents inconsistent topic name rules across producer, consumer, admin, and server
+// modules. Placing this in common/internals/ makes it available to all modules without
+// exposing it as public API.
+// CROSS-CUTTING: Consumed by clients/admin/KafkaAdminClient for topic creation validation,
+// clients/producer/KafkaProducer for send-time topic validation, core/server/KafkaApis for
+// server-side validation, and group-coordinator/ for internal topic identification.
+// The internal topic constants are referenced across ALL modules: consumer offset commits
+// (GROUP_METADATA_TOPIC_NAME), transactions (TRANSACTION_STATE_TOPIC_NAME), share groups
+// (SHARE_GROUP_STATE_TOPIC_NAME), and KRaft (CLUSTER_METADATA_TOPIC_NAME).
 public class Topic {
 
+    // DECISION: Internal topic names use double-underscore prefix (__) convention to distinguish
+    // system topics from user topics. These constants are the canonical source of truth for
+    // internal topic names — all references should use these constants, not string literals.
     public static final String GROUP_METADATA_TOPIC_NAME = "__consumer_offsets";
     public static final String TRANSACTION_STATE_TOPIC_NAME = "__transaction_state";
+    // DECISION: Added for KIP-932 (Share Groups). Follows the same double-underscore naming
+    // convention as existing internal topics for consistency.
     public static final String SHARE_GROUP_STATE_TOPIC_NAME = "__share_group_state";
+    // DECISION: KRaft mode metadata topic. Uses fixed partition 0 (line 31-34) because
+    // cluster metadata is a single-partition log — no partitioning needed for the controller's
+    // metadata journal.
     public static final String CLUSTER_METADATA_TOPIC_NAME = "__cluster_metadata";
     public static final TopicPartition CLUSTER_METADATA_TOPIC_PARTITION = new TopicPartition(
         CLUSTER_METADATA_TOPIC_NAME,
@@ -34,8 +53,14 @@ public class Topic {
     );
     public static final String LEGAL_CHARS = "[a-zA-Z0-9._-]";
 
+    // DECISION: Set.of() immutable set for O(1) isInternal() lookup. Note that
+    // CLUSTER_METADATA_TOPIC_NAME is NOT included — it is not considered an "internal topic"
+    // in the consumer/producer sense (it's a KRaft system topic not exposed to clients).
     private static final Set<String> INTERNAL_TOPICS = Set.of(GROUP_METADATA_TOPIC_NAME, TRANSACTION_STATE_TOPIC_NAME, SHARE_GROUP_STATE_TOPIC_NAME);
 
+    // DECISION: 249-character limit matches ZooKeeper znode name length constraint (historical).
+    // Even in KRaft mode, this limit is preserved for backward compatibility with existing
+    // topics and tooling that assumes this maximum.
     private static final int MAX_NAME_LENGTH = 249;
 
     public static void validate(String topic) {
@@ -75,6 +100,10 @@ public class Topic {
         return INTERNAL_TOPICS.contains(topic);
     }
 
+    // DECISION: Topic name collision detection for '.' and '_' characters. These characters
+    // are interchangeable in JMX metric names (metrics replace '.' with '_'), so topics
+    // "foo.bar" and "foo_bar" would produce identical metric names causing monitoring confusion.
+    // unifyCollisionChars() normalizes both to '_' for comparison.
     /**
      * Due to limitations in metric names, topics with a period ('.') or underscore ('_') could collide.
      *
@@ -107,6 +136,11 @@ public class Topic {
         return unifyCollisionChars(topicA).equals(unifyCollisionChars(topicB));
     }
 
+    // DECISION: Manual character-by-character validation rather than regex Pattern.matches().
+    // Alternative: Compile LEGAL_CHARS regex pattern. Rationale: This method is called for
+    // every topic name validation (high frequency in admin operations and metadata processing).
+    // Manual char checks avoid regex compilation/matching overhead. The comment at line 117
+    // notes Character.isLetterOrDigit() is also avoided for performance.
     /**
      * Valid characters for Kafka topics are the ASCII alphanumerics, '.', '_', and '-'
      */
