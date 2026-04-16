@@ -36,7 +36,27 @@ import javax.security.sasl.RealmCallback;
  * mechanisms enabled in the server should be supported by this callback handler. See
  * <a href="https://docs.oracle.com/javase/8/docs/technotes/guides/security/sasl/sasl-refguide.html">Java SASL API</a>
  * for the list of SASL callback handlers required for each SASL mechanism.
+ *
+ * @implSpec SECURITY: (MEDIUM) Server-side SASL callback handler that dispatches
+ * credential verification callbacks from the SASL framework. This default handler
+ * supports only RealmCallback and AuthorizeCallback (for GSSAPI). Mechanism-specific
+ * handlers (ScramServerCallbackHandler, OAuthBearerValidatorCallbackHandler) handle
+ * credential verification for their respective mechanisms.
+ * Exploit: handleAuthorizeCallback() unconditionally sets authorized=true and uses
+ * authenticationID as the authorized identity. Correct for GSSAPI where the Kerberos
+ * principal IS the authorized identity, but if this handler were accidentally used
+ * for other mechanisms, it would bypass authorization — any authenticated identity
+ * would be authorized without credential verification.
+ * Improvement: Add a mechanism check in handleAuthorizeCallback() as defense-in-depth,
+ * even though handle() already guards the AuthorizeCallback path with a GSSAPI check.
  */
+// CROSS-CUTTING: Used by SaslServerAuthenticator for server-side GSSAPI callback
+// handling. Registered by ChannelBuilders as the default server callback handler
+// when no mechanism-specific handler is configured.
+// Depends on: auth/AuthenticateCallbackHandler (interface), SaslConfigs.GSSAPI_MECHANISM.
+// Contract: Must handle all callback types produced by the GSSAPI SaslServer.
+// Impact: If handleAuthorizeCallback is modified, it affects Kerberos-authenticated
+// client identity resolution for all GSSAPI connections.
 public class SaslServerCallbackHandler implements AuthenticateCallbackHandler {
     private static final Logger LOG = LoggerFactory.getLogger(SaslServerCallbackHandler.class);
 
@@ -47,6 +67,15 @@ public class SaslServerCallbackHandler implements AuthenticateCallbackHandler {
         this.mechanism = mechanism;
     }
 
+    // DECISION: Supports only RealmCallback and AuthorizeCallback (GSSAPI only).
+    // All other callback types cause UnsupportedCallbackException. This is intentional:
+    // mechanism-specific handlers (registered per mechanism in ChannelBuilders) handle
+    // NameCallback, PasswordCallback, etc. This default handler is only used when no
+    // mechanism-specific handler is configured, which should only happen for GSSAPI.
+    // SECURITY: (LOW) Strict callback type checking — throws UnsupportedCallbackException
+    // for any unrecognized callback. This prevents silent acceptance of callbacks that
+    // this handler doesn't know how to process, which could mask authentication issues
+    // or allow unexpected credential flows.
     @Override
     public void handle(Callback[] callbacks) throws UnsupportedCallbackException {
         for (Callback callback : callbacks) {
@@ -64,6 +93,19 @@ public class SaslServerCallbackHandler implements AuthenticateCallbackHandler {
         rc.setText(rc.getDefaultText());
     }
 
+    // SECURITY: (MEDIUM) Kerberos authorization: sets authorized=true unconditionally.
+    // Why: In GSSAPI, the authenticated identity (from Kerberos ticket) is inherently
+    // authorized — there is no separate authorization step at the SASL level. The
+    // actual authorization happens later via ACL checks (StandardAuthorizer).
+    // Logging authenticationID and authorizationID is safe — these are Kerberos
+    // principal names, not passwords or secrets.
+    // Exploit: If the GSSAPI check in handle() is removed, this handler would authorize
+    // any mechanism's clients unconditionally, bypassing credential verification.
+    // DECISION: Uses authenticationID as authorizedID rather than authorizationID.
+    // This means GSSAPI proxy authentication (authenticating as one principal but
+    // authorizing as another) is not supported. Alternative: use authorizationID if
+    // different from authenticationID. Rationale: Kafka does not support Kerberos
+    // delegation/proxy authentication at the SASL level.
     private void handleAuthorizeCallback(AuthorizeCallback ac) {
         String authenticationID = ac.getAuthenticationID();
         String authorizationID = ac.getAuthorizationID();
