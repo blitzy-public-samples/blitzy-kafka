@@ -18,10 +18,48 @@ package org.apache.kafka.common.security.authenticator;
 
 import java.util.concurrent.ConcurrentHashMap;
 
+/**
+ * Thread-safe, typed in-memory credential registry for SASL mechanism credentials.
+ *
+ * @implSpec SECURITY: (MEDIUM) In-memory credential storage using ConcurrentHashMap.
+ * Why: Stores SCRAM/token credentials keyed by username. Credentials include SCRAM
+ * salted password hashes (ScramCredential) and delegation token HMAC secrets.
+ * Exploit: (1) Cache poisoning -- if a concurrent credential update races with
+ * authentication lookup, a client could authenticate with a stale credential that
+ * should have been revoked. ConcurrentHashMap provides atomic put/get but does NOT
+ * provide atomic check-then-update across multiple operations.
+ * (2) No eviction -- credentials persist until explicitly removed. If credential
+ * revocation fails (e.g., ZooKeeper write fails but cache is not updated), revoked
+ * credentials remain valid for authentication.
+ * (3) Memory exposure -- credential objects (ScramCredential containing salt, server
+ * key, stored key) remain in heap memory and are accessible via heap dump.
+ * Improvement: Consider adding cache-level TTL or periodic refresh from the metadata
+ * log to detect stale entries. Consider using ByteBuffer-backed storage with explicit
+ * clearing on removal rather than relying on garbage collection.
+ */
+// DECISION: ConcurrentHashMap per mechanism type for credential isolation.
+// Alternatives: (1) Synchronized HashMap for stronger consistency, (2) Guava Cache
+// with TTL, (3) ReadWriteLock-protected TreeMap. Rationale: ConcurrentHashMap provides
+// good throughput under high read concurrency (many authenticating connections checking
+// credentials simultaneously) without full synchronization overhead. The tradeoff is
+// weaker consistency for compound operations (check-then-update).
+//
+// CROSS-CUTTING: Created by broker startup (BrokerServer/ControllerServer) and
+// populated by the SCRAM credential management layer (ScramCredentialUtils).
+// Read by: ScramSaslServer (scram/internals/) during SCRAM authentication to
+// retrieve stored server keys for credential verification.
+// Read by: DelegationTokenCache (token/delegation/internals/) for delegation token
+// HMAC verification. Consumed by all server-side SASL mechanism implementations
+// that perform server-side credential lookup.
+// Contract: Cache instances are created at broker startup and persist for broker
+// lifetime. Callers manage credential lifecycle (put on create, remove on revoke).
 public class CredentialCache {
 
     private final ConcurrentHashMap<String, Cache<?>> cacheMap = new ConcurrentHashMap<>();
 
+    // SECURITY: (LOW) putIfAbsent ensures only one Cache instance per mechanism,
+    // preventing mechanism confusion where credentials for SCRAM-SHA-256 are
+    // accidentally accessible via the SCRAM-SHA-512 mechanism name.
     public <C> Cache<C> createCache(String mechanism, Class<C> credentialClass) {
         Cache<C> cache = new Cache<>(credentialClass);
         @SuppressWarnings("unchecked")
@@ -29,6 +67,9 @@ public class CredentialCache {
         return oldCache == null ? cache : oldCache;
     }
 
+    // SECURITY: (LOW) Runtime type validation prevents type confusion where a
+    // Cache<ScramCredential> could be retrieved as Cache<DelegationTokenData>.
+    // This ensures mechanism-level credential isolation at the type system level.
     @SuppressWarnings("unchecked")
     public <C> Cache<C> cache(String mechanism, Class<C> credentialClass) {
         Cache<?> cache = cacheMap.get(mechanism);
@@ -40,6 +81,15 @@ public class CredentialCache {
             return null;
     }
 
+    // SECURITY: (MEDIUM) Per-mechanism credential storage. The ConcurrentHashMap
+    // provides thread-safe read/write but individual operations are NOT transactional.
+    // A put() followed by a separate authorization check is NOT atomic -- credentials
+    // could be read between update and authorization, creating a TOCTOU race.
+    //
+    // DECISION: Generic typed Cache<C> with credentialClass field for runtime type
+    // validation. Alternative: Separate classes per credential type. Rationale:
+    // Generics enable a single cache implementation for all SASL mechanisms while
+    // the credentialClass field enables safe downcasting in cache() method.
     public static class Cache<C> {
         private final Class<C> credentialClass;
         private final ConcurrentHashMap<String, C> credentials;
