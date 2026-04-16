@@ -29,10 +29,20 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
+// DECISION: Centralized configuration utility methods for safe config handling across modules.
+// Alternative: Embed redaction and type-parsing logic in each config class individually.
+// Rationale: Centralizing ensures consistent redaction rules for safe logging and uniform
+// type coercion for boolean parsing, avoiding subtle inconsistencies across modules.
+//
+// CROSS-CUTTING: Used by SslFactory (clients), LogConfig and RemoteLogMetadataManagerConfig
+// (storage), and DynamicBrokerConfig (core) for safe config serialization and boolean parsing.
 public class ConfigUtils {
 
     private static final Logger log = LoggerFactory.getLogger(ConfigUtils.class);
 
+    // DECISION: Config keys absent from ConfigDef or marked as sensitive are redacted by default.
+    // This security-first choice avoids accidental credential leakage in logs — unknown keys
+    // may contain secrets added by custom plugins or dynamically-configured properties.
     public static String configMapToRedactedString(Map<String, Object> map, ConfigDef configDef) {
         StringBuilder bld = new StringBuilder("{");
         List<String> keys = new ArrayList<>(map.keySet());
