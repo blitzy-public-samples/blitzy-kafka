@@ -236,6 +236,30 @@ import javax.security.auth.spi.LoginModule;
  * @see SaslConfigs#SASL_LOGIN_REFRESH_MIN_PERIOD_SECONDS_DOC
  * @see SaslConfigs#SASL_LOGIN_REFRESH_BUFFER_SECONDS_DOC
  */
+// SECURITY: (MEDIUM) JAAS LoginModule for SASL/OAUTHBEARER — manages token lifecycle
+// (login → commit → logout) and stores tokens in Subject's private credentials.
+// Why: The Subject's credential store is the in-memory token cache. Tokens persisted
+// here are accessible to any code with a reference to the Subject.
+// Exploit: If the Subject is shared across multiple authentication contexts (e.g.,
+// multiple Kafka clients in the same JVM), token leakage between contexts is possible.
+// An attacker with access to the Subject (via JAAS callback manipulation or heap dump)
+// could extract valid bearer tokens for impersonation.
+// Improvement: Consider wrapping tokens in a SealedObject before storing in Subject's
+// private credentials to provide an additional layer of protection against heap inspection.
+
+// DECISION: Supports multiple simultaneous tokens on the same Subject. Alternative:
+// Replace existing token on each login. Rationale: Enables smooth token rotation —
+// a new token can be committed before the old one expires, preventing authentication
+// gaps. The SaslClient selects the token with the longest remaining lifetime.
+
+// CROSS-CUTTING: Depends on auth/AuthenticateCallbackHandler (callback contract),
+// auth/SaslExtensions (extension DTO), auth/SaslExtensionsCallback,
+// internals/OAuthBearerSaslClientProvider (SASL client factory registration),
+// internals/OAuthBearerSaslServerProvider (SASL server factory registration).
+// Consumed by: JAAS LoginContext (via JAAS config), LoginManager (lifecycle management),
+// OAuthBearerRefreshingLogin (periodic token refresh).
+// Contract: JAAS two-phase commit — login() then commit() or abort(); logout() later.
+// Thread-safety: NOT thread-safe. JAAS LoginContext serializes calls.
 public class OAuthBearerLoginModule implements LoginModule {
 
     /**
@@ -246,6 +270,11 @@ public class OAuthBearerLoginModule implements LoginModule {
      *   abort()      : LOGGED_IN_NOT_COMMITTED => NOT_LOGGED_IN
      *   logout()     : Any state => NOT_LOGGED_IN
      */
+    // DECISION: Three-state login model (NOT_LOGGED_IN, LOGGED_IN_NOT_COMMITTED, COMMITTED)
+    // rather than boolean flags. Alternative: Two booleans (loggedIn, committed). Rationale:
+    // Enum-based state machine makes invalid state transitions compile-time evident and
+    // simplifies the guard conditions in login()/commit()/abort()/logout() methods.
+    // This matches the JAAS LoginModule two-phase commit protocol.
     private enum LoginState {
         NOT_LOGGED_IN,
         LOGGED_IN_NOT_COMMITTED,
@@ -266,11 +295,20 @@ public class OAuthBearerLoginModule implements LoginModule {
     private SaslExtensions myCommittedExtensions = null;
     private LoginState loginState;
 
+    // SECURITY: (LOW) SASL client/server providers registered globally in JVM Security
+    // registry via static initializer. This is a one-time, irreversible registration —
+    // once registered, the OAUTHBEARER mechanism is available to all SASL contexts in
+    // the JVM. No mechanism to unregister (by design — SASL providers are JVM-global).
     static {
         OAuthBearerSaslClientProvider.initialize(); // not part of public API
         OAuthBearerSaslServerProvider.initialize(); // not part of public API
     }
 
+    // SECURITY: (MEDIUM) Validates that callbackHandler is AuthenticateCallbackHandler.
+    // This type check prevents injection of a malicious CallbackHandler that doesn't
+    // follow the Kafka authentication contract. However, the check is at runtime —
+    // a misconfigured JAAS file could specify a handler that passes the type check
+    // but behaves incorrectly.
     @Override
     public void initialize(Subject subject, CallbackHandler callbackHandler, Map<String, ?> sharedState,
             Map<String, ?> options) {
@@ -281,6 +319,14 @@ public class OAuthBearerLoginModule implements LoginModule {
         this.callbackHandler = (AuthenticateCallbackHandler) callbackHandler;
     }
 
+    // COMPLEXITY: 28 lines — Two-phase token acquisition with guard checks.
+    // Structure: (1) Check current state — reject if already logged in uncommitted or
+    // committed with token, (2) Call identifyToken() to retrieve token via callback,
+    // (3) If token obtained, call identifyExtensions(), (4) Transition to
+    // LOGGED_IN_NOT_COMMITTED.
+    // Key branches: 4 state checks with different error messages, token null check.
+    // Exit paths: IllegalStateException (invalid state), LoginException (callback
+    // failure), normal return true.
     @Override
     public boolean login() throws LoginException {
         if (loginState == LoginState.LOGGED_IN_NOT_COMMITTED) {
@@ -311,6 +357,10 @@ public class OAuthBearerLoginModule implements LoginModule {
         return true;
     }
 
+    // SECURITY: Token is retrieved via callbackHandler.handle() — the actual token
+    // retrieval (HTTP call, file read, etc.) happens in the configured
+    // AuthenticateCallbackHandler. Failures are logged but the specific failure reason
+    // is not exposed beyond LoginException.
     private void identifyToken() throws LoginException {
         OAuthBearerTokenCallback tokenCallback = new OAuthBearerTokenCallback();
         try {
@@ -349,6 +399,12 @@ public class OAuthBearerLoginModule implements LoginModule {
         }
     }
 
+    // COMPLEXITY: 33 lines — Token and extension removal from Subject credentials.
+    // Structure: (1) Guard: reject if LOGGED_IN_NOT_COMMITTED, (2) If not COMMITTED,
+    // return false, (3) If myCommittedToken exists, iterate private credentials to find
+    // and remove by identity (==), (4) If myCommittedExtensions exists, removeIf from
+    // public credentials, (5) Transition to NOT_LOGGED_IN.
+    // Key branch: identity-based token removal loop.
     @Override
     public boolean logout() {
         if (loginState == LoginState.LOGGED_IN_NOT_COMMITTED)
@@ -358,6 +414,10 @@ public class OAuthBearerLoginModule implements LoginModule {
             log.debug("Nothing here to log out");
             return false;
         }
+        // SECURITY: (MEDIUM) Token removed from Subject's private credentials using
+        // identity comparison (== not .equals()). This ensures only the specific token
+        // instance logged in by THIS LoginModule is removed, preventing cross-context
+        // token deletion when multiple tokens coexist on a shared Subject.
         if (myCommittedToken != null) {
             log.trace("Logging out my token; current committed token count = {}", committedTokenCount());
             for (Iterator<Object> iterator = subject.getPrivateCredentials().iterator(); iterator.hasNext(); ) {
@@ -400,6 +460,11 @@ public class OAuthBearerLoginModule implements LoginModule {
         } else
             log.debug("No tokens to commit, this login cannot be used to establish client connections");
 
+        // DECISION: Extensions stored in Subject's public credentials (not private).
+        // Alternative: Store in private credentials alongside the token. Rationale:
+        // Extensions are not sensitive (they're sent in cleartext in SASL messages per
+        // RFC 7628) — public credential access avoids the permission check overhead of
+        // private credential access.
         if (extensionsRequiringCommit != null) {
             subject.getPublicCredentials().add(extensionsRequiringCommit);
             myCommittedExtensions = extensionsRequiringCommit;
