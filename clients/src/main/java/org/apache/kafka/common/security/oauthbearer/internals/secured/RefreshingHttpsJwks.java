@@ -56,14 +56,49 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
  * @see org.jose4j.keys.resolvers.VerificationKeyResolver
  * @see BrokerJwtValidator
  */
+// SECURITY: (HIGH) Background JWKS cache refresh — maintains cached key material for JWT
+// signature validation. During refresh failure, old keys continue to be used indefinitely.
+// Why: The cached jsonWebKeys list is the sole source of truth for JWT signature validation
+// on the broker. If the JWKS endpoint becomes unreachable, stale keys remain in use.
+// Exploit: (1) Key rotation exploitation — after provider rotates keys, an attacker with a
+// token signed by the old key has up to refreshMs to replay it. (2) Cache poisoning — if
+// the JWKS endpoint is compromised, the next refresh loads attacker-controlled keys,
+// allowing token forgery. (3) Refresh DoS — sending JWTs with many unique unknown kid
+// values triggers expedited refreshes via maybeExpediteRefresh(), potentially overwhelming
+// the JWKS endpoint.
+// Improvement: (1) Add a maximum cache age — if refresh fails for > N * refreshMs,
+// invalidate the cache and reject all tokens. (2) Verify JWKS response integrity (e.g.,
+// JWKS signed envelope). (3) Add a global rate limiter on expedited refresh attempts.
+//
+// CROSS-CUTTING: Depends on jose4j HttpsJwks (HTTP JWKS client), Retry (backoff
+// framework), Time (testable clock abstraction). Used by
+// RefreshingHttpsJwksVerificationKeyResolver (the sole consumer) which wraps this in the
+// VerificationKeyResolver interface. Created by VerificationKeyResolverFactory.create()
+// for HTTPS/HTTP JWKS endpoints.
+// Contract: init() then getJsonWebKeys(). close() shuts down executor. Thread-safe for
+// concurrent getJsonWebKeys() reads via ReadWriteLock.
+// Impact: Refresh timing and failure handling directly affect JWT validation availability.
+// Changes to the refresh schedule or cache invalidation logic affect all OAUTHBEARER
+// broker-side authentication across the cluster.
 public final class RefreshingHttpsJwks implements OAuthBearerConfigurable {
 
     private static final Logger log = LoggerFactory.getLogger(RefreshingHttpsJwks.class);
 
+    // SECURITY: (MEDIUM) Fixed-size LRU cache for missing key IDs. Size 16 limits memory
+    // but an attacker rotating through > 16 unique kid values can evict earlier entries,
+    // causing repeated refresh attempts for previously seen (and rate-limited) kid values.
+    // DECISION: 16 entries chosen as a reasonable upper bound for concurrent key rotation
+    // events. In normal operation, providers rotate 1-2 keys at a time.
     private static final int MISSING_KEY_ID_CACHE_MAX_ENTRIES = 16;
 
+    // SECURITY: (MEDIUM) 60-second cooldown per missing key ID. Prevents rapid-fire
+    // refresh attempts for the same unknown kid. After an expedited refresh is scheduled
+    // for a kid, subsequent requests for the same kid within 60s are silently ignored.
     static final long MISSING_KEY_ID_CACHE_IN_FLIGHT_MS = 60000;
 
+    // SECURITY: (MEDIUM) Maximum kid length — prevents memory exhaustion from maliciously
+    // long kid values in crafted JWTs. Kid values exceeding 1000 characters are rejected
+    // without caching, with only the first 1000 characters logged.
     static final int MISSING_KEY_ID_MAX_KEY_LENGTH = 1000;
 
     private static final int SHUTDOWN_TIMEOUT = 10;
@@ -100,6 +135,12 @@ public final class RefreshingHttpsJwks implements OAuthBearerConfigurable {
      * Protects {@link #missingKeyIds} and {@link #jsonWebKeys}.
      */
 
+    // SECURITY: (MEDIUM) ReentrantReadWriteLock protecting jsonWebKeys and missingKeyIds.
+    // Read lock used by getJsonWebKeys() — allows concurrent JWT validations.
+    // Write lock used by refresh() and maybeExpediteRefresh() — serializes cache updates.
+    // Thread-safety contract: Multiple authentication threads can read cached keys
+    // concurrently; only the refresh thread (ScheduledExecutorService) or expedited
+    // refresh modifies the cache.
     private final ReadWriteLock refreshLock = new ReentrantReadWriteLock();
 
     private final Map<String, Long> missingKeyIds;
@@ -108,6 +149,9 @@ public final class RefreshingHttpsJwks implements OAuthBearerConfigurable {
      * Flag to prevent concurrent refresh invocations.
      */
 
+    // SECURITY: (LOW) AtomicBoolean gate preventing concurrent refresh invocations.
+    // Without this, multiple expedited refresh attempts could spawn concurrent HTTP
+    // requests to the JWKS endpoint, amplifying a DoS attack surface.
     private final AtomicBoolean refreshInProgressFlag = new AtomicBoolean(false);
 
     /**
@@ -141,6 +185,12 @@ public final class RefreshingHttpsJwks implements OAuthBearerConfigurable {
         this.refreshRetryBackoffMs = refreshRetryBackoffMs;
         this.refreshRetryBackoffMaxMs = refreshRetryBackoffMaxMs;
         this.executorService = executorService;
+        // DECISION: Uses access-order LinkedHashMap with removeEldestEntry for LRU
+        // eviction. Alternatives: (1) Caffeine/Guava cache with TTL, (2)
+        // ConcurrentHashMap with manual eviction. Rationale: Zero external dependency —
+        // LinkedHashMap's access-order mode provides LRU semantics natively. The fixed
+        // max size (16) prevents unbounded memory growth. Risk: Not thread-safe on its
+        // own — protected by refreshLock.writeLock().
         this.missingKeyIds = new LinkedHashMap<>(MISSING_KEY_ID_CACHE_MAX_ENTRIES, .75f, true) {
             @Override
             protected boolean removeEldestEntry(Map.Entry<String, Long> eldest) {
@@ -167,6 +217,11 @@ public final class RefreshingHttpsJwks implements OAuthBearerConfigurable {
                                long refreshMs,
                                long refreshRetryBackoffMs,
                                long refreshRetryBackoffMaxMs) {
+        // DECISION: Single-thread executor for JWKS refresh. Alternative: Shared thread
+        // pool. Rationale: JWKS refresh is infrequent (default: every 1 hour) and
+        // blocking (HTTP I/O). A dedicated thread prevents refresh from being delayed by
+        // other scheduled tasks. The thread is daemon by default, so it won't prevent
+        // JVM shutdown.
         this(time, httpsJwks, refreshMs, refreshRetryBackoffMs, refreshRetryBackoffMaxMs, Executors.newSingleThreadScheduledExecutor());
     }
 
@@ -193,6 +248,13 @@ public final class RefreshingHttpsJwks implements OAuthBearerConfigurable {
             // internally), we can delay our first invocation by refreshMs.
             //
             // Note: we refer to this as a _scheduled_ refresh.
+            // DECISION: Uses scheduleAtFixedRate (not scheduleWithFixedDelay) for periodic
+            // refresh. Rationale: Fixed-rate ensures the refresh interval is predictable
+            // regardless of refresh duration. If a refresh takes longer than refreshMs,
+            // the next refresh runs immediately after the current one completes. This
+            // prevents cache staleness from compounding. Alternative:
+            // scheduleWithFixedDelay — would add refresh duration to the interval, causing
+            // longer effective refresh periods under slow network conditions.
             executorService.scheduleAtFixedRate(this::refresh,
                     refreshMs,
                     refreshMs,
@@ -274,6 +336,15 @@ public final class RefreshingHttpsJwks implements OAuthBearerConfigurable {
      * </p>
      */
 
+    // COMPLEXITY: 40 lines — Background JWKS cache refresh with retry and lock mgmt.
+    // Structure: (1) CAS gate — compareAndSet(false, true) prevents concurrent
+    // refreshes. (2) Create Retry instance with exponential backoff. (3) Execute
+    // retryable lambda: call httpsJwks.refresh() then getJsonWebKeys(). (4) Acquire
+    // write lock, remove refreshed keys from missingKeyIds, update jsonWebKeys.
+    // (5) On ExecutionException, log warning and keep stale cache. (6) Reset
+    // refreshInProgressFlag in finally block. Key branches: CAS failure (return),
+    // retry success/failure. Exit paths: early return on CAS, normal completion,
+    // exception caught.
     private void refresh() {
         if (!refreshInProgressFlag.compareAndSet(false, true)) {
             log.debug("OAuth JWKS refresh is already in progress; ignoring concurrent refresh");
@@ -310,6 +381,11 @@ public final class RefreshingHttpsJwks implements OAuthBearerConfigurable {
 
             log.info("OAuth JWKS refresh of {} complete", httpsJwks.getLocation());
         } catch (ExecutionException e) {
+            // SECURITY: (HIGH) On refresh failure, the existing jsonWebKeys cache is NOT
+            // cleared — old keys remain valid. This is a deliberate
+            // availability-over-security trade-off: a transient JWKS endpoint failure
+            // should not cause all authentication to fail.
+            // Risk: Revoked/rotated keys remain trusted until a successful refresh.
             log.warn("OAuth JWKS refresh of {} encountered an error; not updating local JWKS cache", httpsJwks.getLocation(), e);
         } finally {
             refreshInProgressFlag.set(false);
@@ -335,6 +411,15 @@ public final class RefreshingHttpsJwks implements OAuthBearerConfigurable {
      * @return <code>true</code> if an expedited refresh was scheduled, <code>false</code> otherwise
      */
 
+    // COMPLEXITY: 37 lines — On-demand JWKS refresh for unknown key IDs.
+    // Structure: (1) Check keyId length > MAX_KEY_LENGTH → reject with warning.
+    // (2) Acquire write lock. (3) Check missingKeyIds cache: if no entry or expired,
+    // schedule immediate refresh and add to cache with cooldown. If entry exists and
+    // not expired, skip. (4) Release write lock in finally.
+    // Key branches: keyId too long, keyId not in cache, keyId in cache but expired,
+    // keyId in cache and still in cooldown.
+    // Exit paths: return false (too long or in cooldown), return true (refresh
+    // scheduled).
     public boolean maybeExpediteRefresh(String keyId) {
         if (keyId.length() > MISSING_KEY_ID_MAX_KEY_LENGTH) {
             // Although there's no limit on the length of the key ID, they're generally
