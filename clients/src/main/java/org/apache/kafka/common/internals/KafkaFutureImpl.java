@@ -29,10 +29,27 @@ import java.util.concurrent.TimeoutException;
 /**
  * A flexible future which supports call chaining and other asynchronous programming patterns.
  */
+// DECISION: Separate implementation class (KafkaFutureImpl) from public API (KafkaFuture) to keep
+// KafkaFuture as a clean abstract API surface while this impl handles the wrapping of
+// CompletionException->ExecutionException. Alternative: merge into KafkaFuture directly.
+// Rationale: Separation prevents user code from calling complete()/completeExceptionally() on
+// futures returned from admin/client APIs -- completion is restricted to internal kafkaComplete()
+// methods on the backing KafkaCompletableFuture.
+//
+// CROSS-CUTTING: Concrete implementation backing all KafkaFuture instances returned by
+// clients/admin/KafkaAdminClient operations. Also used by Connect framework for async
+// connector operations. Depends on KafkaCompletableFuture (same package) for guarded
+// completion. Contract: get()/getNow() always throw ExecutionException for exceptional
+// completions (not CompletionException), preserving historic KafkaFuture API semantics.
 public class KafkaFutureImpl<T> extends KafkaFuture<T> {
 
     private final KafkaCompletableFuture<T> completableFuture;
 
+    // DECISION: isDependant flag tracks whether this future was created via thenApply/whenComplete
+    // (dependent) vs directly constructed (root). This is needed because CompletableFuture wraps
+    // CancellationException in CompletionException for dependent futures but not root futures --
+    // isCancelled() must compensate for this asymmetry. Alternative: always use getNow() approach.
+    // Rationale: root futures can use the simpler CompletableFuture.isCancelled() directly.
     private final boolean isDependant;
 
     public KafkaFutureImpl() {
@@ -54,6 +71,10 @@ public class KafkaFutureImpl<T> extends KafkaFuture<T> {
      * futures's result as the argument to the supplied function.
      */
     @Override
+    // DECISION: Extra CompletionException wrapping below is needed to preserve KafkaFuture
+    // contract where thenApply(f) that throws CompletionException should yield
+    // ExecutionException(CompletionException(originalException)). CompletableFuture.thenApply would
+    // lose the inner CompletionException via its own unwrapping behavior.
     public <R> KafkaFuture<R> thenApply(BaseFunction<T, R> function) {
         CompletableFuture<R> appliedFuture = completableFuture.thenApply(value -> {
             try {
@@ -117,6 +138,9 @@ public class KafkaFutureImpl<T> extends KafkaFuture<T> {
         // CompletableFuture#get() always wraps the _cause_ of a CompletionException in ExecutionException
         // (which KafkaFuture does not) so wrap CompletionException in an extra one to avoid losing the
         // first CompletionException in the exception chain.
+        // DECISION: Extra CompletionException wrapping when input is already CompletionException.
+        // CompletableFuture.get() unwraps CompletionException.cause into ExecutionException --
+        // without double-wrapping, the first CompletionException in the chain would be lost.
         return completableFuture.kafkaCompleteExceptionally(
                 newException instanceof CompletionException ? new CompletionException(newException) : newException);
     }
@@ -156,6 +180,9 @@ public class KafkaFutureImpl<T> extends KafkaFuture<T> {
             // In Java 23, When a CompletableFuture is cancelled, get() will throw a CancellationException wrapping a
             // CancellationException, thus we need to unwrap it to maintain the KafkaFuture behaviour. 
             // see https://bugs.openjdk.org/browse/JDK-8331987
+            // DECISION: Java 23 changed CancellationException nesting behavior (JDK-8331987).
+            // CancellationException now wraps another CancellationException -- we unwrap to
+            // maintain backward-compatible KafkaFuture semantics across JDK versions.
         } catch (ExecutionException | CancellationException e) {
             maybeThrowCancellationException(e.getCause());
             throw e;
@@ -186,6 +213,9 @@ public class KafkaFutureImpl<T> extends KafkaFuture<T> {
      */
     @Override
     public T getNow(T valueIfAbsent) throws ExecutionException {
+        // DECISION: Rewrap CompletionException.cause as ExecutionException to match KafkaFuture
+        // contract where getNow() throws ExecutionException (not CompletionException like
+        // CompletableFuture.getNow()). This is a deliberate deviation from CompletableFuture API.
         try {
             return completableFuture.getNow(valueIfAbsent);
         } catch (CancellationException e) {
@@ -211,6 +241,9 @@ public class KafkaFutureImpl<T> extends KafkaFuture<T> {
      */
     @Override
     public boolean isCancelled() {
+        // DECISION: Dependent futures check for CompletionException wrapping CancellationException
+        // because CompletableFuture's exception wrapping means dependent futures see
+        // CompletionException(CancellationException) rather than bare CancellationException.
         if (isDependant) {
             // Having isCancelled() for a dependent future just return
             // CompletableFuture.isCancelled() would break the historical KafkaFuture behaviour because
