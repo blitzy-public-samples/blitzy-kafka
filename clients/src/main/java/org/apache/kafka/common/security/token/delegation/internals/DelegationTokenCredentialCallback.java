@@ -19,6 +19,15 @@ package org.apache.kafka.common.security.token.delegation.internals;
 import org.apache.kafka.common.security.scram.ScramCredentialCallback;
 
 public class DelegationTokenCredentialCallback extends ScramCredentialCallback {
+    // SECURITY (LOW): Callback carrier extending ScramCredentialCallback to pass delegation
+    // token metadata (owner, expiry) through the SASL/SCRAM callback mechanism during
+    // token-based authentication. The ScramServerCallbackHandler populates this callback
+    // with token owner and expiry from DelegationTokenCache, enabling the SCRAM server
+    // to enforce token-specific authorization and expiry checks.
+    //
+    // CROSS-CUTTING: Used by ScramServerCallbackHandler (authenticator package) when
+    // authenticating via delegation tokens. Extends ScramCredentialCallback (scram package)
+    // to carry additional token-specific metadata alongside SCRAM credentials.
     private String tokenOwner;
     private Long tokenExpiryTimestamp;
 
@@ -29,7 +38,10 @@ public class DelegationTokenCredentialCallback extends ScramCredentialCallback {
     public String tokenOwner() {
         return tokenOwner;
     }
-    
+
+    // SECURITY (LOW): Token expiry timestamp passed through SASL callback chain.
+    // The SCRAM server uses this to reject authentication for expired tokens.
+    // If this value is not set correctly, expired tokens may pass SCRAM authentication.
     public void tokenExpiryTimestamp(Long tokenExpiryTimestamp) {
         this.tokenExpiryTimestamp = tokenExpiryTimestamp;
     }
