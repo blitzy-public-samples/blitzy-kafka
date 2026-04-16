@@ -23,6 +23,23 @@ import org.apache.kafka.common.memory.MemoryPool;
 import java.nio.channels.SelectionKey;
 
 
+// DECISION: Factory interface for constructing KafkaChannel instances. The separation of
+// ChannelBuilder (factory) from KafkaChannel (instance) enables per-listener configuration:
+// each listener can have its own ChannelBuilder with distinct security settings.
+// The configure() → buildChannel() lifecycle allows deferred initialization after the
+// builder receives its configuration.
+// Implementations: PlaintextChannelBuilder, SslChannelBuilder, SaslChannelBuilder.
+// Alternative: Direct KafkaChannel construction — rejected because channel construction
+// requires security protocol-specific configuration (SSL keys, SASL mechanisms, Kerberos
+// principals) that varies per listener.
+
+// CROSS-CUTTING: This interface is the extension point for custom transport layers. Third-party
+// ChannelBuilder implementations can provide custom encryption, authentication, or channel
+// behavior. Consumed by Selector via ChannelBuilders factory class.
+// Contract: configure() must be called before buildChannel(). close() must release all
+// resources (e.g., SslFactory, LoginManager). buildChannel() must return a fully-initialized
+// KafkaChannel that is ready for the handshake/authentication lifecycle.
+
 /**
  * A ChannelBuilder interface to build Channel based on configs
  */
