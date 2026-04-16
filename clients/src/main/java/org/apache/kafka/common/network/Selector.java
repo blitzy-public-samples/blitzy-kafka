@@ -108,6 +108,13 @@ import java.util.concurrent.atomic.AtomicReference;
 // Impact: Changes to KafkaChannel mute/unmute semantics or ChannelBuilder authentication flow
 // directly affect Selector's poll loop correctness and DoS resilience.
 //
+// CROSS-CUTTING: Consumed by NetworkClient in clients/ (client-side I/O), SocketServer in
+// core/src/main/scala/kafka/network/ (server-side I/O), and Connect runtime.
+// Contract: Callers must invoke poll() in a loop. Results (completedSends,
+// completedReceives, connected, disconnected) are only valid between consecutive
+// poll() calls — they are cleared at the start of each poll(). Breaking this
+// contract causes data loss.
+//
 // DECISION: Single-threaded NIO selector pattern chosen over thread-per-connection model.
 // Alternative: Thread-per-connection (simpler per-connection logic, natural isolation).
 // Rationale: Kafka brokers handle thousands of concurrent connections; a thread-per-connection
@@ -139,6 +146,10 @@ public class Selector implements Selectable, AutoCloseable {
 
     private final Logger log;
     private final java.nio.channels.Selector nioSelector;
+    // SECURITY: The channels map holds all active connections. Its unbounded growth
+    // under connection flood attack is mitigated by IdleExpiryManager and
+    // maxConnections enforcement at the SocketServer level in core/. Without those
+    // outer controls, this map could grow without limit.
     private final Map<String, KafkaChannel> channels;
     private final Set<KafkaChannel> explicitlyMutedChannels;
     private boolean outOfMemory;
@@ -156,7 +167,21 @@ public class Selector implements Selectable, AutoCloseable {
     private final int maxReceiveSize;
     private final boolean recordTimePerConnection;
     private final IdleExpiryManager idleExpiryManager;
+    // SECURITY: (MEDIUM) DelayedAuthenticationFailureClose — Delays channel close
+    // after authentication failure to prevent timing attacks. Without this delay, an
+    // attacker could measure the time between connection and close to determine
+    // whether a username exists (faster close = invalid user, slower close = valid
+    // user with wrong password). The configurable delay normalizes close timing.
+    // Risk: If delay is too short, timing oracle still works. If too long, resources
+    // are held. Improvement: Consider making the delay randomized (jitter) to
+    // further obscure timing signals.
     private final LinkedHashMap<String, DelayedAuthenticationFailureClose> delayedClosingChannels;
+    // CROSS-CUTTING: Depends on common/memory/MemoryPool for receive buffer
+    // allocation. Contract: MemoryPool.tryAllocate() returns null when out of
+    // memory, triggering channel muting. On the broker side, a bounded
+    // SimpleMemoryPool is used; on the client side, MemoryPool.NONE (unlimited
+    // heap allocation) is typical. If MemoryPool semantics change, the
+    // muting/unmuting backpressure mechanism in poll() and attemptRead() breaks.
     private final MemoryPool memoryPool;
     // DECISION: Low memory threshold set to 10% of total pool size. When available memory drops
     // below this threshold, selection key processing order is randomized to prevent starvation
@@ -330,6 +355,13 @@ public class Selector implements Selectable, AutoCloseable {
         }
     }
 
+    // DECISION: TCP_NODELAY=true disables Nagle's algorithm, reducing latency for
+    // small request payloads at the cost of slightly increased network overhead.
+    // Kafka's request-response protocol benefits from low-latency writes rather
+    // than write coalescing.
+    // SO_KEEPALIVE=true ensures that idle TCP connections are probed by the OS,
+    // complementing Kafka's own IdleExpiryManager. Non-blocking mode is mandatory
+    // for NIO selector multiplexing.
     private void configureSocketChannel(SocketChannel socketChannel, int sendBufferSize, int receiveBufferSize)
             throws IOException {
         socketChannel.configureBlocking(false);
@@ -437,6 +469,10 @@ public class Selector implements Selectable, AutoCloseable {
      * Queue the given request for sending in the subsequent {@link #poll(long)} calls
      * @param send The request to send
      */
+    // DECISION: If a channel is in closingChannels (graceful close in progress),
+    // the send is recorded as a failedSend rather than attempting the write. This
+    // prevents writes to half-closed channels and ensures the caller receives a
+    // disconnect notification.
     public void send(NetworkSend send) {
         String connectionId = send.destinationId();
         KafkaChannel channel = openOrClosingChannelOrFail(connectionId);
@@ -1027,6 +1063,11 @@ public class Selector implements Selectable, AutoCloseable {
             delayedClose.closeNow();
     }
 
+    // SECURITY: Invoked when the authentication failure delay has expired.
+    // Ensures that the authenticator's handleAuthenticationFailure() is called
+    // (which may send error responses) before the channel is closed. Any
+    // exception during this process is logged but does not prevent channel
+    // cleanup — the finally block guarantees GRACEFUL close.
     private void handleCloseOnAuthenticationFailure(KafkaChannel channel) {
         try {
             channel.completeCloseOnAuthenticationFailure();
@@ -1156,6 +1197,11 @@ public class Selector implements Selectable, AutoCloseable {
      * This method is used to close a channel to accommodate a new channel on the inter-broker listener
      * when broker-wide `max.connections` limit is enabled.
      */
+    // DECISION: Priority order for eviction: (1) already-closing channels,
+    // (2) least recently used via IdleExpiryManager, (3) arbitrary channel.
+    // This ensures channels already in cleanup are preferred for eviction,
+    // followed by idle channels, before disrupting active connections. Used
+    // by SocketServer when max.connections limit is reached.
     public KafkaChannel lowestPriorityChannel() {
         KafkaChannel channel = null;
         if (!closingChannels.isEmpty()) {
