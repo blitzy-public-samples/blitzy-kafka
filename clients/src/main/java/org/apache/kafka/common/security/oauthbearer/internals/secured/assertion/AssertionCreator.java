@@ -73,6 +73,33 @@ import java.security.GeneralSecurityException;
  * implementation. The private key could be loaded from a file, downloaded from a trusted resource,
  * embedded in the configuration, etc.
  */
+
+// SECURITY: (HIGH) Key material handling contract. Implementations hold private signing keys
+// (DefaultAssertionCreator) or pre-signed assertion files (FileAssertionCreator). Improper
+// implementation could expose key material or return unsigned/weakly-signed assertions.
+// Exploit: A malicious AssertionCreator implementation (configured via assertionCreatorClass
+// JAAS option) could return a self-signed JWT with escalated claims (e.g., admin scope),
+// bypassing authorization if the token endpoint trusts the signing key. The reflective
+// instantiation in ConfigurationUtils.getConfiguredInstance() allows arbitrary class loading.
+// Improvement: Document the key material lifecycle contract — implementations MUST protect
+// signing keys and callers MUST call close() after use. Consider a class allowlist for
+// assertionCreatorClass to prevent arbitrary code execution via malicious class names.
+
+// DECISION: Interface-based factory pattern separates assertion creation from retrieval.
+// Alternative: Embed signing logic directly in JwtBearerJwtRetriever. Rationale: Enables
+// pluggable assertion sources — key-signed (DefaultAssertionCreator) vs file-based
+// (FileAssertionCreator). New assertion creation strategies can be added by implementing
+// this interface and configuring the class name in JAAS options.
+
+// CROSS-CUTTING: Implemented by DefaultAssertionCreator (private key signing) and
+// FileAssertionCreator (file-based pre-signed assertions). Used by JwtBearerJwtRetriever
+// to create assertions for the jwt-bearer OAuth grant flow (RFC 7523).
+// Extends Closeable — lifecycle managed by JwtBearerJwtRetriever.close().
+// Instantiated reflectively via ConfigurationUtils.getConfiguredInstance() from the
+// assertionCreatorClass JAAS configuration option.
+// Impact: The create() return value is the signed JWT assertion included in the token
+// endpoint request body. Changes to this interface affect all jwt-bearer OAuth flows.
+
 public interface AssertionCreator extends Closeable {
 
     /**
@@ -89,6 +116,9 @@ public interface AssertionCreator extends Closeable {
      * Closes any resources used by this implementation. The default implementation of
      * this method is a no op, for convenience to implementors.
      */
+    // DECISION: Default no-op close() for implementor convenience. Implementations that hold
+    // resources (e.g., DefaultAssertionCreator's CachedFile) should override close() to release
+    // them. Risk: If an implementation forgets to override, resources may leak silently.
     @Override
     default void close() throws IOException {
         // Do nothing...
