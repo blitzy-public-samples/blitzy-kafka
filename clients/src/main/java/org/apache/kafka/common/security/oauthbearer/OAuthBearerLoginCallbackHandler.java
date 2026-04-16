@@ -144,12 +144,48 @@ import static org.apache.kafka.common.security.oauthbearer.internals.secured.Con
  *   <li>{@link org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_SUB_CLAIM_NAME}</li>
  * </ul>
  * </p>
+ *
+ * @implNote DECISION: Uses pluggable JwtRetriever + JwtValidator pattern (loaded via
+ * getConfiguredInstance) rather than hard-coding HTTP client credentials flow. Alternatives:
+ * (1) Hard-code ClientCredentialsJwtRetriever + ClientJwtValidator, (2) Single monolithic
+ * handler. Rationale: The pluggable pattern supports multiple OAuth grant types
+ * (client_credentials, jwt-bearer, file-based) and custom implementations without modifying
+ * this handler. Risk: Misconfiguration can lead to ClassNotFoundException at runtime during
+ * SASL handshake.
  */
+
+// SECURITY: (HIGH) Client-side OAuth login handler -- retrieves JWT tokens from OAuth provider
+// and validates them before caching in the JAAS Subject's private credentials.
+// Why: This handler manages the full token lifecycle: retrieval -> validation -> caching.
+// The retrieved token (containing client_id, client_secret in the request) passes through
+// potentially untrusted networks.
+// Exploit: Credential caching risk -- tokens are stored in the Subject's private credentials
+// (via OAuthBearerLoginModule.commit()). If the Subject is not properly scoped or if tokens
+// are not cleared on logout/expiry, stale tokens could be reused by other components sharing
+// the same Subject. An attacker with access to heap dumps or JMX could extract cached tokens.
+// Improvement: Ensure token cache has TTL aligned with token expiry and is cleared on
+// Subject logout. Consider using SealedObject or similar for in-memory token protection.
+
+// CROSS-CUTTING: Depends on auth/AuthenticateCallbackHandler (contract interface),
+// JwtRetriever (token retrieval SPI), JwtValidator (token validation SPI),
+// internals/secured/JaasOptionsUtils (JAAS option extraction),
+// internals/OAuthBearerClientInitialResponse (extension validation).
+// Consumed by: OAuthBearerLoginModule (via CallbackHandler.handle()), which is invoked
+// by LoginManager during SASL authentication setup on the client side.
+// Also used broker-side for inter-broker OAUTHBEARER communication.
 
 public class OAuthBearerLoginCallbackHandler implements AuthenticateCallbackHandler {
 
     private static final Logger log = LoggerFactory.getLogger(OAuthBearerLoginCallbackHandler.class);
 
+    // SECURITY: (HIGH) Client credentials (clientId, clientSecret) defined as JAAS module
+    // options. These are sensitive values that appear in sasl.jaas.config. The config value
+    // is of type Password which masks toString(), but JAAS option values are plain strings
+    // stored in memory.
+    // Exploit: An attacker with access to JVM heap dumps or JAAS debug logging could
+    // extract plaintext client secrets from memory or log files.
+    // Improvement: Ensure JAAS config is not logged at DEBUG level. Consider using a
+    // credential provider abstraction to avoid plaintext secrets in memory.
     public static final String CLIENT_ID_CONFIG = "clientId";
     public static final String CLIENT_SECRET_CONFIG = "clientSecret";
     public static final String SCOPE_CONFIG = "scope";
@@ -172,6 +208,10 @@ public class OAuthBearerLoginCallbackHandler implements AuthenticateCallbackHand
         "OAuth \"scope\". If so, the " + SCOPE_CONFIG + " is used to provide the value to " +
         "include with the login request.";
 
+    // DECISION: Extensions prefixed with "extension_" in JAAS options rather than a separate
+    // config namespace. Alternative: Dedicated sasl.oauthbearer.extensions.* config keys.
+    // Rationale: Reuses existing JAAS option mechanism without new config infrastructure.
+    // Extensions are rarely used and don't warrant dedicated config keys.
     private static final String EXTENSION_PREFIX = "extension_";
 
     private Map<String, Object> moduleOptions;
@@ -203,6 +243,9 @@ public class OAuthBearerLoginCallbackHandler implements AuthenticateCallbackHand
     /*
      * Package-visible for testing.
      */
+    // DECISION: Test-injectable configure() overload -- same pattern as
+    // OAuthBearerValidatorCallbackHandler. Enables unit testing without
+    // needing real OAuth provider connectivity.
     void configure(Map<String, ?> configs,
                    String saslMechanism,
                    List<AppConfigurationEntry> jaasConfigEntries,
@@ -238,6 +281,14 @@ public class OAuthBearerLoginCallbackHandler implements AuthenticateCallbackHand
         }
     }
 
+    // SECURITY: (HIGH) Token retrieval and validation in sequence. The accessToken string
+    // may contain sensitive data (the JWT itself). It is passed to jwtValidator.validate()
+    // which performs at minimum structural validation. On failure, "invalid_token" error
+    // is set on callback with the exception message -- this message should NOT contain
+    // secrets but may contain claim names that aid token probing.
+    // Exploit: If jwtRetriever.retrieve() throws and the exception message contains the
+    // client_secret (from HTTP request logging), it could be logged at WARN level.
+    // Improvement: Sanitize exception messages from retrieve() before logging.
     private void handleTokenCallback(OAuthBearerTokenCallback callback) throws IOException {
         checkConfigured();
         String accessToken = jwtRetriever.retrieve();
@@ -251,6 +302,14 @@ public class OAuthBearerLoginCallbackHandler implements AuthenticateCallbackHand
         }
     }
 
+    // SECURITY: (MEDIUM) SASL extensions extracted from JAAS moduleOptions with "extension_"
+    // prefix. Extension keys/values are validated via OAuthBearerClientInitialResponse.
+    // validateExtensions() which enforces RFC 7628 patterns.
+    // Exploit: If moduleOptions are sourced from untrusted config (e.g., dynamic per-user
+    // JAAS config), malicious extension values could be injected into the SASL handshake,
+    // potentially exploiting vulnerabilities in server-side extension processing.
+    // Improvement: Restrict dynamic JAAS config sources and whitelist allowed extension
+    // keys to prevent injection of unexpected values into the SASL exchange.
     private void handleExtensionsCallback(SaslExtensionsCallback callback) {
         checkConfigured();
 
