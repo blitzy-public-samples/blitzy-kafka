@@ -31,6 +31,23 @@ import java.nio.file.Files;
  *
  * @param <T> Type of the "transformed" file contents
  */
+// SECURITY: (LOW) Generic file caching utility with transformer and refresh policy.
+// Why: Reads file contents into memory and caches the result. The file's integrity is
+// assumed — no checksum, signature, or permission verification is performed.
+// Exploit: TOCTOU (Time-of-check-time-of-use) race — snapshot() checks file.lastModified()
+// then reads file.toPath() in separate operations (lines 129-133). An attacker with write
+// access could replace the file between the stat and read calls. Additionally, file.length()
+// (line 129) may not match the actual read size if the file changes concurrently.
+// Improvement: (1) Read file atomically (e.g., to temp then rename), (2) Verify file
+// permissions reject world-writable files, (3) Consider file locking during read.
+//
+// CROSS-CUTTING: Used by JwksFileVerificationKeyResolver (JWKS file caching with
+// VerificationKeyResolverTransformer), FileJwtRetriever (JWT file caching with STRING_NOOP
+// or STRING_JSON_VALIDATING_TRANSFORMER), and assertion/FileAssertionCreator and
+// assertion/FileAssertionJwtTemplate (assertion file caching).
+// Depends on: SerializedJwt (JWT structure validation), OAuthBearerUnsecuredJws (JSON parsing).
+// Contract: Constructor loads file synchronously. Subsequent access via transformed() may
+// trigger refresh based on RefreshPolicy. KafkaException thrown on I/O errors.
 public class CachedFile<T> {
 
     /**
@@ -52,6 +69,10 @@ public class CachedFile<T> {
      * Function object that provides as arguments the file and its metadata and returns a flag to determine if the
      * file should be reloaded from disk.
      */
+    // DECISION: RefreshPolicy is a pluggable strategy interface with two built-in implementations:
+    // staticPolicy() — load once, never refresh. lastModifiedPolicy() — refresh when mtime changes.
+    // Alternative: Timer-based refresh with fixed interval. Rationale: File modification timestamp
+    // is cheap to check (single stat() call) and provides precise change detection.
     public interface RefreshPolicy<T> {
 
         /**
@@ -88,6 +109,11 @@ public class CachedFile<T> {
      * This transformer really only validates that the given file contents represent a properly-formed JWT.
      * If not, a {@link OAuthBearerIllegalTokenException} or {@link JwtValidatorException} is thrown.
      */
+    // SECURITY: (MEDIUM) Validates that file contents are a properly-formed JWT (3 dot-separated
+    // segments with valid Base64 header and payload). Uses SerializedJwt for structural validation
+    // and OAuthBearerUnsecuredJws.toMap() for JSON parsing validation. Does NOT verify signature —
+    // this is a structural check only. A malformed file triggers OAuthBearerIllegalTokenException
+    // or JwtValidatorException, preventing downstream processing of garbage data.
     public static final Transformer<String> STRING_JSON_VALIDATING_TRANSFORMER = (file, contents) -> {
         contents = contents.trim();
         SerializedJwt serializedJwt = new SerializedJwt(contents);
@@ -99,8 +125,21 @@ public class CachedFile<T> {
     private final File file;
     private final Transformer<T> transformer;
     private final RefreshPolicy<T> cacheRefreshPolicy;
+    // DECISION: Uses atomic snapshot replacement pattern — the snapshot field is a single
+    // reference that is replaced atomically. No synchronization (volatile, lock) is used.
+    // Alternatives: (1) volatile field for guaranteed visibility, (2) ReadWriteLock for
+    // consistency. Rationale: In practice, CachedFile is used from a single thread per
+    // resolver instance. The snapshot() method is called on every access, so staleness is
+    // naturally bounded by the refresh policy. Risk: Without volatile, a stale snapshot may
+    // be visible to other threads for an indeterminate period (Java Memory Model visibility
+    // guarantee requires happens-before).
     private Snapshot<T> snapshot;
 
+    // DECISION: Constructor calls snapshot() immediately, eagerly loading the file.
+    // Alternative: Lazy load on first access. Rationale: Fail-fast — if the file is missing or
+    // unreadable, the constructor throws KafkaException immediately during configure(), rather
+    // than deferring failure to the first resolveKey() call. This makes configuration errors
+    // visible at startup time.
     public CachedFile(File file, Transformer<T> transformer, RefreshPolicy<T> cacheRefreshPolicy) {
         this.file = file;
         this.transformer = transformer;
@@ -124,6 +163,10 @@ public class CachedFile<T> {
         return snapshot().transformed();
     }
 
+    // SECURITY: (LOW) Snapshot replacement — when refresh is needed, a new Snapshot is created
+    // with current file metadata and contents. The old snapshot is replaced atomically (single
+    // reference assignment, line 140). Concurrent readers may see either the old or new snapshot.
+    // This is acceptable because snapshot replacement is monotonic (always moves forward).
     private Snapshot<T> snapshot() {
         if (cacheRefreshPolicy.shouldRefresh(file, snapshot)) {
             long size = file.length();
