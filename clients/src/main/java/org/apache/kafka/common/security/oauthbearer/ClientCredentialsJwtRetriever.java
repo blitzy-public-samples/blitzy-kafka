@@ -104,7 +104,32 @@ import static org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginCallb
  * sasl.oauthbearer.scope=my-application-scope
  * sasl.oauthbearer.token.endpoint.url=https://example.com/oauth2/v1/token
  * </pre>
+ *
+ * @implNote DECISION: Delegates HTTP communication to HttpJwtRetriever rather than implementing
+ * HTTP client logic directly. Alternatives: (1) Inline HTTP client code, (2) Use Apache HttpClient
+ * library. Rationale: Delegation separates credential formatting (this class via
+ * ClientCredentialsRequestFormatter) from HTTP transport (HttpJwtRetriever), enabling independent
+ * testing and reuse. HttpJwtRetriever handles SSL, retry, and connection management.
  */
+// SECURITY: (HIGH) OAuth client_credentials grant flow — sends clientId and clientSecret
+// to the token endpoint over HTTPS to obtain a JWT access token.
+// Why: This class handles the most sensitive credentials in the OAUTHBEARER flow —
+// the client_id and client_secret are transmitted to the OAuth provider.
+// Exploit: Secret leakage — if HTTP connection debug logging is enabled (e.g., via
+// -Djavax.net.debug=all), request bodies containing client_secret may be written to
+// logs. Additionally, if the token endpoint URL uses HTTP (not HTTPS), credentials
+// are transmitted in cleartext and can be intercepted via network sniffing.
+// Improvement: Consider validating that the token endpoint URL uses HTTPS and logging
+// a CRITICAL warning if HTTP is used. Also consider using mutual TLS (mTLS) for
+// client authentication as an alternative to client_secret.
+//
+// CROSS-CUTTING: Depends on internals/secured/HttpJwtRetriever (HTTP transport),
+// internals/secured/ClientCredentialsRequestFormatter (request body formatting),
+// internals/secured/ConfigurationUtils (config resolution),
+// internals/secured/JaasOptionsUtils (JAAS option extraction).
+// Used by: OAuthBearerLoginCallbackHandler (when configured as jwt.retriever.class).
+// Contract: configure() must be called before retrieve(). Not thread-safe during
+// configure(). External deps: SLF4J (logging), SaslConfigs (config keys).
 public class ClientCredentialsJwtRetriever implements JwtRetriever {
 
     private static final Logger LOG = LoggerFactory.getLogger(ClientCredentialsJwtRetriever.class);
@@ -156,6 +181,11 @@ public class ClientCredentialsJwtRetriever implements JwtRetriever {
      * This utility method ensures that we have a non-{@code null} value to use in the
      * {@link HttpJwtRetriever} constructor.
      */
+    // SECURITY: (LOW) URL encoding of Authorization header. When urlencodeHeader=true,
+    // client_id and client_secret are URL-encoded before base64 encoding for the
+    // Authorization: Basic header per RFC-6749 Section 2.3.1. This prevents special
+    // characters in credentials from breaking HTTP header parsing on the OAuth provider
+    // side and ensures interoperability with strict RFC-compliant providers.
     static boolean validateUrlencodeHeader(ConfigurationUtils configurationUtils) {
         Boolean urlencodeHeader = configurationUtils.get(SASL_OAUTHBEARER_HEADER_URLENCODE);
         return Objects.requireNonNullElse(urlencodeHeader, DEFAULT_SASL_OAUTHBEARER_HEADER_URLENCODE);
@@ -164,6 +194,12 @@ public class ClientCredentialsJwtRetriever implements JwtRetriever {
     /**
      * Retrieves the values first from configuration, then falls back to JAAS, and, if required, throws an error.
      */
+    // DECISION: Dual-source credential resolution (config properties vs JAAS options) with
+    // config taking precedence. Alternative: Only support config properties. Rationale:
+    // Backward compatibility with pre-KIP-768 deployments that used JAAS options for
+    // clientId/clientSecret. Deprecation warnings guide migration to config properties.
+    // Risk: Two valid sources for the same credential increases configuration complexity
+    // and the surface for misconfiguration.
     private static class ConfigOrJaas {
 
         private final ConfigurationUtils cu;
@@ -184,6 +220,13 @@ public class ClientCredentialsJwtRetriever implements JwtRetriever {
             );
         }
 
+        // SECURITY: (HIGH) Client secret retrieved via cu.validatePassword() (Password type,
+        // masked in toString) from config, or via jou.validateString() (plain String, visible
+        // in toString) from JAAS options. The JAAS path exposes the secret in memory as a
+        // plain String which cannot be reliably zeroed after use. Prefer the config path.
+        // Exploit: If an attacker gains heap dump access (e.g., via JMX or -XX:+HeapDumpOn*),
+        // secrets stored as plain Strings in the JAAS path persist in the heap until GC,
+        // whereas the Password type avoids casual exposure via toString()/logging.
         private String clientSecret() {
             return getValue(
                 SASL_OAUTHBEARER_CLIENT_CREDENTIALS_CLIENT_SECRET,
@@ -194,6 +237,10 @@ public class ClientCredentialsJwtRetriever implements JwtRetriever {
             );
         }
 
+        // DECISION: Scope is optional (isRequired=false). Alternative: Require scope always.
+        // Rationale: Not all OAuth providers require a scope parameter for client_credentials
+        // grants — some infer scope from the client registration. Making it optional avoids
+        // unnecessary ConfigException for providers that don't use scopes.
         private String scope() {
             return getValue(
                 SASL_OAUTHBEARER_SCOPE,
@@ -212,6 +259,10 @@ public class ClientCredentialsJwtRetriever implements JwtRetriever {
             boolean isPresentInConfig = cu.containsKey(configName);
             boolean isPresentInJaas = jou.containsKey(jaasName);
 
+            // SECURITY: (MEDIUM) Logging deprecation warnings — LOG.warn() messages include
+            // the config key names but NOT the values. This is correct — secret values must
+            // never be logged. The warning helps operators migrate from less secure JAAS
+            // options to config properties (Password-typed, masked in toString).
             if (isPresentInConfig) {
                 if (isPresentInJaas) {
                     // Log if the user is using the deprecated JAAS option.
