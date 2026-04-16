@@ -27,9 +27,42 @@ import java.util.regex.Pattern;
 
 import javax.security.sasl.SaslException;
 
+// SECURITY: (MEDIUM) Parses and constructs the SASL OAUTHBEARER client-first message
+// per RFC 7628. The message embeds the raw bearer token in the "auth=Bearer <token>" field.
+// Why: This class handles untrusted input (byte[] from the network on the server side)
+// and constructs cleartext token-bearing messages (on the client side). Malformed input
+// can trigger SaslException but malicious extensions bypass structural validation.
+// Exploit: Extension injection -- a malicious client could craft extensions with values
+// that pass EXTENSION_VALUE_PATTERN but contain semantically dangerous content (e.g.,
+// control characters within the allowed range 0x21-0x7E, tab, CR, LF). Downstream
+// consumers of these extensions (custom authorizers, audit loggers) may not expect
+// or properly handle such content, enabling log injection or authorization bypass.
+// Improvement: Consider a stricter extension value pattern that excludes CR/LF/tab,
+// or sanitize extension values before passing to downstream consumers.
+//
+// CROSS-CUTTING: Used by OAuthBearerSaslClient (constructs and sends client-first message),
+// OAuthBearerSaslServer (parses received client-first message), and
+// OAuthBearerLoginCallbackHandler / OAuthBearerUnsecuredLoginCallbackHandler (extension
+// validation via validateExtensions() static method).
+// Depends on: auth/SaslExtensions (extension DTO), Utils.parseMap/mkString (parsing/formatting).
+// Contract: After construction, tokenValue(), authorizationId(), and extensions() are
+// non-null and validated. toBytes() produces a wire-compatible message.
+// Impact: Changes to regex patterns or validation logic affect ALL OAUTHBEARER authentication
+// on both client and server sides.
 public class OAuthBearerClientInitialResponse {
+    // DECISION: Uses U+0001 (control-A) as the field separator per RFC 7628. Alternative:
+    // Use a visible delimiter like "|" or ",". Rationale: RFC 7628 specifies U+0001 as the
+    // GS2 header separator. This character is unlikely to appear in extension values,
+    // preventing delimiter confusion. OAuthBearerSaslClient uses BYTE_CONTROL_A (0x01) for
+    // the error acknowledgment -- same byte value, different semantic context.
     static final String SEPARATOR = "\u0001";
 
+    // DECISION: Uses compiled regex patterns for message parsing rather than manual string
+    // splitting. Alternatives: (1) Manual parsing with indexOf/substring, (2) StreamTokenizer.
+    // Rationale: Regex patterns provide RFC-compliance validation and field extraction in a
+    // single pass. The patterns are compiled once (static finals) and reused for all instances.
+    // Risk: Complex regex can be vulnerable to ReDoS -- the patterns here are bounded by
+    // the input structure (fixed delimiters) which limits backtracking.
     private static final String SASLNAME = "(?:[\\x01-\\x7F&&[^=,]]|=2C|=3D)+";
     private static final String KEY = "[A-Za-z]+";
     private static final String VALUE = "[\\x21-\\x7E \t\r\n]+";
@@ -44,9 +77,25 @@ public class OAuthBearerClientInitialResponse {
     private final String authorizationId;
     private final SaslExtensions saslExtensions;
 
+    // SECURITY: (MEDIUM) Extension validation regex patterns per RFC 7628 Section 3.1.
+    // KEY: [A-Za-z]+ -- letters only, preventing injection via special characters in keys.
+    // VALUE: [\x21-\x7E \t\r\n]+ -- printable ASCII plus whitespace. Note: \r\n
+    // are included per the RFC but could enable header injection in downstream HTTP
+    // components if extensions are forwarded without sanitization.
     public static final Pattern EXTENSION_KEY_PATTERN = Pattern.compile(KEY);
     public static final Pattern EXTENSION_VALUE_PATTERN = Pattern.compile(VALUE);
 
+    // SECURITY: (MEDIUM) Parses untrusted client input. CLIENT_INITIAL_RESPONSE_PATTERN
+    // regex validates the overall structure, AUTH_PATTERN validates the "Bearer <token>"
+    // format. If the regex doesn't match, SaslException is thrown (fail-closed). The token
+    // value is extracted via named capture group "token" which restricts to [-_~+/.a-zA-Z0-9=].
+    // This character set covers Base64URL encoding used by JWTs.
+    //
+    // DECISION: Three constructor overloads -- (1) byte[] parser for server-side deserialization,
+    // (2) token+extensions for client-side construction, (3) token+authzId+extensions for
+    // full specification. Alternative: Single builder pattern. Rationale: Three constructors
+    // cover the two primary use cases cleanly (server parsing, client construction) without
+    // the overhead of a builder for this simple data carrier.
     public OAuthBearerClientInitialResponse(byte[] response) throws SaslException {
         String responseMsg = new String(response, StandardCharsets.UTF_8);
         Matcher matcher = CLIENT_INITIAL_RESPONSE_PATTERN.matcher(responseMsg);
@@ -121,6 +170,9 @@ public class OAuthBearerClientInitialResponse {
         return saslExtensions;
     }
 
+    // SECURITY: (LOW) Constructs the wire-format message. The token value is embedded
+    // directly -- no encoding or escaping is applied beyond what was validated at
+    // construction time. The SEPARATOR (U+0001) is used as a field delimiter.
     public byte[] toBytes() {
         String authzid = authorizationId.isEmpty() ? "" : "a=" + authorizationId;
         String extensions = extensionsMessage();
@@ -164,6 +216,10 @@ public class OAuthBearerClientInitialResponse {
      * @see <a href="https://tools.ietf.org/html/rfc7628#section-3.1">RFC 7628,
      *  Section 3.1</a>
      */
+    // SECURITY: (MEDIUM) Validates all extensions against patterns and checks for reserved
+    // key "auth". This prevents a client from injecting a second "auth" key to override
+    // the legitimate token. The iteration over all entries ensures no key or value escapes
+    // validation. Extension validation is called from both constructors.
     public static void validateExtensions(SaslExtensions extensions) throws SaslException {
         if (extensions == null)
             return;
