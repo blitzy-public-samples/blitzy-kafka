@@ -76,6 +76,30 @@ import javax.security.sasl.Sasl;
 import javax.security.sasl.SaslClient;
 import javax.security.sasl.SaslException;
 
+// CROSS-CUTTING: Depends on auth/AuthenticateCallbackHandler (credential provisioning),
+// common/network/TransportLayer (non-blocking I/O), clients/NetworkClient.parseResponse
+// (response deserialization during re-auth), kerberos/KerberosError (Kerberos error
+// classification). Consumed by: common/network/SaslChannelBuilder (client channel setup).
+// Contract: authenticate() is called by the Selector I/O loop; each invocation must
+// either advance the state or return immediately if I/O is not ready.
+
+/**
+ * Client-side SASL authenticator implementing a non-blocking I/O state machine.
+ *
+ * @implSpec SECURITY: (HIGH) Client-side SASL authentication state machine.
+ * This class sends credentials to the broker and processes authentication challenges.
+ * The SaslState FSM has 13 states covering initial auth, re-auth, and error paths.
+ * Exploit: (1) Credential leakage — if auth tokens are logged at DEBUG/TRACE level,
+ * credentials could appear in client log files. The current implementation does NOT
+ * log token contents but does log state transitions which could reveal timing info.
+ * (2) Mechanism downgrade — if a MITM modifies the SaslHandshakeResponse to indicate
+ * only a weak mechanism (e.g., PLAIN), the client would authenticate with cleartext
+ * credentials. Mitigated by TLS at the transport layer for SASL_SSL protocol.
+ * (3) Correlation ID exhaustion — the reserved range (MAX-7 to MAX) is small; if
+ * corrupted responses consume IDs faster than expected, schema parsing may fail.
+ * Improvement: Consider validating that the mechanism in the handshake response
+ * matches the configured mechanism, and log a warning if weaker is negotiated.
+ */
 public class SaslClientAuthenticator implements Authenticator {
     /**
      * The internal state transitions for initial authentication of a channel are
@@ -89,6 +113,16 @@ public class SaslClientAuthenticator implements Authenticator {
      * {@link #REAUTH_INITIAL}; after that the flow joins the authentication flow
      * at the {@link #INTERMEDIATE} state and ends at either {@link #COMPLETE} or
      * {@link #FAILED}.
+     */
+    /*
+     * SECURITY: (HIGH) Client-side authentication states. The 13-state FSM is
+     * more complex than the server side (8 states) because it must handle
+     * re-authentication with in-flight response queuing
+     * (REAUTH_RECEIVE_HANDSHAKE_OR_OTHER_RESPONSE). States SEND_/RECEIVE_
+     * pairs enforce request-response ordering. The CLIENT_COMPLETE state exists
+     * because SaslAuthenticate v1+ requires server confirmation even after
+     * the SASL mechanism reports isComplete() — without this, a client could
+     * consider itself authenticated before the server has confirmed.
      */
     public enum SaslState {
         SEND_APIVERSIONS_REQUEST,                   // Initial state for authentication: client sends ApiVersionsRequest in this state when authenticating
@@ -106,7 +140,14 @@ public class SaslClientAuthenticator implements Authenticator {
         REAUTH_INITIAL,                             // Initial re-authentication state starting SASL token exchange for configured mechanism, send first token
     }
 
+    // DECISION: Using -1 as sentinel for "no SASL authenticate header" rather
+    // than Optional<Short>. Alternatives: (1) Optional wrapper, (2) separate
+    // boolean flag. Rationale: Compact representation avoiding object allocation
+    // per connection. The sentinel is compared frequently during token exchange.
     private static final short DISABLE_KAFKA_SASL_AUTHENTICATE_HEADER = -1;
+    // DECISION: Single static Random for jitter in re-auth scheduling. Not
+    // SecureRandom because this is not security-sensitive randomness — it only
+    // introduces jitter to prevent thundering herd on session expiry.
     private static final Random RNG = new Random();
 
     /**
@@ -124,6 +165,11 @@ public class SaslClientAuthenticator implements Authenticator {
      * used in NetworkClient for Kafka requests. Hence, we can guarantee that every SASL request will throw
      * SchemaException due to correlation id mismatch during reauthentication
      */
+    // SECURITY: (MEDIUM) Reserved correlation ID range prevents SASL responses
+    // from being confused with in-flight Kafka API responses during re-auth.
+    // Without this, a LIST_OFFSET response could be parsed as SASL_HANDSHAKE
+    // response (schemas are accidentally compatible), causing incorrect auth
+    // state transitions. Improvement: widen the reserved range for safety.
     public static final int MAX_RESERVED_CORRELATION_ID = Integer.MAX_VALUE;
 
     /**
@@ -193,6 +239,11 @@ public class SaslClientAuthenticator implements Authenticator {
         this.time = time;
         this.log = logContext.logger(getClass());
         this.reauthInfo = new ReauthInfo();
+        // SECURITY: (HIGH) SaslClient is created under the Subject's privilege
+        // context via SecurityManagerCompatibility.callAs(). clientPrincipalName
+        // is only extracted for GSSAPI — for other mechanisms, the principal
+        // comes from the SASL exchange (not the Subject), preventing spoofing
+        // where the Subject principal differs from the authenticated identity.
 
         try {
             setSaslState(SaslState.SEND_APIVERSIONS_REQUEST);
@@ -236,6 +287,24 @@ public class SaslClientAuthenticator implements Authenticator {
      * The messages are sent and received as size delimited bytes that consists of a 4 byte network-ordered size N
      * followed by N bytes representing the opaque payload.
      */
+    /*
+     * SECURITY: (HIGH) Client authentication state machine driver. The
+     * @SuppressWarnings("fallthrough") is intentional: specific states
+     * deliberately fall through to the next (e.g., RECEIVE_APIVERSIONS_RESPONSE
+     * to SEND_HANDSHAKE_REQUEST). This fallthrough pattern reduces round-trips
+     * but means state transitions must be carefully ordered to prevent skipping
+     * security checks.
+     * Exploit: If the fallthrough logic is modified incorrectly, a state that
+     * requires server response validation could be skipped, causing the client
+     * to proceed with authentication without verifying the handshake response.
+     */
+    // COMPLEXITY: ~87 lines — 13-case switch covering all client auth states.
+    // Structure: Linear state progression with intentional fallthroughs:
+    // SEND_APIVERSIONS → RECEIVE → (fall) SEND_HANDSHAKE → RECEIVE_HANDSHAKE
+    // → (fall) INITIAL → INTERMEDIATE → CLIENT_COMPLETE → COMPLETE.
+    // Re-auth: REAUTH_PROCESS_ORIG → (fall) REAUTH_SEND_HANDSHAKE →
+    // REAUTH_RECEIVE → (fall) REAUTH_INITIAL → (joins) INTERMEDIATE.
+    // Exit paths: break (wait for I/O), setSaslState(COMPLETE), throw FAILED.
     @SuppressWarnings("fallthrough")
     public void authenticate() throws IOException {
         if (netOutBuffer != null && !flushNetOutBufferAndUpdateInterestOps())
@@ -244,6 +313,9 @@ public class SaslClientAuthenticator implements Authenticator {
         switch (saslState) {
             case SEND_APIVERSIONS_REQUEST:
                 // Always use version 0 request since brokers treat requests with schema exceptions as GSSAPI tokens
+                // DECISION: Always sends ApiVersionsRequest v0 for backward compat.
+                // Alternative: Probe with latest version and fall back. Rationale:
+                // v0 is universally supported, avoids version probing complexity.
                 ApiVersionsRequest apiVersionsRequest = new ApiVersionsRequest.Builder().build((short) 0);
                 send(apiVersionsRequest.toSend(nextRequestHeader(ApiKeys.API_VERSIONS, apiVersionsRequest.version())));
                 setSaslState(SaslState.RECEIVE_APIVERSIONS_RESPONSE);
@@ -275,6 +347,10 @@ public class SaslClientAuthenticator implements Authenticator {
                 sendInitialToken();
                 setSaslState(SaslState.INTERMEDIATE);
                 break;
+            // DECISION: Re-authentication reuses the INTERMEDIATE state from
+            // initial auth rather than having separate re-auth intermediate
+            // states. This reduces state count but means INTERMEDIATE must
+            // handle both initial and re-auth token exchanges identically.
             case REAUTH_PROCESS_ORIG_APIVERSIONS_RESPONSE:
                 setSaslAuthenticateAndHandshakeVersions(reauthInfo.apiVersionsResponseFromOriginalAuthentication);
                 setSaslState(SaslState.REAUTH_SEND_HANDSHAKE_REQUEST); // Will set immediately
@@ -524,6 +600,21 @@ public class SaslClientAuthenticator implements Authenticator {
     }
 
 
+    // SECURITY: (HIGH) Creates SASL token under Subject privilege context.
+    // Kerberos errors are analyzed for retriability (KerberosError.retriable())
+    // to distinguish transient failures (network issues) from permanent ones
+    // (wrong credentials). Transient errors throw SaslException (retried as
+    // I/O error); permanent errors throw SaslAuthenticationException (closed).
+    // Exploit: If retriability classification is wrong, a brute-force attacker
+    // could exploit retriable errors to attempt unlimited credential guesses
+    // without connection closure. Mitigation: only specific Kerberos error
+    // codes are classified as retriable per KerberosError enum.
+    // COMPLEXITY: 32 lines — SASL token creation with Kerberos error analysis.
+    // Structure: (1) Null check → IllegalSaslStateException, (2) Check
+    // hasInitialResponse → return empty token or evaluate challenge under
+    // Subject, (3) On CompletionException: analyze KerberosError code,
+    // classify as retriable (SaslException) or permanent
+    // (SaslAuthenticationException).
     private byte[] createSaslToken(final byte[] saslToken, boolean isInitial) throws SaslException {
         if (saslToken == null)
             throw new IllegalSaslStateException("Error authenticating with the Kafka Broker: received a `null` saslToken.");
@@ -565,6 +656,11 @@ public class SaslClientAuthenticator implements Authenticator {
         return netOutBuffer.completed();
     }
 
+    // SECURITY: (MEDIUM) Response parsing with re-authentication buffering.
+    // During re-auth, responses from pre-reauth requests may arrive and are
+    // buffered in pendingAuthenticatedReceives for replay after re-auth
+    // completes. A malicious broker could inject extra responses during
+    // re-auth to confuse the client's request/response matching.
     private AbstractResponse receiveKafkaResponse() throws IOException {
         if (netInBuffer == null)
             netInBuffer = new NetworkReceive(node);
@@ -574,6 +670,8 @@ public class SaslClientAuthenticator implements Authenticator {
             if (responseBytes == null)
                 return null;
             else {
+                // CROSS-CUTTING: Uses NetworkClient.parseResponse() for response
+                // deserialization, coupling authenticator to client networking.
                 AbstractResponse response = NetworkClient.parseResponse(ByteBuffer.wrap(responseBytes), currentRequestHeader);
                 currentRequestHeader = null;
                 return response;
@@ -598,6 +696,11 @@ public class SaslClientAuthenticator implements Authenticator {
         }
     }
 
+    // SECURITY: (MEDIUM) Validates the server's handshake response. Sets state
+    // to FAILED on any error, preventing further auth attempts on this channel.
+    // The UnsupportedSaslMechanismException reveals the server's enabled
+    // mechanisms list — this is information disclosure but necessary for client
+    // configuration troubleshooting. Consider logging instead of in exception.
     private void handleSaslHandshakeResponse(SaslHandshakeResponse response) {
         Errors error = response.error();
         if (error != Errors.NONE)
@@ -683,6 +786,11 @@ public class SaslClientAuthenticator implements Authenticator {
         public void setAuthenticationEndAndSessionReauthenticationTimes(long nowNanos) {
             authenticationEndNanos = nowNanos;
             long sessionLifetimeMsToUse;
+            // DECISION: Re-auth jitter uses 85-95% of session lifetime. The
+            // narrow window (10% jitter) plus 85% floor ensures re-auth
+            // happens well before session expiry while distributing load.
+            // Alternative: Exponential backoff. Rationale: Uniform
+            // distribution is simpler and sufficient for thundering herd.
             if (positiveSessionLifetimeMs != null) {
                 // pick a random percentage between 85% and 95% for session re-authentication
                 double pctWindowFactorToTakeNetworkLatencyAndClockDriftIntoAccount = 0.85;
