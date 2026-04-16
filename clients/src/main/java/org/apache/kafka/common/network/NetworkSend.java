@@ -18,6 +18,17 @@ package org.apache.kafka.common.network;
 
 import java.io.IOException;
 
+// DECISION: NetworkSend wraps a Send with a destination ID, enabling Selector to route
+// completions back to the correct connection. The destinationId is the connection/node ID
+// string used for metrics tracking and completion notification.
+// Alternative: Embed the destination in the Send interface itself — rejected to keep Send
+// as a pure I/O contract without routing concerns. NetworkSend adds the routing layer.
+//
+// CROSS-CUTTING: Consumed by org.apache.kafka.common.network.Selector to associate
+// in-flight sends with their target connection (KafkaChannel). The destinationId must
+// match the id used when the channel was registered with Selector via connect() or
+// register(). Selector.completedSends() returns these after writeTo() finishes,
+// allowing callers (NetworkClient, etc.) to correlate completions with requests.
 public class NetworkSend implements Send {
     private final String destinationId;
     private final Send send;
