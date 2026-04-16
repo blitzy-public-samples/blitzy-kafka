@@ -28,6 +28,18 @@ import java.util.concurrent.ExecutionException;
  * @see UnretryableException
  */
 
+// DECISION: Separate Retryable<R> interface rather than using java.util.concurrent.Callable<R>.
+// Alternative: Callable<R> throws Exception — could serve the same purpose. Rationale:
+// Retryable.call() declares ExecutionException and UnretryableException explicitly, enabling
+// the Retry class to distinguish between retryable errors (ExecutionException) and non-retryable
+// errors (UnretryableException) via exception type. Callable's generic Exception would require
+// instanceof checks. This explicit contract makes retry semantics clear at the API level.
+
+// CROSS-CUTTING: Used by Retry.execute() as the operation interface. Implementations are
+// lambda expressions in HttpJwtRetriever.retrieve() (token endpoint HTTP POST) and
+// RefreshingHttpsJwks.refresh() (JWKS endpoint HTTP GET). The exception hierarchy:
+// ExecutionException = retryable, UnretryableException = non-retryable (breaks retry loop).
+
 public interface Retryable<R> {
 
     /**
