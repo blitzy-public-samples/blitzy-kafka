@@ -51,17 +51,51 @@ import javax.security.sasl.SaslException;
  *      Section 2.1</a>
  *
  */
+// SECURITY: (MEDIUM) Client-side SASL OAUTHBEARER implementation -- sends the bearer
+// token to the broker in the SASL client-first message.
+// Why: The token is transmitted as-is (Base64-encoded JWT) in the initial SASL message.
+// If the SASL layer is NOT wrapped in TLS, the token travels in cleartext over the network.
+// Exploit: Network sniffing -- an attacker on the same network segment can capture the
+// SASL client-first message containing the bearer token. The captured token can be
+// replayed to any broker accepting OAUTHBEARER until the token expires. In environments
+// without TLS (e.g., SASL_PLAINTEXT listeners), this is trivially exploitable.
+// Improvement: Consider logging a WARNING during configure() if the security protocol
+// is SASL_PLAINTEXT (not SASL_SSL), alerting operators that tokens are sent in cleartext.
+//
+// CROSS-CUTTING: Depends on OAuthBearerClientInitialResponse (message formatting),
+// OAuthBearerTokenCallback (token retrieval from Subject), auth/SaslExtensionsCallback
+// (extension retrieval), OAuthBearerLoginModule (mechanism name constant).
+// Used by: authenticator/SaslClientAuthenticator which creates this via SASL SPI.
+// The OAuthBearerSaslClientFactory (inner class) is registered by
+// OAuthBearerSaslClientProvider and discovered by javax.security.sasl.Sasl.createSaslClient().
+// Contract: evaluateChallenge() is called by SaslClientAuthenticator in sequence.
+// External deps: javax.security.sasl (SASL SPI), SLF4J (logging).
 public class OAuthBearerSaslClient implements SaslClient {
+    // DECISION: Uses a static byte constant for the RFC 7628 error acknowledgment byte
+    // (U+0001 / 0x01) rather than creating a new byte array each time. This constant is
+    // also referenced by OAuthBearerSaslServer for server-side error detection.
     static final byte BYTE_CONTROL_A = (byte) 0x01;
     private static final Logger log = LoggerFactory.getLogger(OAuthBearerSaslClient.class);
     private final CallbackHandler callbackHandler;
 
+    // DECISION: 5-state model (SEND_CLIENT_FIRST_MESSAGE, RECEIVE_SERVER_FIRST_MESSAGE,
+    // RECEIVE_SERVER_MESSAGE_AFTER_FAILURE, COMPLETE, FAILED) rather than a simpler 3-state
+    // model (SEND, RECEIVE, DONE). Alternatives: (1) 3-state with boolean error flag,
+    // (2) No explicit state -- track via response count. Rationale: The 5-state model makes
+    // the error acknowledgment path (control-A response per RFC 7628) explicit in the state
+    // machine, preventing incorrect state transitions. RECEIVE_SERVER_MESSAGE_AFTER_FAILURE
+    // cleanly separates the error-ack from normal completion. Risk: More states increase
+    // the surface for unexpected IllegalSaslStateException if states are added carelessly.
     enum State {
         SEND_CLIENT_FIRST_MESSAGE, RECEIVE_SERVER_FIRST_MESSAGE, RECEIVE_SERVER_MESSAGE_AFTER_FAILURE, COMPLETE, FAILED
     }
 
     private State state;
 
+    // DECISION: Constructor requires AuthenticateCallbackHandler (Kafka-specific) rather
+    // than generic javax.security.auth.callback.CallbackHandler. Alternative: Accept generic
+    // handler and cast at usage site. Rationale: Compile-time type safety ensures only
+    // Kafka-compatible handlers are used. The factory validates this requirement.
     public OAuthBearerSaslClient(AuthenticateCallbackHandler callbackHandler) {
         this.callbackHandler = Objects.requireNonNull(callbackHandler);
         setState(State.SEND_CLIENT_FIRST_MESSAGE);
@@ -81,12 +115,28 @@ public class OAuthBearerSaslClient implements SaslClient {
         return true;
     }
 
+    // COMPLEXITY: 38 lines -- State-machine-driven SASL challenge/response handler.
+    // Structure: switch(state) with 3 cases + default:
+    //   SEND_CLIENT_FIRST_MESSAGE: validate empty challenge, obtain token via callback,
+    //     retrieve extensions, send OAuthBearerClientInitialResponse bytes.
+    //   RECEIVE_SERVER_FIRST_MESSAGE: if challenge non-empty -> parse error JSON, log it,
+    //     send control-A ack, transition to RECEIVE_SERVER_MESSAGE_AFTER_FAILURE.
+    //     If challenge empty -> success, obtain final token info, transition to COMPLETE.
+    //   default: throw IllegalSaslStateException.
+    // Error handling: SaslException and IOException/UnsupportedCallbackException both
+    //   transition to FAILED state. Exit paths: return byte[] (response), return null
+    //   (success with no response), or throw SaslException/IllegalSaslStateException.
     @Override
     public byte[] evaluateChallenge(byte[] challenge) throws SaslException {
         try {
             OAuthBearerTokenCallback callback = new OAuthBearerTokenCallback();
             switch (state) {
                 case SEND_CLIENT_FIRST_MESSAGE:
+                    // SECURITY: (MEDIUM) Token value obtained from Subject via callback, then
+                    // embedded in OAuthBearerClientInitialResponse and sent as bytes. The raw
+                    // token string is briefly held in memory as part of the response byte
+                    // array. After this point, the token is on the wire -- network security
+                    // (TLS) is the only protection.
                     if (challenge != null && challenge.length != 0)
                         throw new SaslException("Expected empty challenge");
                     callbackHandler().handle(new Callback[] {callback});
@@ -96,6 +146,11 @@ public class OAuthBearerSaslClient implements SaslClient {
 
                     return new OAuthBearerClientInitialResponse(callback.token().value(), extensions).toBytes();
                 case RECEIVE_SERVER_FIRST_MESSAGE:
+                    // SECURITY: (LOW) Server error response is JSON containing status, scope,
+                    // and openid-configuration fields. The client logs this at DEBUG level --
+                    // ensure DEBUG logging is not enabled in production as error details could
+                    // reveal server config. The client responds with control-A (0x01) per
+                    // RFC 7628 error acknowledgment.
                     if (challenge != null && challenge.length != 0) {
                         String jsonErrorResponse = new String(challenge, StandardCharsets.UTF_8);
                         if (log.isDebugEnabled())
@@ -126,6 +181,9 @@ public class OAuthBearerSaslClient implements SaslClient {
         return state == State.COMPLETE;
     }
 
+    // SECURITY: (MEDIUM) OAUTHBEARER does NOT support SASL integrity or privacy layers.
+    // wrap() and unwrap() throw IllegalStateException. This means the token exchange
+    // has NO built-in replay protection or message integrity -- TLS MUST be used.
     @Override
     public byte[] unwrap(byte[] incoming, int offset, int len) {
         if (!isComplete())
@@ -170,6 +228,10 @@ public class OAuthBearerSaslClient implements SaslClient {
         return extensionsCallback.extensions();
     }
 
+    // CROSS-CUTTING: SASL client factory -- discovered by javax.security.sasl framework via
+    // OAuthBearerSaslClientProvider registration. Creates OAuthBearerSaslClient instances
+    // only when AuthenticateCallbackHandler is provided and mechanism matches OAUTHBEARER.
+    // mechanismNamesCompatibleWithPolicy delegates to OAuthBearerSaslServer for consistency.
     public static class OAuthBearerSaslClientFactory implements SaslClientFactory {
         @Override
         public SaslClient createSaslClient(String[] mechanisms, String authorizationId, String protocol,
