@@ -32,6 +32,23 @@ import java.util.StringJoiner;
  * @see <a href="https://tools.ietf.org/html/rfc7515">RFC 7515: JSON Web Signature (JWS)</a>
  */
 
+// SECURITY: (LOW) Immutable token DTO holding the raw JWT string, scopes, and metadata.
+// Why: The token field holds the raw compact JWT serialization as a String.
+// Java Strings are immutable and cannot be explicitly zeroed — the token persists in memory
+// until garbage collected, making it vulnerable to heap dump extraction.
+// Exploit: An attacker with access to a JVM heap dump (e.g., via jmap, OOM heap dump file,
+// or debug attach) can extract the raw JWT string from BasicOAuthBearerToken instances.
+// The token can then be replayed until it expires.
+// Improvement: Consider using a char[] or byte[] for the token value to enable explicit
+// zeroing after use, though this conflicts with the OAuthBearerToken.value() String contract.
+
+// CROSS-CUTTING: Implements OAuthBearerToken interface. Returned by BrokerJwtValidator and
+// ClientJwtValidator after successful JWT validation. Stored in the JAAS Subject's private
+// credentials by OAuthBearerLoginCallbackHandler. Consumed by OAuthBearerSaslClient (sends
+// token value), OAuthBearerSaslServer (validates principal), and
+// OAuthBearerSaslClientCallbackHandler (selects from Subject credentials). The token value
+// is ultimately transmitted on the wire during SASL OAUTHBEARER exchange.
+
 public class BasicOAuthBearerToken implements OAuthBearerToken {
 
     private final String token;
@@ -62,6 +79,12 @@ public class BasicOAuthBearerToken implements OAuthBearerToken {
      *                      non-negative if a non-<code>null</code> value is provided.
      */
 
+    // DECISION: The constructor does NOT defensively copy the scope set — it stores the
+    // reference as-is. The Javadoc states the set is "copied and made unmodifiable" but this
+    // is delegated to the caller (ClaimValidationUtils.validateScopes returns unmodifiable set).
+    // Alternative: Copy and wrap in Collections.unmodifiableSet() here. Rationale: Avoiding
+    // double-copy when the caller already provides an unmodifiable set. The scope() method
+    // documents that immutability is enforced at construction time.
     public BasicOAuthBearerToken(String token,
         Set<String> scopes,
         long lifetimeMs,
@@ -150,6 +173,14 @@ public class BasicOAuthBearerToken implements OAuthBearerToken {
         return startTimeMs;
     }
 
+    // SECURITY: (MEDIUM) WARNING — toString() includes the raw token value in the output
+    // ("token='" + token + "'"). This means logging a BasicOAuthBearerToken instance at any
+    // level will expose the full JWT string in log files. Callers MUST NOT log this object.
+    // Exploit: An attacker with access to application log files (e.g., via log aggregation
+    // systems, shared filesystems, or log injection) can extract valid JWT tokens and replay
+    // them against the broker until they expire.
+    // Improvement: Mask the token value in toString() — e.g., show only the first 8 characters
+    // followed by "..." to enable debugging without exposing the full credential.
     @Override
     public String toString() {
         return new StringJoiner(", ", BasicOAuthBearerToken.class.getSimpleName() + "[", "]")
