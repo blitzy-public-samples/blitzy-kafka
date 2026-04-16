@@ -37,6 +37,15 @@ import java.nio.ByteBuffer;
  * - the implementation of this class is performance sensitive. Minor changes such as usage of ByteBuffer instead of byte[]
  * can significantly impact performance, hence, proceed with caution.
  */
+// DECISION: Pooled buffered InputStream with explicit release-to-pool contract. Alternative:
+// Standard BufferedInputStream. Rationale: Kafka decompression creates many temporary streams —
+// pooling intermediate buffers via BufferSupplier eliminates GC pressure from frequent
+// allocation/deallocation. The explicit release() contract ensures buffers are returned to the
+// pool when processing completes, unlike BufferedInputStream which holds its buffer until GC.
+//
+// CROSS-CUTTING: Used by common/record/DefaultRecordBatch for decompression stream wrapping.
+// Depends on BufferSupplier for buffer pooling. Part of the record deserialization pipeline:
+// network receive → decompress → ChunkedBytesStream → record iterator.
 public class ChunkedBytesStream extends FilterInputStream {
     /**
      * Supplies the ByteBuffer which is used as intermediate buffer to store the chunk of output data.
@@ -70,6 +79,8 @@ public class ChunkedBytesStream extends FilterInputStream {
      * read from the contained  input stream.
      */
     protected int pos = 0;
+    // DECISION: ByteBuffer from BufferSupplier rather than byte[]. Enables pooling via
+    // BufferSupplier.release() for buffer reuse across multiple decompression operations.
     /**
      * Reference for the intermediate buffer. This reference is only kept for releasing the buffer from the
      * buffer supplier.
@@ -279,6 +290,15 @@ public class ChunkedBytesStream extends FilterInputStream {
      * @throws IOException if this input stream has been closed by invoking its {@link #close()} method,
      *                     {@code in.skip(n)} throws an IOException, or an I/O error occurs.
      */
+    // DECISION: Custom skip() implementation that reads and discards bytes rather than delegating
+    // to underlying stream's skip(). Alternative: Use InputStream.skip(). Rationale: Some
+    // compression codec InputStreams (e.g., SnappyInputStream) have buggy skip() implementations
+    // that don't actually advance the decompression state — reading and discarding is safer.
+    //
+    // COMPLEXITY: 46 lines — Multi-path skip with buffer refill loop, source/intermediate
+    // buffer coordination, and end-of-stream detection. Two execution paths controlled by
+    // delegateSkipToSourceStream flag: (1) delegate path calls sourceStream.skip() with EOS
+    // probe fallback, (2) non-delegate path reads-and-discards via intermediate buffer refill.
     @Override
     public long skip(long toSkip) throws IOException {
         getBufIfOpen(); // Check for closed stream
