@@ -96,17 +96,52 @@ import javax.security.sasl.SaslException;
  * {@code listener.name.sasl_[plaintext|ssl].oauthbearer.sasl.login.callback.handler.class}
  * broker configuration property.
  */
+// SECURITY: (CRITICAL) DEVELOPMENT ONLY — NO PRODUCTION USE.
+// This unsecured implementation accepts tokens without signature verification.
+// A bad actor can forge any token with arbitrary claims (scope, subject, expiry).
+// Using this in production allows complete authentication bypass.
+// Improvement: Add a runtime check that logs CRITICAL-level warning when
+// unsecured OAUTHBEARER is used in non-test contexts. Consider adding a
+// system property or config flag to explicitly enable unsecured mode.
+//
+// CROSS-CUTTING: Depends on OAuthBearerUnsecuredJws (token representation, same package),
+// OAuthBearerClientInitialResponse.validateExtensions() (extension validation,
+// org.apache.kafka.common.security.oauthbearer.internals package),
+// OAuthBearerTokenCallback (callback contract, oauthbearer package),
+// SaslExtensionsCallback / SaslExtensions (auth package),
+// OAuthBearerLoginModule.OAUTHBEARER_MECHANISM (mechanism name constant).
+// Used by: authenticator/LoginManager as the default login callback handler when
+// sasl.login.callback.handler.class is not configured for OAUTHBEARER mechanism.
+// Contract: configure() -> handle() lifecycle. Not thread-safe.
+// Impact: Tokens created here are consumed by OAuthBearerSaslClient for client-first
+// message construction, then validated by OAuthBearerUnsecuredValidatorCallbackHandler
+// (or a production validator) on the broker side.
 public class OAuthBearerUnsecuredLoginCallbackHandler implements AuthenticateCallbackHandler {
     private static final Logger log = LoggerFactory.getLogger(OAuthBearerUnsecuredLoginCallbackHandler.class);
     private static final String OPTION_PREFIX = "unsecuredLogin";
     private static final String PRINCIPAL_CLAIM_NAME_OPTION = OPTION_PREFIX + "PrincipalClaimName";
     private static final String LIFETIME_SECONDS_OPTION = OPTION_PREFIX + "LifetimeSeconds";
     private static final String SCOPE_CLAIM_NAME_OPTION = OPTION_PREFIX + "ScopeClaimName";
+    // DECISION: Only "iat" and "exp" are reserved (auto-calculated). Alternative: Reserve
+    // additional standard JWT claims ("nbf", "iss", "aud", "jti"). Rationale: Minimal
+    // reservation — users may need to set custom "iss"/"aud" for testing. "iat" and "exp"
+    // MUST be auto-calculated for temporal consistency with the system clock.
     private static final Set<String> RESERVED_CLAIMS = Set.of("iat", "exp");
     private static final String DEFAULT_PRINCIPAL_CLAIM_NAME = "sub";
+    // DECISION: Default token lifetime is 3600 seconds (1 hour). Alternative: Shorter
+    // default (e.g., 300s) for tighter security-by-default. Rationale: 1 hour balances
+    // convenience for development (less frequent token refresh) with reasonable token
+    // validity window.
     private static final String DEFAULT_LIFETIME_SECONDS_ONE_HOUR = "3600";
     private static final String DEFAULT_SCOPE_CLAIM_NAME = "scope";
     private static final String STRING_CLAIM_PREFIX = OPTION_PREFIX + "StringClaim_";
+    // DECISION: Three claim prefix patterns (unsecuredLoginStringClaim_,
+    // unsecuredLoginNumberClaim_, unsecuredLoginListClaim_) for type-safe claim
+    // specification via JAAS options. Alternative: Single prefix with JSON value
+    // parsing. Rationale: Separate prefixes avoid ambiguity in value parsing (e.g.,
+    // "123" as string vs number) and make JAAS config more readable. List claims use
+    // a delimiter-prefixed format (first char = delimiter).
+    // Risk: The delimiter convention for list claims is unusual and error-prone.
     private static final String NUMBER_CLAIM_PREFIX = OPTION_PREFIX + "NumberClaim_";
     private static final String LIST_CLAIM_PREFIX = OPTION_PREFIX + "ListClaim_";
     private static final String EXTENSION_PREFIX = OPTION_PREFIX + "Extension_";
@@ -178,6 +213,30 @@ public class OAuthBearerUnsecuredLoginCallbackHandler implements AuthenticateCal
         // empty
     }
 
+    // SECURITY: (CRITICAL) Creates tokens from JAAS options without any OAuth provider
+    // interaction — no token endpoint call, no client credentials, no authorization code.
+    // Why: Any JAAS configuration can specify arbitrary claims via option prefixes
+    // (unsecuredLoginStringClaim_, unsecuredLoginNumberClaim_, unsecuredLoginListClaim_).
+    // Exploit: An attacker with access to the JAAS config file (or who can influence JAAS
+    // options programmatically) can specify: unsecuredLoginStringClaim_sub=admin,
+    // unsecuredLoginListClaim_scope="|cluster-admin|topic-admin" to create a token
+    // granting full administrative access. The token is self-issued with no external
+    // validation.
+    // Improvement: Log all claim values at WARN level when creating unsecured tokens.
+    // Consider requiring explicit opt-in via a system property like
+    // -Dkafka.oauthbearer.unsecured.enabled=true before allowing token creation.
+    //
+    // COMPLEXITY: 38 lines — Token construction pipeline.
+    // Structure: (1) Guard: callback.token() must be null, (2) Guard: moduleOptions not
+    // empty, (3) Guard: not extension-only options, (4) Extract principal/scope claim
+    // names with defaults, (5) Build JSON header {"alg":"none"}, (6) Build claims JSON
+    // with exp, iat, and custom string/number/list claims, (7) Base64URL-encode header
+    // and claims without padding, (8) Construct OAuthBearerUnsecuredJws from encoded
+    // string, (9) Set callback token.
+    // Key branches: empty moduleOptions -> null token, extension-only -> exception,
+    // NumberFormatException -> config exception.
+    // Exit paths: return via callback.token(null), throw OAuthBearerConfigException
+    // (3 locations), normal return via callback.token(jws).
     private void handleTokenCallback(OAuthBearerTokenCallback callback) {
         if (callback.token() != null)
             throw new IllegalArgumentException("Callback had a token already");
@@ -193,6 +252,15 @@ public class OAuthBearerUnsecuredLoginCallbackHandler implements AuthenticateCal
         String principalClaimName = Utils.isBlank(principalClaimNameValue) ? DEFAULT_PRINCIPAL_CLAIM_NAME : principalClaimNameValue.trim();
         String scopeClaimNameValue = optionValue(SCOPE_CLAIM_NAME_OPTION);
         String scopeClaimName = Utils.isBlank(scopeClaimNameValue) ? DEFAULT_SCOPE_CLAIM_NAME : scopeClaimNameValue.trim();
+        // DECISION: Constructs JSON manually via string concatenation with escape()
+        // helper rather than using Jackson ObjectMapper serialization. Alternative:
+        // Use ObjectMapper.writeValueAsString(). Rationale: Avoids Jackson dependency
+        // for token creation (Jackson is only used in OAuthBearerUnsecuredJws for
+        // parsing). Manual construction is simpler for the fixed header format
+        // {"alg":"none"} and avoids ObjectMapper instantiation overhead.
+        // Risk: Manual JSON escaping in escape() may miss edge cases. However, claim
+        // names come from JAAS config keys (alphanumeric) and values are
+        // user-controlled strings.
         String headerJson = "{" + claimOrHeaderJsonText("alg", "none") + "}";
         String lifetimeSecondsValueToUse = optionValue(LIFETIME_SECONDS_OPTION, DEFAULT_LIFETIME_SECONDS_ONE_HOUR);
         String claimsJson;
@@ -205,6 +273,12 @@ public class OAuthBearerUnsecuredLoginCallbackHandler implements AuthenticateCal
         }
         try {
             Encoder urlEncoderNoPadding = Base64.getUrlEncoder().withoutPadding();
+            // SECURITY: (CRITICAL) Constructs an unsigned JWS:
+            // Base64URL(header).Base64URL(claims).(empty signature). The header
+            // is always {"alg":"none"}. The claims contain iat, exp, and all custom
+            // claims from JAAS options. No cryptographic signing occurs. The
+            // resulting token is a valid JWT compact serialization that any JWT
+            // parser can decode — an attacker can trivially read all claims.
             OAuthBearerUnsecuredJws jws = new OAuthBearerUnsecuredJws(
                     String.format("%s.%s.",
                             urlEncoderNoPadding.encodeToString(headerJson.getBytes(StandardCharsets.UTF_8)),
@@ -218,6 +292,14 @@ public class OAuthBearerUnsecuredLoginCallbackHandler implements AuthenticateCal
         }
     }
 
+    // SECURITY: (MEDIUM) SASL extensions are sourced from JAAS options prefixed with
+    // unsecuredLoginExtension_. Extensions are validated via
+    // OAuthBearerClientInitialResponse.validateExtensions() which checks key/value
+    // regex patterns and rejects the reserved "auth" key. However, extension VALUES
+    // can contain any printable ASCII content that passes the regex.
+    // Exploit: A malicious JAAS config can inject extensions that downstream consumers
+    // (custom authorizers, audit systems) may process unsafely — e.g., log injection.
+    // Improvement: Sanitize extension values or restrict to a strict allowlist pattern.
     /**
      *  Add and validate all the configured extensions.
      *  Token keys, apart from passing regex validation, must not be equal to the reserved key {@link OAuthBearerClientInitialResponse#AUTH_KEY}
@@ -242,6 +324,12 @@ public class OAuthBearerUnsecuredLoginCallbackHandler implements AuthenticateCal
         callback.extensions(saslExtensions);
     }
 
+    // COMPLEXITY: 18 lines — Iterates all moduleOptions keys, matching against three
+    // prefixes (STRING_CLAIM_PREFIX, NUMBER_CLAIM_PREFIX, LIST_CLAIM_PREFIX). Each
+    // matching key strips the prefix, validates it is not a reserved claim, retrieves
+    // the value, and appends comma-prepended JSON text. Number claims are parsed as
+    // Double. List claims delegate to listJsonText() for delimiter-aware array
+    // construction.
     private String commaPrependedStringNumberAndListClaimsJsonText() throws OAuthBearerConfigException {
         StringBuilder sb = new StringBuilder();
         for (String key : moduleOptions.keySet()) {
@@ -268,6 +356,13 @@ public class OAuthBearerUnsecuredLoginCallbackHandler implements AuthenticateCal
         return claimName;
     }
 
+    // COMPLEXITY: 32 lines — Delimiter-aware list parsing.
+    // Structure: First character of value is the delimiter (e.g., "|" in
+    // "|scope1|scope2"). Special regex characters (\\, ., [, (, {, |, ^, $) are
+    // escaped with backslash for String.split(). Remaining text is split on the
+    // delimiter, each element is quoted and escaped. Edge case handling: leading
+    // delimiter, trailing delimiter, or consecutive delimiters produce empty string
+    // elements appended as trailing "".
     private String listJsonText(String value) {
         if (value.length() <= 1)
             return "[]";
