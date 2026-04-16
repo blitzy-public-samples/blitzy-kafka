@@ -29,6 +29,27 @@ import org.jose4j.keys.resolvers.VerificationKeyResolver;
  * define a <code>close</code> method, we provide a means to do that here.
  */
 
+// SECURITY: (MEDIUM) Combined lifecycle contract for OAUTHBEARER key resolvers.
+// Why: Implementations manage cryptographic key material and potentially long-lived HTTP
+// connections. Improper lifecycle management (missing close()) can leak threads and connections.
+// Exploit: If close() is not called, RefreshingHttpsJwks's ScheduledExecutorService continues
+// running, maintaining HTTP connections to the JWKS endpoint. In a dynamic listener
+// reconfiguration scenario, leaked resolvers continue validating tokens with stale keys.
+// Improvement: Add a finalizer or Cleaner-based safety net to detect unclosed resolvers.
+
+// DECISION: Combines jose4j VerificationKeyResolver + OAuthBearerConfigurable (configure +
+// Closeable) into a single interface. Alternative: (1) Separate Configurable and Closeable
+// wrappers, (2) Extend VerificationKeyResolver directly with configure/close methods.
+// Rationale: Single interface simplifies the VerificationKeyResolverFactory return type and
+// enables reference-counting lifecycle management (RefCountingVerificationKeyResolver).
+// The composition avoids modifying jose4j's VerificationKeyResolver interface.
+
+// CROSS-CUTTING: Implemented by RefreshingHttpsJwksVerificationKeyResolver (HTTPS JWKS),
+// JwksFileVerificationKeyResolver (file JWKS), and VerificationKeyResolverFactory's
+// RefCountingVerificationKeyResolver (ref-counting wrapper). Used by VerificationKeyResolverFactory
+// (factory return type), OAuthBearerValidatorCallbackHandler (resolver lifecycle management),
+// BrokerJwtValidator and DefaultJwtValidator (key resolution during JWT validation).
+// Extends: jose4j VerificationKeyResolver (resolveKey), OAuthBearerConfigurable (configure + close).
 public interface CloseableVerificationKeyResolver extends OAuthBearerConfigurable, VerificationKeyResolver {
 
 }
