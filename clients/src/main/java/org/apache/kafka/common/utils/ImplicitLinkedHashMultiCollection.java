@@ -42,6 +42,14 @@ import java.util.List;
  *
  * This multiset does not allow null elements.  It does not have internal synchronization.
  */
+// DECISION: Extends ImplicitLinkedHashCollection to support multi-set semantics (duplicate keys
+// allowed). Alternative: Separate MultiMap implementation. Rationale: Reusing the base collection's
+// open-addressing hash table and embedded linked list avoids duplicating the memory-efficient
+// layout. Only addInternal() and findElementToRemove() need overriding to change equality semantics
+// from key-equality to reference-equality for add, and prefer-reference-then-key-equality for remove.
+//
+// CROSS-CUTTING: Depends on ImplicitLinkedHashCollection for base hash table implementation.
+// Used in coordinator runtime where multiple records may share the same partition key.
 public class ImplicitLinkedHashMultiCollection<E extends ImplicitLinkedHashCollection.Element>
         extends ImplicitLinkedHashCollection<E> {
     public ImplicitLinkedHashMultiCollection() {
@@ -65,6 +73,10 @@ public class ImplicitLinkedHashMultiCollection<E extends ImplicitLinkedHashColle
      * @return              The index at which the element was inserted, or INVALID_INDEX
      *                      if the element could not be inserted.
      */
+    // DECISION: Uses reference equality (==) instead of elementKeysAreEqual() to allow duplicate
+    // keys. Only rejects if the exact same object instance is already present. Alternative: Always
+    // reject duplicates. Rationale: Multi-collection semantics require storing multiple elements
+    // with the same key (e.g., multiple in-flight requests for the same partition).
     @Override
     int addInternal(Element newElement, Element[] addElements) {
         int slot = slot(addElements, newElement);
@@ -89,6 +101,10 @@ public class ImplicitLinkedHashMultiCollection<E extends ImplicitLinkedHashColle
      *
      * @return                  The match index, or INVALID_INDEX if no match was found.
      */
+    // DECISION: Two-tier removal: first tries reference equality (==), falls back to key equality.
+    // Rationale: When removing a specific element instance, reference equality is preferred to avoid
+    // removing a different element that merely has the same key. The bestSlot fallback handles the
+    // case where the caller passes a key-equivalent lookup object rather than the exact instance.
     @Override
     int findElementToRemove(Object key) {
         if (key == null || size() == 0) {
