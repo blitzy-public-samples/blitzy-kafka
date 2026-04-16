@@ -37,6 +37,17 @@ import java.util.function.Supplier;
  *   <li><code>class</code> set to the name of the instance class</li>
  * </ul>
  */
+// DECISION: Generic wrapper type that pairs a plugin instance with optional PluginMetrics.
+// Alternative: Have each plugin manage its own metrics registration. Rationale: Centralizing
+// metrics lifecycle in Plugin<T> ensures consistent tag naming (config+class) and guaranteed
+// cleanup on close() — individual plugins would need to duplicate this logic. Implements
+// Supplier<T> for seamless integration with existing plugin access patterns.
+//
+// CROSS-CUTTING: Used by clients/producer/KafkaProducer, clients/consumer/KafkaConsumer,
+// clients/admin/KafkaAdminClient, and connect/runtime/Worker to wrap interceptors,
+// serializers, partitioners, and other configurable plugins with optional metrics support.
+// Depends on common/metrics/Metrics and common/metrics/Monitorable for metrics integration,
+// and common/utils/Utils for resource cleanup.
 public class Plugin<T> implements Supplier<T>, AutoCloseable {
 
     private final T instance;
@@ -54,6 +65,9 @@ public class Plugin<T> implements Supplier<T>, AutoCloseable {
      * @param tagsSupplier supplier to retrieve the tags
      * @return the plugin
      */
+    // DECISION: Conditional Monitorable check via instanceof — only plugins that opt into metrics
+    // by implementing Monitorable receive a PluginMetricsImpl. This avoids allocating metrics
+    // infrastructure for simple plugins (e.g., Partitioner, Serializer) that don't publish metrics.
     public static <T> Plugin<T> wrapInstance(T instance, Metrics metrics, Supplier<Map<String, String>> tagsSupplier) {
         PluginMetricsImpl pluginMetrics = null;
         if (instance instanceof Monitorable && metrics != null) {
@@ -92,6 +106,9 @@ public class Plugin<T> implements Supplier<T>, AutoCloseable {
         return wrapInstance(instance, metrics, tagsSupplier);
     }
 
+    // DECISION: LinkedHashMap for deterministic tag ordering in JMX MBean names. Tags include
+    // 'config' (which configuration key specified this plugin) and 'class' (the implementation
+    // class simple name) — sufficient to distinguish multiple instances of the same plugin type.
     private static <T> Map<String, String> tags(String key, T instance) {
         Map<String, String> tags = new LinkedHashMap<>();
         tags.put("config", key);
@@ -119,6 +136,11 @@ public class Plugin<T> implements Supplier<T>, AutoCloseable {
         return instance;
     }
 
+    // DECISION: AtomicReference<Throwable> pattern collects first exception from both instance
+    // close and pluginMetrics close, then rethrows as KafkaException. Alternative: try-finally
+    // chain. Rationale: Utils.closeQuietly + AtomicReference ensures both resources are always
+    // attempted to close even if the first throws, and the first exception is preserved for
+    // diagnostic accuracy.
     @Override
     public void close() throws Exception {
         AtomicReference<Throwable> firstException = new AtomicReference<>();
