@@ -44,7 +44,26 @@ import static org.apache.kafka.common.utils.CollectionUtils.subtractMap;
  * It is very important that token validation is done in its own {@link OAuthBearerValidatorCallback}
  * irregardless of provided extensions, as they are inherently insecure.
  */
+// SECURITY: (MEDIUM) Extension validation callback - used by SaslServer to validate
+// client-provided SASL extensions. Extensions are inherently untrusted (client-controlled).
+// Why: Per RFC 7628 Section 3.1, unknown extensions should be ignored, but validated
+// extensions influence downstream authorization decisions.
+// Exploit: A malicious client could inject crafted extension values that downstream
+// components (custom authorizers, audit loggers) trust without proper sanitization.
+// Improvement: Consider sanitizing extension values (reject control characters, limit
+// length) before passing to downstream consumers.
+
+// CROSS-CUTTING: Used by internals/OAuthBearerSaslServer to validate client-provided
+// extensions during SASL handshake. Populated by OAuthBearerValidatorCallbackHandler
+// (which marks all extensions valid by default) or custom callback handlers.
+// Depends on: auth/SaslExtensions (input extension carrier), CollectionUtils.subtractMap.
+// Contract: Callback is populated by handler, then read by SaslServer. Not thread-safe.
 public class OAuthBearerExtensionsValidatorCallback implements Callback {
+    // DECISION: Uses three separate maps (validated, invalid, plus inputExtensions) rather
+    // than a single map with status values. Alternative: Map<String, ValidationResult>.
+    // Rationale: Separate collections enable O(1) lookups for each category and follow the
+    // Callback pattern of accumulating results via mutator methods. invalidExtensions()
+    // and validatedExtensions() return unmodifiable views for safety.
     private final OAuthBearerToken token;
     private final SaslExtensions inputExtensions;
     private final Map<String, String> validatedExtensions = new HashMap<>();
@@ -83,6 +102,9 @@ public class OAuthBearerExtensionsValidatorCallback implements Callback {
         return Collections.unmodifiableMap(invalidExtensions);
     }
 
+    // DECISION: Unknown extensions computed via set subtraction (input - validated - invalid).
+    // Alternative: Track unknown extensions in a fourth map. Rationale: Computed view
+    // avoids state synchronization between four mutable maps.
     /**
      * @return An immutable {@link Map} consisting of the extensions that have neither been validated nor invalidated
      */
