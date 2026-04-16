@@ -90,6 +90,42 @@ import javax.security.sasl.Sasl;
 import javax.security.sasl.SaslException;
 import javax.security.sasl.SaslServer;
 
+/**
+ * Server-side SASL authentication handler implementing the Kafka SASL protocol.
+ *
+ * <p>CROSS-CUTTING: Depends on auth/AuthenticateCallbackHandler (mechanism-specific
+ * credential validation), auth/KafkaPrincipalBuilder (principal construction from auth
+ * context), common/network/TransportLayer (non-blocking I/O), kerberos/KerberosName
+ * (GSSAPI principal parsing), scram/ScramMechanism (token auth detection).
+ * Consumed by: common/network/ChannelBuilders (server channel setup), and indirectly
+ * by core/BrokerServer and server/SocketServer for broker-side authentication.
+ * Contract: authenticate() is called repeatedly by the Selector I/O loop; each call
+ * must either advance the state machine or return without blocking.
+ *
+ * @apiNote DECISION: Non-blocking I/O state machine design over synchronous
+ * per-connection thread authentication. Alternatives: (1) Blocking auth in dedicated
+ * thread per connection, (2) CompletableFuture-based async pipeline. Rationale: The
+ * NIO selector model requires non-blocking authentication that returns immediately if
+ * I/O is not ready. The FSM approach with SaslState enum makes the protocol exchange
+ * explicit and auditable. Risk: Complex state management with deferred transitions
+ * (pendingSaslState) is error-prone.
+ *
+ * @implSpec SECURITY: (CRITICAL) Server-side SASL authentication state machine.
+ * This class processes untrusted network data from clients during authentication.
+ * The SaslState FSM enforces that authentication proceeds through a strict sequence
+ * of states; any deviation is a potential bypass vector. The state machine handles
+ * both initial authentication and re-authentication, with distinct state flows.
+ * Exploit: A malicious client could attempt to skip states by sending unexpected
+ * request types (e.g., sending SaslAuthenticate before SaslHandshake), or exploit
+ * timing windows during state transitions when pendingSaslState is set but not yet
+ * committed. The deferred state transition via pendingSaslState/pendingException
+ * means there is a window where saslState has not yet been updated to FAILED even
+ * though an authentication error has occurred.
+ * Improvement: Consider adding explicit state transition validation (e.g., a
+ * transition table) to reject any state change not in the allowed set. Also
+ * consider atomic state transitions instead of the deferred pendingSaslState
+ * pattern.
+ */
 public class SaslServerAuthenticator implements Authenticator {
     private static final Logger LOG = LoggerFactory.getLogger(SaslServerAuthenticator.class);
 
@@ -104,6 +140,20 @@ public class SaslServerAuthenticator implements Authenticator {
      * re-authentication is attempted with a mechanism different than the original
      * one; otherwise it joins the authentication flow at the {@link #AUTHENTICATE}
      * state and likewise ends at either {@link #COMPLETE} or {@link #FAILED}.
+     */
+    /*
+     * SECURITY: (CRITICAL) The SaslState enum defines the server-side authentication
+     * finite state machine. Each state represents a security boundary — transitioning
+     * between states changes what requests the server will accept from the client.
+     * A bug in state transition logic could allow an unauthenticated client to reach
+     * COMPLETE state without proper credential verification.
+     * Exploit: If a client can manipulate the server into skipping from
+     * INITIAL_REQUEST directly to COMPLETE (bypassing AUTHENTICATE), it gains
+     * unauthenticated access. The current implementation prevents this via the
+     * switch statement in authenticate() which only processes AUTHENTICATE-state
+     * tokens through handleSaslToken().
+     * Improvement: Consider a compile-time state transition table that
+     * enumerates all legal (fromState, toState) pairs for easier auditing.
      */
     private enum SaslState {
         INITIAL_REQUEST,               // May be SaslHandshake or ApiVersions for authentication
@@ -124,13 +174,23 @@ public class SaslServerAuthenticator implements Authenticator {
     private final List<String> enabledMechanisms;
     private final Map<String, ?> configs;
     private final KafkaPrincipalBuilder principalBuilder;
+    // CROSS-CUTTING: callbackHandlers maps mechanism name to handler instance.
+    // Each handler is created by ChannelBuilders and dispatches to mechanism-specific
+    // logic (ScramSaslServer, OAuthBearerSaslServer, PlainSaslServer, KerberosServer).
     private final Map<String, AuthenticateCallbackHandler> callbackHandlers;
     private final Map<String, Long> connectionsMaxReauthMsByMechanism;
     private final Time time;
     private final ReauthInfo reauthInfo;
+    // CROSS-CUTTING: metadataRegistry bridges authentication with the server's
+    // ClientQuotaManager — client software name/version registered here are used
+    // for quota enforcement and telemetry.
     private final ChannelMetadataRegistry metadataRegistry;
     private final Function<Short, ApiVersionsResponse> apiVersionSupplier;
 
+    // DECISION: Initial state is INITIAL_REQUEST rather than a separate
+    // "pre-handshake" state. The first client message may be either SaslHandshake
+    // or ApiVersions, so a combined initial state avoids adding states for each
+    // possible first request type.
     // Current SASL state
     private SaslState saslState = SaslState.INITIAL_REQUEST;
     // Next SASL state to be set when outgoing writes associated with the current SASL state complete
@@ -179,6 +239,11 @@ public class SaslServerAuthenticator implements Authenticator {
         if (enabledMechanisms == null || enabledMechanisms.isEmpty())
             throw new IllegalArgumentException("No SASL mechanisms are enabled");
         this.enabledMechanisms = new ArrayList<>(new HashSet<>(enabledMechanisms));
+        // SECURITY: (HIGH) De-duplicating via HashSet prevents a mechanism from
+        // appearing multiple times which could confuse callback handler selection.
+        // Exploit: Duplicate mechanisms could cause the server to instantiate
+        // multiple SaslServer instances for the same mechanism, wasting resources.
+        // Improvement: Consider enforcing a deterministic mechanism ordering.
         for (String mechanism : this.enabledMechanisms) {
             if (!callbackHandlers.containsKey(mechanism))
                 throw new IllegalArgumentException("Callback handler not specified for SASL mechanism " + mechanism);
@@ -192,19 +257,40 @@ public class SaslServerAuthenticator implements Authenticator {
         // authenticator or the transport layer
         this.principalBuilder = ChannelBuilders.createPrincipalBuilder(configs, kerberosNameParser, null);
 
+        // SECURITY: (MEDIUM) saslAuthRequestMaxReceiveSize limits the maximum SASL
+        // request payload to prevent memory exhaustion DoS. Default is 512KB.
+        // Exploit: Without this limit, a malicious client could send multi-GB
+        // payloads during SASL exchange to exhaust broker heap memory.
+        // Improvement: Consider per-connection bandwidth accounting in addition
+        // to the single-message size limit.
         saslAuthRequestMaxReceiveSize = (Integer) configs.get(BrokerSecurityConfigs.SASL_SERVER_MAX_RECEIVE_SIZE_CONFIG);
         if (saslAuthRequestMaxReceiveSize == null)
             saslAuthRequestMaxReceiveSize = BrokerSecurityConfigs.DEFAULT_SASL_SERVER_MAX_RECEIVE_SIZE;
     }
 
+    // SECURITY: (CRITICAL) SaslServer instantiation runs under the server's JAAS
+    // Subject via SecurityManagerCompatibility.callAs(). For GSSAPI, a separate
+    // code path (createSaslKerberosServer) extracts the service principal from the
+    // Subject. Exploit: If the Subject contains multiple principals, the wrong
+    // principal could be selected for GSSAPI, potentially accepting connections
+    // intended for a different service. Improvement: Consider validating that
+    // exactly one service principal exists in the Subject.
     private void createSaslServer(String mechanism) throws IOException {
         this.saslMechanism = mechanism;
         Subject subject = subjects.get(mechanism);
         final AuthenticateCallbackHandler callbackHandler = callbackHandlers.get(mechanism);
+        // DECISION: GSSAPI gets a separate createSaslKerberosServer() path because
+        // Kerberos requires extracting the service principal name and hostname from
+        // the JAAS Subject, which other mechanisms (SCRAM, PLAIN, OAUTHBEARER)
+        // do not need.
         if (mechanism.equals(SaslConfigs.GSSAPI_MECHANISM)) {
             saslServer = createSaslKerberosServer(callbackHandler, configs, subject);
         } else {
             try {
+                // DECISION: Uses SecurityManagerCompatibility.callAs() (privileged
+                // action) rather than Subject.doAs() to support both pre-JEP-411
+                // and post-JEP-411 JDK environments. This abstraction handles the
+                // JDK deprecation of SecurityManager gracefully.
                 saslServer = SecurityManagerCompatibility.get().callAs(subject, () ->
                     Sasl.createSaslServer(saslMechanism, "kafka", serverAddress().getHostName(), configs, callbackHandler));
                 if (saslServer == null) {
@@ -244,7 +330,26 @@ public class SaslServerAuthenticator implements Authenticator {
      *
      * The messages are sent and received as size delimited bytes that consists of a 4 byte network-ordered size N
      * followed by N bytes representing the opaque payload.
+     *
+     * @implNote COMPLEXITY: 54 lines — Authentication state machine driver.
+     * Structure: (1) Flush pending output buffer, (2) Check SaslServer completion,
+     * (3) Allocate/read input buffer, (4) Extract client token, (5) Switch on
+     * saslState: dispatch to handleKafkaRequest (INITIAL/HANDSHAKE/VERSIONS),
+     * handleSaslToken (AUTHENTICATE), or throw (REAUTH_BAD_MECHANISM). Error
+     * paths: AuthenticationException deferred FAILED with response;
+     * IOException/other immediate FAILED with throw.
      */
+    // SECURITY: (CRITICAL) Main authentication loop — processes raw network bytes
+    // and dispatches to state-specific handlers. The @SuppressWarnings("fallthrough")
+    // is intentional: there is NO fallthrough in this switch — each case either
+    // calls a handler or throws. The catch blocks differentiate between
+    // AuthenticationException (deferred response to client, then FAILED) and other
+    // exceptions (immediate FAILED). Exploit: If an IOException is thrown after
+    // partial state mutation, the connection may be in an inconsistent state. The
+    // catch block for non-auth exceptions sets saslState directly (bypassing
+    // setSaslState) to ensure immediate failure without waiting for pending writes.
+    // Improvement: Consider wrapping state mutations in a try-with-rollback pattern
+    // to guarantee consistent state even on partial failure.
     @SuppressWarnings("fallthrough")
     @Override
     public void authenticate() throws IOException {
@@ -375,6 +480,15 @@ public class SaslServerAuthenticator implements Authenticator {
         setSaslState(saslState, null);
     }
 
+    // SECURITY: (HIGH) Deferred state transition — if there are pending network
+    // writes (netOutBuffer not completed), state change is deferred to
+    // pendingSaslState. This means the actual saslState may lag behind the logical
+    // state, creating a window where the server is in a different state than
+    // expected by the client. Exploit: During the deferred window, a fast client
+    // could send a follow-up request that is processed under the old state rather
+    // than the new one. The authenticate() method mitigates this by checking
+    // netOutBuffer completion first. Improvement: Consider atomic state transitions
+    // using compareAndSet to eliminate the deferred-state window entirely.
     private void setSaslState(SaslState saslState, AuthenticationException exception) {
         if (netOutBuffer != null && !netOutBuffer.completed()) {
             pendingSaslState = saslState;
@@ -418,6 +532,28 @@ public class SaslServerAuthenticator implements Authenticator {
         return transportLayer.socketChannel().socket().getPort();
     }
 
+    /*
+     * SECURITY: (CRITICAL) Processes SASL authentication tokens from the client.
+     * Two code paths: (1) Legacy raw token (enableKafkaSaslAuthenticateHeaders
+     * =false): evaluateResponse directly on raw bytes, (2) Modern Kafka-framed:
+     * parses SaslAuthenticateRequest header, validates API key, then
+     * evaluateResponse. Exploit: A client could send a non-SASL_AUTHENTICATE API
+     * key during AUTHENTICATE state to trigger unexpected request processing (the
+     * apiKey check guards against this). The SaslException catch strips the
+     * original error message before sending to the client to prevent information
+     * leakage about user existence or credential state. Improvement: Consider
+     * rate-limiting failed authentication attempts per connection to slow
+     * brute-force attacks on SCRAM/PLAIN credentials.
+     */
+    // COMPLEXITY: 79 lines — Multi-phase SASL token processing.
+    // Structure: Branch on enableKafkaSaslAuthenticateHeaders:
+    // Path 1 (legacy): Raw evaluateResponse then size-prefixed response.
+    // Path 2 (modern): Parse SaslAuthenticateRequest header, validate API key,
+    // evaluateResponse, build SaslAuthenticateResponse with session lifetime.
+    // Error handling: SaslAuthenticationException builds error response + rethrow;
+    // SaslException checks KerberosError retriability then rethrows as IO or auth
+    // exception. Key invariant: Error messages from SaslException are NOT forwarded
+    // to client to prevent information leakage about credential state.
     private void handleSaslToken(byte[] clientToken) throws IOException {
         if (!enableKafkaSaslAuthenticateHeaders) {
             byte[] response = saslServer.evaluateResponse(clientToken);
@@ -499,6 +635,24 @@ public class SaslServerAuthenticator implements Authenticator {
         }
     }
 
+    /*
+     * SECURITY: (HIGH) Processes Kafka protocol requests during the handshake
+     * phase. Only API_VERSIONS and SASL_HANDSHAKE requests are accepted; all
+     * other API keys are rejected with InvalidRequestException. Exploit: A client
+     * could send valid Kafka API requests (e.g., Produce, Fetch) during the
+     * handshake phase to attempt data access before authentication completes.
+     * The explicit apiKey check prevents this. The catch block handles legacy
+     * clients (pre-KIP-43) that send raw GSSAPI tokens instead of Kafka
+     * protocol frames — these fail with InvalidRequestException.
+     * Improvement: Consider an explicit allowlist of API keys per state rather
+     * than relying on switch-case handling.
+     */
+    // COMPLEXITY: 40 lines — Kafka request processing during SASL handshake.
+    // Structure: (1) Parse RequestHeader from raw bytes, (2) Validate API key is
+    // API_VERSIONS or SASL_HANDSHAKE only, (3) Build RequestContext, (4) Advance
+    // state from INITIAL_REQUEST to HANDSHAKE_OR_VERSIONS_REQUEST, (5) Dispatch
+    // to handleApiVersionsRequest or handleHandshakeRequest. Error paths:
+    // InvalidRequestException with special handling for initial state (legacy).
     /**
      * @throws InvalidRequestException if the request is not in Kafka format or if the API key is invalid. Clients
      * that support SASL without support for KIP-43 (e.g. Kafka Clients 0.9.x) are in the former bucket - the first
@@ -549,6 +703,10 @@ public class SaslServerAuthenticator implements Authenticator {
     private String handleHandshakeRequest(RequestContext context, SaslHandshakeRequest handshakeRequest) throws IOException, UnsupportedSaslMechanismException {
         String clientMechanism = handshakeRequest.data().mechanism();
         short version = context.header.apiVersion();
+        // DECISION: Handshake v1+ enables Kafka SASL authenticate headers (KIP-43).
+        // Version 0 uses raw size-prefixed bytes — maintained for backward
+        // compatibility. This version branching is permanent since older clients
+        // cannot be upgraded.
         if (version >= 1)
             this.enableKafkaSaslAuthenticateHeaders(true);
         if (enabledMechanisms.contains(clientMechanism)) {
@@ -612,6 +770,15 @@ public class SaslServerAuthenticator implements Authenticator {
         flushNetOutBufferAndUpdateInterestOps();
     }
 
+    // SECURITY: (HIGH) Re-authentication state tracking. The
+    // ensurePrincipalUnchanged() method prevents identity switching during
+    // re-authentication. The saslMechanismUnchanged() method prevents mechanism
+    // downgrade (e.g., switching from SCRAM-SHA-512 to PLAIN).
+    // Exploit: Without these checks, a client could authenticate as user A
+    // initially, then re-authenticate as user B using different credentials,
+    // effectively hijacking the connection's identity.
+    // Improvement: Consider failing fast at handshake if a different mechanism
+    // is requested, rather than after full re-authentication completes.
     /**
      * Information related to re-authentication
      */
@@ -664,6 +831,18 @@ public class SaslServerAuthenticator implements Authenticator {
             return false;
         }
 
+        // SECURITY: (MEDIUM) Session lifetime calculation uses the minimum of
+        // broker-configured max reauth time and credential expiration. If both are
+        // unset, no session expiration occurs — connections persist indefinitely.
+        // Exploit: Compromised credentials remain valid on existing connections
+        // until the connection is closed. Improvement: Consider enforcing a maximum
+        // session lifetime even when not explicitly configured.
+        // COMPLEXITY: 39 lines — Session lifetime calculation with 3 inputs.
+        // Structure: Computes retvalSessionLifetimeMs from minimum of credential
+        // expiration and broker max reauth config. 4 branches: (1) Only maxReauth
+        // set, (2) Only credential expiry set, (3) Both set take min, (4) Neither
+        // set no expiration. Then computes sessionExpirationTimeNanos. Followed by
+        // verbose logging with 3 log paths. All times are epoch-based ms.
         private long calcCompletionTimesAndReturnSessionLifetimeMs() {
             long retvalSessionLifetimeMs = 0L;
             long authenticationEndMs = time.milliseconds();
