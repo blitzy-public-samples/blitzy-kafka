@@ -29,6 +29,35 @@ import java.util.Set;
  * performed consistently throughout the code base.
  */
 
+// SECURITY: (MEDIUM) Pure static validators for JWT claim values (scopes, expiration,
+// subject, issuedAt, claim name overrides). These validators form the first line of defense
+// against malformed or malicious JWT claims.
+// Why: JWT claims are untrusted input from the OAuth token endpoint. Without validation,
+// malicious claims could propagate through the system causing authorization bypass or
+// injection.
+// Exploit: (1) Scope injection -- if scope values contain special characters (e.g., spaces,
+// semicolons) that are meaningful to downstream authorization logic, a crafted scope like
+// "read;admin" could be interpreted as two scopes by a naive parser. The trim() + duplicate
+// check mitigates this but does not restrict allowed characters within scope values. (2)
+// Subject injection -- the subject claim (sub) is used as the principal name. A subject
+// containing path separators or special characters could cause issues in ACL matching.
+// Improvement: Consider restricting scope and subject values to a safe character set
+// (e.g., alphanumeric + limited punctuation) rather than accepting any non-empty string.
+
+// DECISION: All string claims are trimmed before validation. Scope values are additionally
+// de-duplicated. Alternative: Reject values with leading/trailing whitespace rather than
+// trimming. Rationale: Trimming is more forgiving of minor formatting differences in JWT
+// claims across different OAuth providers. The unmodifiable return types ensure callers
+// cannot modify the validated values.
+
+// CROSS-CUTTING: Used by BrokerJwtValidator and ClientJwtValidator (claim extraction and
+// validation), DefaultJwtValidator (scope/subject/expiration/issuedAt validation).
+// The validated scope set is passed to BasicOAuthBearerToken constructor.
+// Depends on: JwtValidatorException (validation error reporting).
+// Contract: Pure static methods -- no state, fully thread-safe. All methods throw
+// JwtValidatorException on invalid input. Valid input returns cleaned (trimmed) values.
+// Impact: Validation changes affect what JWT claims are accepted across all OAUTHBEARER
+// auth.
 public class ClaimValidationUtils {
 
     /**
@@ -54,6 +83,10 @@ public class ClaimValidationUtils {
      *                           or whitespace only
      */
 
+    // SECURITY: (MEDIUM) Scope validation: non-null collection, each element trimmed, no
+    // duplicates after trimming. Returns unmodifiable Set -- downstream code cannot add scopes.
+    // Note: Does not validate scope VALUE format -- any non-empty, non-whitespace string is
+    // accepted.
     public static Set<String> validateScopes(String scopeClaimName, Collection<String> scopes) throws JwtValidatorException {
         if (scopes == null)
             throw new JwtValidatorException(String.format("%s value must be non-null", scopeClaimName));
@@ -89,6 +122,9 @@ public class ClaimValidationUtils {
      * @throws JwtValidatorException Thrown if the value is <code>null</code> or negative
      */
 
+    // SECURITY: (LOW) Expiration validation: non-null, non-negative. The actual expiry check
+    // (comparing against current time) is performed by the JWT validator, not here. This only
+    // validates the structural integrity of the expiration claim value.
     public static long validateExpiration(String claimName, Long claimValue) throws JwtValidatorException {
         if (claimValue == null)
             throw new JwtValidatorException(String.format("%s value must be non-null", claimName));
@@ -166,6 +202,10 @@ public class ClaimValidationUtils {
         return validateString(name, value);
     }
 
+    // DECISION: Shared private validateString() used by validateSubject() and
+    // validateClaimNameOverride(). Alternative: Inline validation in each public method.
+    // Rationale: DRY -- consistent null, empty, and whitespace-only checks. Returns trimmed
+    // value on success.
     private static String validateString(String name, String value) throws JwtValidatorException {
         if (value == null)
             throw new JwtValidatorException(String.format("%s value must be non-null", name));
