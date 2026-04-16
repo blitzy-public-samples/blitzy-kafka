@@ -76,10 +76,42 @@ import javax.security.auth.login.LoginException;
  * @see SaslConfigs#SASL_LOGIN_REFRESH_MIN_PERIOD_SECONDS_DOC
  * @see SaslConfigs#SASL_LOGIN_REFRESH_BUFFER_SECONDS_DOC
  */
+// SECURITY: (HIGH) Token refresh lifecycle -- orchestrates periodic JWT refresh for
+// both Kafka client and broker inter-broker communication.
+// Why: Token refresh is critical to continuous authentication. If refresh fails silently,
+// the broker/client continues with an expired credential until connection drops occur.
+// Expired credentials cascade to authentication failures across all new connections.
+// Exploit: Refresh failure suppression -- if the background refresh thread (in
+// ExpiringCredentialRefreshingLogin) encounters a persistent failure (e.g., OAuth
+// provider is down, network partition), connections using the stale token will
+// gradually fail as the token expires. An attacker could trigger this by DoS-ing
+// the OAuth token endpoint, causing all Kafka clients in the cluster to lose
+// their ability to refresh tokens simultaneously.
+// Improvement: Add metrics/alerts for refresh failures (e.g., a JMX gauge tracking
+// "time since last successful refresh"). Consider circuit-breaker pattern for
+// refresh retries to prevent thundering herd on the OAuth provider.
+//
+// CROSS-CUTTING: Extends auth/Login interface. Depends on expiring/ExpiringCredentialRefreshingLogin
+// (background refresh scheduling), expiring/ExpiringCredentialRefreshConfig (refresh policy),
+// expiring/ExpiringCredential (credential expiry contract), OAuthBearerToken (token interface).
+// Used by: authenticator/LoginManager which creates Login instances for SASL authentication.
+// OAuthBearerLoginModule.OAUTHBEARER_MECHANISM triggers automatic selection of this class
+// as the Login implementation (see SaslConfigs.DEFAULT_SASL_OAUTHBEARER_LOGIN_CLASS).
+// Contract: configure() then login(). close() interrupts background refresh thread.
+// Impact: Changes to ExpiringCredentialRefreshingLogin refresh scheduling affect all
+// OAUTHBEARER token refresh timing across clients and brokers.
 public class OAuthBearerRefreshingLogin implements Login {
     private static final Logger log = LoggerFactory.getLogger(OAuthBearerRefreshingLogin.class);
     private ExpiringCredentialRefreshingLogin expiringCredentialRefreshingLogin = null;
 
+    // COMPLEXITY: 48 lines -- Constructs ExpiringCredentialRefreshingLogin with an inline
+    // ExpiringCredential adapter. The anonymous class maps OAuthBearerToken to ExpiringCredential
+    // interface. Inner structure: creates ExpiringCredentialRefreshConfig from the provided config
+    // map, then instantiates ExpiringCredentialRefreshingLogin with the anonymous ExpiringCredential
+    // implementation. The ExpiringCredential adapter has 4 methods: principalName(), startTimeMs(),
+    // expireTimeMs() (maps to lifetimeMs), and absoluteLastRefreshTimeMs() (always null).
+    // Key: first token from Subject's private credentials is selected (no sorting).
+    // Empty set returns null (no credential).
     @Override
     public void configure(Map<String, ?> configs, String contextName, Configuration configuration,
             AuthenticateCallbackHandler loginCallbackHandler) {
@@ -91,10 +123,37 @@ public class OAuthBearerRefreshingLogin implements Login {
          * lifetime remaining when the refresh occurs, so serializing them seems
          * reasonable.
          */
+        // SECURITY: (MEDIUM) Refresh operations are serialized on OAuthBearerRefreshingLogin.class.
+        // This means all instances in the same JVM share a single lock for token refresh,
+        // preventing concurrent refresh storms. However, this also means a blocked refresh
+        // (e.g., stuck HTTP call to OAuth provider) blocks ALL other refreshes in the JVM.
+        //
+        // DECISION: Uses OAuthBearerRefreshingLogin.class as the synchronization lock for all
+        // refresh operations JVM-wide. Alternatives: (1) null -- no synchronization, allow
+        // concurrent refreshes, (2) Per-instance lock -- each Login refreshes independently,
+        // (3) Per-listener lock. Rationale: Serialization prevents thundering herd when multiple
+        // Kafka clients share the same OAuth provider. Token refresh is infrequent (minutes)
+        // with substantial remaining lifetime, so serialization overhead is negligible.
+        // Risk: A hung refresh (e.g., TCP timeout to OAuth provider) blocks all refreshes.
         Class<OAuthBearerRefreshingLogin> classToSynchronizeOnPriorToRefresh = OAuthBearerRefreshingLogin.class;
         expiringCredentialRefreshingLogin = new ExpiringCredentialRefreshingLogin(contextName, configuration,
                 new ExpiringCredentialRefreshConfig(configs, true), loginCallbackHandler,
                 classToSynchronizeOnPriorToRefresh) {
+            // SECURITY: (MEDIUM) ExpiringCredential adapter extracts token metadata from Subject
+            // private credentials. privateCredentialTokens.iterator().next() selects the first
+            // token without sorting -- during the brief multi-token refresh window, this may
+            // select either the old or new token. The refresh scheduler uses expireTimeMs()
+            // (mapped to token.lifetimeMs()) to compute the next refresh timestamp.
+            // Note: absoluteLastRefreshTimeMs() returns null -- refresh is never explicitly
+            // prohibited, relying only on the token expiry window for scheduling.
+            //
+            // DECISION: Wraps OAuthBearerToken in ExpiringCredential interface via anonymous class
+            // rather than making OAuthBearerToken extend ExpiringCredential directly. Alternative:
+            // OAuthBearerToken could implement ExpiringCredential. Rationale: Separation of
+            // concerns -- OAuthBearerToken is a public API interface that should not be coupled
+            // to the internal refresh scheduling infrastructure. The adapter allows the refresh
+            // framework to be reused for non-OAuth credentials (e.g., Kerberos TGTs via
+            // ExpiringCredentialRefreshingLogin).
             @Override
             public ExpiringCredential expiringCredential() {
                 Set<OAuthBearerToken> privateCredentialTokens = expiringCredentialRefreshingLogin.subject()
@@ -120,6 +179,11 @@ public class OAuthBearerRefreshingLogin implements Login {
                         return token.lifetimeMs();
                     }
 
+                    // DECISION: Returns null -- never prohibits refresh. Alternative: Return
+                    // token's expireTimeMs minus a buffer. Rationale: OAuth tokens should always
+                    // attempt refresh before expiry. The refresh window/buffer config parameters
+                    // in ExpiringCredentialRefreshConfig control the timing. Returning null
+                    // leaves scheduling entirely to the base class.
                     @Override
                     public Long absoluteLastRefreshTimeMs() {
                         return null;
