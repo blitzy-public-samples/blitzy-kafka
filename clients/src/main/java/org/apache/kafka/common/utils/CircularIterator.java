@@ -32,6 +32,12 @@ import java.util.Objects;
  * underlying {@code Collection} may cause a
  * {@link ConcurrentModificationException} or some other undefined behavior.
  */
+// DECISION: Infinite round-robin iterator with peek() support. Alternative: Modular index
+// tracking (index % size). Rationale: Encapsulating circular iteration in an Iterator type
+// enables composition with iterator-based APIs. peek() enables look-ahead without advancing,
+// which is used for request distribution decisions.
+// CROSS-CUTTING: Used by producer internals for round-robin partition assignment and by
+// network layer for distributing requests across available brokers.
 public class CircularIterator<T> implements Iterator<T> {
 
     private final Iterable<T> iterable;
@@ -62,6 +68,9 @@ public class CircularIterator<T> implements Iterator<T> {
      *
      * @return Always true
      */
+    // DECISION: Always returns true (infinite iteration) — callers must use external termination
+    // condition. Alternative: Fixed iteration count. Rationale: Round-robin distribution needs
+    // to cycle indefinitely; callers control how many iterations they need.
     @Override
     public boolean hasNext() {
         return true;
