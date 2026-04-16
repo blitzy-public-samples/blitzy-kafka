@@ -41,16 +41,37 @@ import java.util.function.BiConsumer;
  * Note that this class is not thread-safe with the exception of {@link #size()} which returns the number of
  * partitions currently tracked.
  */
+// DECISION: LinkedHashMap-based round-robin state tracker for partition iteration order.
+// Alternative: Explicit round-robin index into an array/list. Rationale: LinkedHashMap
+// maintains insertion order AND provides O(1) lookup by TopicPartition — the moveToEnd()
+// pattern (remove + re-insert) efficiently rotates partitions without copying. This is
+// critical for fair fetch request construction where each partition gets equal processing.
+//
+// CROSS-CUTTING: Used by clients/consumer/internals/Fetcher (now AsyncKafkaConsumer) and
+// core/server/AbstractFetcherThread for fair partition rotation during fetch requests. Also
+// used by clients/consumer/internals/SubscriptionState for partition tracking. Contract:
+// NOT thread-safe for concurrent mutations; only size() is safe for concurrent reads via
+// volatile. The iteration order represents the round-robin fetch priority.
 public class PartitionStates<S> {
 
+    // DECISION: LinkedHashMap (not HashMap) is essential — insertion order IS the round-robin
+    // rotation order. moveToEnd() relies on remove+put to shift a partition to the end of the
+    // iteration sequence. HashMap would lose ordering semantics.
     private final LinkedHashMap<TopicPartition, S> map = new LinkedHashMap<>();
     private final Set<TopicPartition> partitionSetView = Collections.unmodifiableSet(map.keySet());
 
+    // DECISION: Volatile size field for thread-safe reads without synchronizing the entire map.
+    // Alternative: synchronized size() method or AtomicInteger. Rationale: Volatile is sufficient
+    // because size is only written by mutation methods (which are not concurrent) and read by
+    // callers who need an approximate count — eventual consistency is acceptable.
     /* the number of partitions that are currently assigned available in a thread safe manner */
     private volatile int size = 0;
 
     public PartitionStates() {}
 
+    // DECISION: Remove-then-reinsert pattern exploits LinkedHashMap's insertion-order property
+    // to move a partition to the end of iteration. This is the core round-robin rotation
+    // mechanism used by fetch request construction.
     public void moveToEnd(TopicPartition topicPartition) {
         S state = map.remove(topicPartition);
         if (state != null)
@@ -126,6 +147,10 @@ public class PartitionStates<S> {
      * following (the order of topics and partitions within topics is dependent on the iteration order of the received
      * map): a0, a1, b1, b0, c0, c1.
      */
+    // DECISION: The set() method groups partitions by topic before inserting to ensure contiguous
+    // topic blocks in iteration order. This optimizes fetch request serialization — partitions
+    // for the same topic are serialized together, reducing protocol overhead. Without grouping,
+    // interleaved topics would produce larger wire payloads.
     public void set(Map<TopicPartition, S> partitionToState) {
         map.clear();
         update(partitionToState);
@@ -136,6 +161,10 @@ public class PartitionStates<S> {
         size = map.size();
     }
 
+    // DECISION: Two-pass algorithm: (1) group TopicPartitions by topic name using LinkedHashMap
+    // to preserve encounter order, (2) iterate groups and insert. LinkedHashMap ensures topic
+    // ordering is deterministic (based on input map iteration order). Alternative: Sort by topic.
+    // Rationale: Sorting would impose an ordering contract not required by callers.
     private void update(Map<TopicPartition, S> partitionToState) {
         LinkedHashMap<String, List<TopicPartition>> topicToPartitions = new LinkedHashMap<>();
         for (TopicPartition tp : partitionToState.keySet()) {
