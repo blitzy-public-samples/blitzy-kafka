@@ -24,6 +24,25 @@ import org.apache.kafka.common.security.oauthbearer.JwtValidatorException;
  * splitting and making the three sections (header, payload, and signature) available to the user.
  */
 
+// SECURITY: (MEDIUM) JWT structural parsing — splits compact serialization into header,
+// payload, and signature sections at the "." delimiter.
+// Why: This is the first parser to touch the raw JWT string. Malformed input is rejected
+// here before reaching jose4j or any other validation logic.
+// Exploit: (1) A JWT with extra dots (e.g., "a.b.c.d") passes the splits.length != 3 check
+// and is rejected — correct. (2) A JWT with empty sections (e.g., "a..b") passes the split
+// but validateSection() catches the empty section — correct. (3) String.split("\\.")
+// discards trailing empty strings by default, so "a.b." would produce ["a","b"] (length 2)
+// and be rejected — correct. However, "a.b.c " (trailing space in signature) is accepted
+// after trim(). This is consistent with JWT compact serialization whitespace handling.
+// Improvement: Consider using a strict regex that rejects any whitespace within sections,
+// or validate Base64URL encoding of each section before accepting.
+
+// CROSS-CUTTING: Used by CachedFile.STRING_JSON_VALIDATING_TRANSFORMER (JWT file validation),
+// BrokerJwtValidator and ClientJwtValidator (JWT header extraction for algorithm detection).
+// Depends on: JwtValidatorException (structural validation errors).
+// Contract: Constructor validates and splits. Getters return immutable, trimmed sections.
+// Impact: Structural validation changes affect all JWT parsing in the OAUTHBEARER stack.
+
 public class SerializedJwt {
 
     private final String token;
@@ -34,7 +53,15 @@ public class SerializedJwt {
 
     private final String signature;
 
+    // DECISION: Validates JWT structure eagerly in the constructor rather than lazily on access.
+    // Alternative: Accept any string, validate on getHeader()/getPayload()/getSignature().
+    // Rationale: Fail-fast — invalid JWTs are rejected immediately, preventing downstream code
+    // from operating on malformed data. The token is immutable after construction.
     public SerializedJwt(String token) {
+        // DECISION: Input token is trimmed before splitting, and each section is trimmed individually
+        // by validateSection(). Alternative: Reject tokens with whitespace. Rationale: Whitespace
+        // tolerance handles common copy-paste artifacts (trailing newline, leading space) without
+        // weakening security, since Base64URL encoding doesn't use whitespace characters.
         if (token == null)
             token = "";
         else
@@ -43,6 +70,10 @@ public class SerializedJwt {
         if (token.isEmpty())
             throw new JwtValidatorException("Malformed JWT provided; expected three sections (header, payload, and signature)");
 
+        // SECURITY: (MEDIUM) Exact 3-segment validation — rejects JWTs with wrong number of sections.
+        // The dot delimiter is regex-escaped. Note: String.split("\\.") with no limit parameter
+        // discards trailing empty strings — this means a token ending in "." would have fewer than
+        // 3 segments and be rejected. This is the correct security behavior.
         String[] splits = token.split("\\.");
 
         if (splits.length != 3)
