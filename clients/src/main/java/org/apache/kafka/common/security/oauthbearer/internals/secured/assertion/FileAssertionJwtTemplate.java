@@ -115,14 +115,43 @@ import static org.apache.kafka.common.security.oauthbearer.internals.secured.Cac
  * }
  * </pre>
  */
+// SECURITY: (MEDIUM) Reads JWT claim template from a JSON file. File permissions on the template
+// file should be restricted to prevent unauthorized modification.
+// Exploit: If an attacker can modify the template file, they can inject additional claims (e.g.,
+// admin scope, audience manipulation) that will be included in all subsequent assertions. Since
+// the file is auto-reloaded on modification (lastModifiedPolicy), injected claims take effect
+// without restart. The attacker needs only local write access to the template file.
+// Improvement: Validate file permissions (0600 or more restrictive) before reading. Consider
+// computing a checksum of the file content for integrity verification.
+//
+// CROSS-CUTTING: Used in LayeredAssertionJwtTemplate composition. Created by
+// AssertionUtils.fileAssertionJwtTemplate() when SASL_OAUTHBEARER_ASSERTION_TEMPLATE_FILE is
+// configured. Depends on CachedFile for file management with lastModifiedPolicy refresh.
+// The JSON file structure must have optional "header" and "payload" top-level keys.
+// Impact: File content changes are automatically picked up on next header()/payload() call
+// via CachedFile's lastModified check, affecting all subsequent jwt-bearer assertions.
 public class FileAssertionJwtTemplate implements AssertionJwtTemplate {
 
+    // SECURITY: (MEDIUM) JSON parsing of template file using Jackson ObjectMapper. The
+    // @SuppressWarnings("unchecked") cast trusts that Jackson produces Map<String, Object> --
+    // Jackson's default deserialization guarantees this for JSON objects. However, deeply nested
+    // or very large JSON files could cause stack overflow or memory exhaustion during parsing.
+    // Improvement: Consider setting Jackson's DeserializationFeature limits (max depth, max string length).
+    //
+    // DECISION: JSON parsing uses Jackson ObjectMapper with unchecked Map cast. Alternative: Use
+    // TypeReference<Map<String, Object>> for type-safe deserialization. Rationale: The @SuppressWarnings
+    // is acceptable because Jackson's readValue(json, Map.class) always returns Map<String, Object>
+    // for JSON objects. The extra type safety of TypeReference adds verbosity without behavioral change.
     @SuppressWarnings("unchecked")
     private static final CachedFile.Transformer<CachedJwtTemplate> JSON_TRANSFORMER = (file, json) -> {
         try {
             ObjectMapper mapper = new ObjectMapper();
             Map<String, Object> map = (Map<String, Object>) mapper.readValue(json, Map.class);
 
+            // DECISION: Uses computeIfAbsent to default missing "header"/"payload" keys to Map.of()
+            // (empty immutable map). Alternative: Require both keys present and throw on missing.
+            // Rationale: Permissive parsing -- a template file with only "payload" (no "header") is
+            // valid and useful. An empty template {} is also valid, producing empty header/payload maps.
             Map<String, Object> header = (Map<String, Object>) map.computeIfAbsent("header", k -> Map.of());
             Map<String, Object> payload = (Map<String, Object>) map.computeIfAbsent("payload", k -> Map.of());
 
@@ -151,6 +180,10 @@ public class FileAssertionJwtTemplate implements AssertionJwtTemplate {
     /**
      * Internally, the cached file is represented by the two maps for the header and payload.
      */
+    // DECISION: Immutable value holder with Collections.unmodifiableMap() wrapping. The CachedFile
+    // stores CachedJwtTemplate instances -- when the file changes, a new CachedJwtTemplate is
+    // created and atomically replaces the old one. No synchronization needed for reads since
+    // maps are immutable.
     private static class CachedJwtTemplate {
 
         private final Map<String, Object> header;
