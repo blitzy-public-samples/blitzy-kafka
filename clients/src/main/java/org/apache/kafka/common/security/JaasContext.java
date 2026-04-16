@@ -41,7 +41,9 @@ import static org.apache.kafka.common.security.JaasUtils.DISALLOWED_LOGIN_MODULE
  * JAAS context for Kafka's SASL authentication, supporting dynamic per-listener
  * and static file-based configuration resolution.
  *
- * @implSpec SECURITY: (MEDIUM) Login module allowlist/denylist enforcement.
+ * @implSpec SECURITY: SEC-JAAS-005 (MEDIUM) Login module allowlist/denylist enforcement.
+ * Why: JAAS context resolution determines which login modules
+ * are trusted and loaded for authentication.
  * JaasContext controls which login modules can be loaded via SASL_JAAS_CONFIG.
  * Exploit: A malicious admin injects "JndiLoginModule REQUIRED" into sasl.jaas.config,
  * triggering JNDI lookups to attacker-controlled LDAP (CVE-2023-25194 pattern).
@@ -82,7 +84,9 @@ public class JaasContext {
      *
      * @throws IllegalArgumentException if listenerName or mechanism is not defined.
      */
-    // SECURITY: (MEDIUM) Server-side JAAS context loading uses mechanism-prefixed config keys
+    // SECURITY: SEC-JAAS-006 (MEDIUM) Server-side JAAS context loading uses mechanism-prefixed config keys
+    // Why: JAAS context resolution determines which login modules
+    // are trusted and loaded for authentication.
     // to isolate per-mechanism credentials. Misconfigured prefix resolution could expose one
     // mechanism's credentials to another.
     // Exploit: A malformed JAAS configuration could disable authentication or load a malicious login module.
@@ -93,7 +97,9 @@ public class JaasContext {
         if (mechanism == null)
             throw new IllegalArgumentException("mechanism should not be null for SERVER");
         String listenerContextName = listenerName.value().toLowerCase(Locale.ROOT) + "." + GLOBAL_CONTEXT_NAME_SERVER;
-        // SECURITY: (MEDIUM) Dynamic JAAS config from Password type -- value is in-memory only, not
+        // SECURITY: SEC-JAAS-007 (MEDIUM) Dynamic JAAS config from Password type -- value is in-memory only, not
+        // Why: JAAS context resolution determines which login modules
+        // are trusted and loaded for authentication.
         // persisted to disk. May appear in config dumps unless explicitly masked.
         // The log.warn below correctly avoids logging the config value itself.
         // Exploit: A malformed JAAS configuration could disable authentication or load a malicious login module.
@@ -136,7 +142,9 @@ public class JaasContext {
             return defaultContext(contextType, listenerContextName, globalContextName);
     }
 
-    // SECURITY: (HIGH) Login module validation -- last line of defense against arbitrary class
+    // SECURITY: SEC-JAAS-008 (HIGH) Login module validation -- last line of defense against arbitrary class
+    // Why: JAAS context resolution determines which login modules
+    // are trusted and loaded for authentication.
     // instantiation via JAAS config injection. Without this check, any class on the classpath
     // could be loaded as a login module via dynamic SASL_JAAS_CONFIG.
     // Exploit: If bypassed, attacker-specified login modules execute in the broker's JVM.

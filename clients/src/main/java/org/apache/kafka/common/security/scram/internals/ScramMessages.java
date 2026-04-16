@@ -31,7 +31,7 @@ import javax.security.sasl.SaslException;
  * <a href="https://tools.ietf.org/html/rfc5802">RFC 5802</a>
  *
  */
-// SECURITY: (HIGH) RFC 5802 SASL SCRAM message parsing and construction.
+// SECURITY: SEC-SCRAM-036 (HIGH) RFC 5802 SASL SCRAM message parsing and construction.
 // Why: This class parses untrusted network data into structured SCRAM protocol messages.
 // Malformed messages from a malicious client or MITM could cause parsing errors, regex
 // backtracking, or injection of crafted attribute values.
@@ -64,7 +64,9 @@ public class ScramMessages {
     // Risk: Complex regex patterns may be vulnerable to catastrophic backtracking (ReDoS).
     abstract static class AbstractScramMessage {
 
-        // SECURITY: (MEDIUM) Regex character classes define allowed character sets per RFC 5802 ABNF.
+        // SECURITY: SEC-SCRAM-037 (MEDIUM) Regex character classes define allowed character sets per RFC 5802 ABNF.
+        // Why: SCRAM message parsing handles untrusted input from the
+        // authentication peer per RFC 5802 protocol.
         // VALUE_SAFE: Excludes '=' and ',' -- prevents attribute boundary confusion.
         // PRINTABLE: Excludes only ',' -- used for nonce values which must be unique/random.
         // SASLNAME: Allows '=2C' and '=3D' escape sequences per RFC 5802 Section 5.1.
@@ -113,7 +115,9 @@ public class ScramMessages {
         private final String nonce;
         private final String authorizationId;
         private final ScramExtensions extensions;
-        // SECURITY: (HIGH) Parsing client-first message from untrusted network data. The regex
+        // SECURITY: SEC-SCRAM-038 (HIGH) Parsing client-first message from untrusted network data. The regex
+        // Why: SCRAM message parsing handles untrusted input from the
+        // authentication peer per RFC 5802 protocol.
         // PATTERN validates the overall structure, but individual field content is not
         // bounds-checked. The saslName field undergoes =2C/=3D unescaping in
         // ScramFormatter.username() -- crafted saslNames with unexpected escape sequences
@@ -195,7 +199,9 @@ public class ScramMessages {
             Matcher matcher = PATTERN.matcher(message);
             if (!matcher.matches())
                 throw new SaslException("Invalid SCRAM server first message format: " + message);
-            // SECURITY: (MEDIUM) Iteration count parsed from server message. A compromised server
+            // SECURITY: SEC-SCRAM-039 (MEDIUM) Iteration count parsed from server message. A compromised server
+            // Why: SCRAM message parsing handles untrusted input from the
+            // authentication peer per RFC 5802 protocol.
             // could send extremely high iterations (e.g., Integer.MAX_VALUE) causing CPU
             // exhaustion during PBKDF2 key derivation on the client. ScramSaslClient checks
             // minimum but not maximum. Improvement: Enforce ScramMechanism.maxIterations()
@@ -257,13 +263,16 @@ public class ScramMessages {
 
             this.channelBinding = Base64.getDecoder().decode(matcher.group("channel"));
             this.nonce = matcher.group("nonce");
-            // SECURITY: (HIGH) Client proof is the core authentication token -- ClientProof =
+            // SECURITY: SEC-SCRAM-040 (HIGH) Client proof is the core authentication token -- ClientProof =
+            // Why: SCRAM message parsing handles untrusted input from the
+            // authentication peer per RFC 5802 protocol.
             // ClientKey XOR ClientSignature. This field is Base64-decoded from untrusted
             // client data. No length validation is performed -- an incorrect-length proof
             // would cause comparison failure in ScramSaslServer.verifyClientProof() but not
             // before crypto operations are performed.
             // Improvement: Validate decoded proof length matches expected hash output size.
-            // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+            // Exploit: Malformed SCRAM message fields could inject control
+            // characters or exploit parsing to corrupt the authentication exchange.
             this.proof = Base64.getDecoder().decode(matcher.group("proof"));
         }
         public ClientFinalMessage(byte[] channelBinding, String nonce) {

@@ -40,7 +40,7 @@ import static org.apache.kafka.common.security.oauthbearer.internals.secured.Cac
  * WatchService registration overhead. Token files change infrequently, so stat() on each
  * retrieve() is acceptable. Risk: NFS/CIFS mounts may have stale mtime metadata.
  */
-// SECURITY: (MEDIUM) File-based JWT retrieval — reads a JWT access token from a local file.
+// SECURITY: SEC-OAUTH-018 (MEDIUM) File-based JWT retrieval — reads a JWT access token from a local file.
 // Why: The token file contains a valid, usable bearer token. If the file is readable by
 // unauthorized users or processes, the token can be stolen and used for impersonation.
 // Exploit: If the token file has world-readable permissions (e.g., 644 on Linux), any process
@@ -62,20 +62,28 @@ public class FileJwtRetriever implements JwtRetriever {
     public void configure(Map<String, ?> configs, String saslMechanism, List<AppConfigurationEntry> jaasConfigEntries) {
         ConfigurationUtils cu = new ConfigurationUtils(configs, saslMechanism);
         File file = cu.validateFileUrl(SASL_OAUTHBEARER_TOKEN_ENDPOINT_URL);
-        // SECURITY: (LOW) CachedFile with lastModifiedPolicy — re-reads file when mtime changes.
+        // SECURITY: SEC-OAUTH-019 (LOW) CachedFile with lastModifiedPolicy — re-reads file when mtime changes.
+        // Why: File-based token retrieval depends on filesystem security
+        // to protect token material at rest.
         // This allows token rotation by updating the file. However, there is a TOCTOU race:
         // between checking mtime and reading, the file could be swapped by an attacker.
         // STRING_JSON_VALIDATING_TRANSFORMER validates JSON structure, rejecting non-JSON content.
-        // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-        // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+        // Exploit: An attacker with file system access could replace the
+        // token file contents to inject a forged JWT for authentication.
+        // Improvement: Enforce TLS certificate pinning on token endpoint
+        // connections to prevent MITM-based token interception.
         jwtFile = new CachedFile<>(file, STRING_JSON_VALIDATING_TRANSFORMER, lastModifiedPolicy());
     }
 
-    // SECURITY: (MEDIUM) Token content is returned as a raw String — not wrapped in Password type.
+    // SECURITY: SEC-OAUTH-020 (MEDIUM) Token content is returned as a raw String — not wrapped in Password type.
+    // Why: File-based token retrieval depends on filesystem security
+    // to protect token material at rest.
     // The token value will be held in memory by the JAAS Subject's private credentials
     // until logout. GC behavior means the String may persist in memory after logout.
-    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+    // Exploit: An attacker with file system access could replace the
+    // token file contents to inject a forged JWT for authentication.
+    // Improvement: Enforce TLS certificate pinning on token endpoint
+    // connections to prevent MITM-based token interception.
     @Override
     public String retrieve() throws JwtRetrieverException {
         if (jwtFile == null)

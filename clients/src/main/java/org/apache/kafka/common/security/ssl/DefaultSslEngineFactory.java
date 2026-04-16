@@ -73,7 +73,7 @@ import javax.net.ssl.SSLParameters;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.TrustManagerFactory;
 
-// SECURITY: (HIGH) Default SSLEngine factory -- creates SSLContext, SSLEngine instances
+// SECURITY: SEC-SSL-006 (HIGH) Default SSLEngine factory -- creates SSLContext, SSLEngine instances
 // for ALL TLS connections. Controls protocol version, cipher suite, and certificate handling.
 // Why: This factory configures the TLS stack that protects all Kafka network communication.
 // Incorrect configuration can silently weaken security for all connections on a listener.
@@ -153,7 +153,9 @@ public class DefaultSslEngineFactory implements SslEngineFactory {
         return this.truststore != null ? this.truststore.get() : null;
     }
 
-    // SECURITY: (HIGH) Configuration entry point -- processes ALL SSL/TLS settings including
+    // SECURITY: SEC-SSL-007 (HIGH) Configuration entry point -- processes ALL SSL/TLS settings including
+    // Why: SSL engine factory controls TLS parameter selection that
+    // determines transport security guarantees.
     // passwords, keystore paths, and protocol versions. Passwords are held as Password objects
     // (which wrap char arrays for explicit zeroing on GC) but the char arrays may remain in
     // memory until the Password is garbage collected. The configs map is stored as an
@@ -233,7 +235,7 @@ public class DefaultSslEngineFactory implements SslEngineFactory {
         return this.sslContext;
     }
 
-    // SECURITY: (MEDIUM) SSLEngine creation with endpoint identification for clients.
+    // SECURITY: SEC-SSL-008 (MEDIUM) SSLEngine creation with endpoint identification for clients.
     // Why: Client-side endpoint identification (hostname verification via SNI) is controlled
     // by ssl.endpoint.identification.algorithm. When set to "HTTPS" (default for clients),
     // the client verifies the server's certificate CN/SAN matches the connection hostname.
@@ -354,7 +356,9 @@ public class DefaultSslEngineFactory implements SslEngineFactory {
         return tmf.getTrustManagers();
     }
 
-    // SECURITY: (MEDIUM) Multi-type keystore factory supporting JKS, PKCS12, and PEM formats.
+    // SECURITY: SEC-SSL-009 (MEDIUM) Multi-type keystore factory supporting JKS, PKCS12, and PEM formats.
+    // Why: SSL engine factory controls TLS parameter selection that
+    // determines transport security guarantees.
     // PEM format bypasses Java KeyStore file-level integrity protection (PKCS12 uses
     // PBKDF2-HMAC for tamper detection; JKS uses SHA-1). For PEM, the private key may be
     // encrypted (PKCS#8) or unencrypted -- unencrypted PEM keys have no protection at rest
@@ -608,7 +612,9 @@ public class DefaultSslEngineFactory implements SslEngineFactory {
             return certs;
         }
 
-        // SECURITY: (HIGH) Private key loading from PEM data -- handles both encrypted
+        // SECURITY: SEC-SSL-010 (HIGH) Private key loading from PEM data -- handles both encrypted
+        // Why: SSL engine factory controls TLS parameter selection that
+        // determines transport security guarantees.
         // (PKCS#8) and unencrypted keys. For encrypted keys, uses EncryptedPrivateKeyInfo
         // with PBE cipher. The key password (char array) is passed to PBEKeySpec which may
         // retain a copy internally.
@@ -681,7 +687,9 @@ public class DefaultSslEngineFactory implements SslEngineFactory {
      *   Additional data may be included before headers, so we match all entries within the PEM.
      */
     static class PemParser {
-        // SECURITY: (LOW) PEM parsing using regex -- the pattern matches standard PEM block
+        // SECURITY: SEC-SSL-011 (LOW) PEM parsing using regex -- the pattern matches standard PEM block
+        // Why: SSL engine factory controls TLS parameter selection that
+        // determines transport security guarantees.
         // headers (-----BEGIN/END ...). The regex is applied to file content at configuration
         // time, not to untrusted network input.
         // Exploit: A regex denial-of-service (ReDoS) is unlikely given the simple pattern,

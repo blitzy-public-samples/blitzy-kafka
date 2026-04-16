@@ -49,7 +49,9 @@ import javax.security.sasl.SaslServer;
  *
  * NOTE: This is an internal class and can change without notice.
  *
- * @implSpec SECURITY: (HIGH) Principal spoofing risk in SSL/SASL context extraction.
+ * @implSpec SECURITY: SEC-SASL-008 (HIGH) Principal spoofing risk in SSL/SASL context extraction.
+ * Why: Principal objects carry the authenticated identity used for
+ * all authorization decisions throughout the broker.
  * This class constructs KafkaPrincipal from auth contexts (SSL DN, SASL ID, ANONYMOUS).
  * Exploit: (1) SSL: Crafted certificate DN mapping to admin via SslPrincipalMapper rules.
  * (2) SASL/GSSAPI: Permissive KerberosShortNamer rules map distinct principals to same
@@ -81,7 +83,9 @@ public class DefaultKafkaPrincipalBuilder implements KafkaPrincipalBuilder {
         this.sslPrincipalMapper = sslPrincipalMapper;
     }
 
-    // SECURITY: (HIGH) Principal resolution: Plaintext -> ANONYMOUS, SSL -> peer cert DN
+    // SECURITY: SEC-SASL-009 (HIGH) Principal resolution: Plaintext -> ANONYMOUS, SSL -> peer cert DN
+    // Why: Principal objects carry the authenticated identity used for
+    // all authorization decisions throughout the broker.
     // (mapped), SASL/GSSAPI -> Kerberos short name, SASL/other -> raw authorizationID.
     // SSL falls back to ANONYMOUS if peer cert is unverified (mutual TLS not enforced here).
     // A broker without ssl.client.auth=required grants ANONYMOUS to SSL clients.
@@ -90,8 +94,8 @@ public class DefaultKafkaPrincipalBuilder implements KafkaPrincipalBuilder {
     // Alternatives: (1) Visitor pattern, (2) Map<Class, Function>. Rationale: Auth context
     // types are a closed set (3 types); instanceof is simpler. IllegalArgumentException
     // on unknown types forces explicit handling of future context additions.
-    // Exploit: An attacker could exploit weak cipher suites or certificate validation gaps for MITM attacks.
-    // Improvement: Enforce strong cipher suite selection and certificate pinning where feasible.
+    // Exploit: An attacker could manipulate the SSL certificate DN or SASL principal to spoof a different identity f...
+    // Improvement: Validate certificate attributes against expected patterns and reject principals with suspicious D...
     @Override
     public KafkaPrincipal build(AuthenticationContext context) {
         if (context instanceof PlaintextAuthenticationContext) {
@@ -114,7 +118,9 @@ public class DefaultKafkaPrincipalBuilder implements KafkaPrincipalBuilder {
         }
     }
 
-    // SECURITY: (MEDIUM) Kerberos principal name is parsed and transformed via
+    // SECURITY: SEC-SASL-010 (MEDIUM) Kerberos principal name is parsed and transformed via
+    // Why: Principal objects carry the authenticated identity used for
+    // all authorization decisions throughout the broker.
     // auth_to_local rules (KerberosShortNamer). Misconfigured regex rules could map
     // all principals to one short name, breaking identity isolation.
     // Improvement: Log the full Kerberos principal alongside the short name for audit.
@@ -130,7 +136,9 @@ public class DefaultKafkaPrincipalBuilder implements KafkaPrincipalBuilder {
         }
     }
 
-    // SECURITY: (MEDIUM) SSL principal mapping applies regex rules to X.500 DNs.
+    // SECURITY: SEC-SASL-011 (MEDIUM) SSL principal mapping applies regex rules to X.500 DNs.
+    // Why: Principal objects carry the authenticated identity used for
+    // all authorization decisions throughout the broker.
     // Non-X500 principals bypass the mapper and use principal.getName() directly.
     // Exploit: A custom TrustManager producing a non-X500Principal with a crafted
     // getName() value could inject an arbitrary identity string.
@@ -150,7 +158,9 @@ public class DefaultKafkaPrincipalBuilder implements KafkaPrincipalBuilder {
 
     // DECISION: Serializes with HIGHEST_SUPPORTED_VERSION for forward compatibility.
     // Alternative: Fixed version. Chosen approach auto-includes new schema fields.
-    // SECURITY: (MEDIUM) Version-prefixed format; deserialize validates version bounds
+    // SECURITY: SEC-SASL-012 (MEDIUM) Version-prefixed format; deserialize validates version bounds
+    // Why: Principal objects carry the authenticated identity used for
+    // all authorization decisions throughout the broker.
     // to reject principals from unknown schema versions with different security semantics.
     // Exploit: A misconfigured auth_to_local rule could map an attacker principal to a privileged local identity.
     // Improvement: Audit auth_to_local rules regularly and use strict realm-based principal validation.
@@ -163,7 +173,9 @@ public class DefaultKafkaPrincipalBuilder implements KafkaPrincipalBuilder {
         return MessageUtil.toVersionPrefixedBytes(DefaultPrincipalData.HIGHEST_SUPPORTED_VERSION, data);
     }
 
-    // SECURITY: (MEDIUM) Version check prevents deserialization of principals from
+    // SECURITY: SEC-SASL-013 (MEDIUM) Version check prevents deserialization of principals from
+    // Why: Principal objects carry the authenticated identity used for
+    // all authorization decisions throughout the broker.
     // unknown schema versions. Improvement: Consider adding integrity verification
     // (e.g., checksum) to detect byte-level tampering in serialized principal data.
     // Exploit: A misconfigured auth_to_local rule could map an attacker principal to a privileged local identity.

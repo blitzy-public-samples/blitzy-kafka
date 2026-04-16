@@ -33,27 +33,35 @@ package org.apache.kafka.common.security;
 // Impact: Changing any constant name here breaks system property contracts
 // with existing deployment scripts and documentation.
 public final class JaasUtils {
-    // SECURITY: (MEDIUM) Points to the system-wide JAAS configuration file.
+    // SECURITY: SEC-JAAS-009 (MEDIUM) Points to the system-wide JAAS configuration file.
+    // Why: JAAS utility methods control security-critical configuration
+    // file resolution for the authentication subsystem.
     // If this file is writable by unauthorized users, any login module can
     // be injected. Improvement: Document that this file should have restrictive
     // file permissions (e.g., 600) in production deployments.
     // Exploit: A malformed JAAS configuration could disable authentication or load a malicious login module.
     public static final String JAVA_LOGIN_CONFIG_PARAM = "java.security.auth.login.config";
-    // SECURITY: (HIGH) Deprecated denylist approach -- dangerous because it
+    // SECURITY: SEC-JAAS-010 (HIGH) Deprecated denylist approach -- dangerous because it
+    // Why: JAAS utility methods control security-critical configuration
+    // file resolution for the authentication subsystem.
     // only blocks known-bad modules, allowing unknown/new dangerous modules
     // through. The allowlist (ALLOWED_LOGIN_MODULES_CONFIG) is preferred.
     // Exploit: Accepting unapproved values could expand the attack surface beyond intended boundaries.
     // Improvement: Maintain strict allowlists and log rejected values for security monitoring.
     @Deprecated(since = "4.2")
     public static final String DISALLOWED_LOGIN_MODULES_CONFIG = "org.apache.kafka.disallowed.login.modules";
-    // SECURITY: (HIGH) Allowlist system property for login modules.
+    // SECURITY: SEC-JAAS-011 (HIGH) Allowlist system property for login modules.
+    // Why: JAAS utility methods control security-critical configuration
+    // file resolution for the authentication subsystem.
     // When set, ONLY listed modules can be loaded -- defense-in-depth
     // against arbitrary class loading via JAAS config injection.
     // Improvement: Consider making the allowlist a broker config
     // (not just system property) for easier management.
     // Exploit: A malformed JAAS configuration could disable authentication or load a malicious login module.
     public static final String ALLOWED_LOGIN_MODULES_CONFIG = "org.apache.kafka.allowed.login.modules";
-    // SECURITY: (HIGH) Default denylist blocks JndiLoginModule and
+    // SECURITY: SEC-JAAS-012 (HIGH) Default denylist blocks JndiLoginModule and
+    // Why: JAAS utility methods control security-critical configuration
+    // file resolution for the authentication subsystem.
     // LdapLoginModule which are known JNDI injection vectors (CVE-2023-25194).
     // These modules allow LDAP/RMI URL injection leading to remote code
     // execution. The denylist is not exhaustive -- other dangerous modules

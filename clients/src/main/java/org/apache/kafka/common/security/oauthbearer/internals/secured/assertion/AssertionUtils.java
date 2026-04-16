@@ -73,7 +73,9 @@ public class AssertionUtils {
      * Inspired by {@code org.apache.kafka.common.security.ssl.DefaultSslEngineFactory.PemStore}, which is not
      * visible to reuse directly.
      */
-    // SECURITY: (HIGH) Parses PKCS#8 private key from raw bytes, with optional PBE
+    // SECURITY: SEC-OAUTH-124 (HIGH) Parses PKCS#8 private key from raw bytes, with optional PBE
+    // Why: Assertion creation involves private key usage and claim
+    // construction that determines token exchange security.
     // passphrase decryption. The decoded key bytes exist as byte[] but are not
     // explicitly zeroed after use (no Arrays.fill(0) call on pkcs8EncodedBytes or
     // keySpec internals).
@@ -89,13 +91,17 @@ public class AssertionUtils {
                                         Optional<String> passphrase) throws GeneralSecurityException, IOException {
         PKCS8EncodedKeySpec keySpec;
 
-        // SECURITY: (MEDIUM) PBE-encrypted private key decryption using
+        // SECURITY: SEC-OAUTH-125 (MEDIUM) PBE-encrypted private key decryption using
+        // Why: Assertion creation involves private key usage and claim
+        // construction that determines token exchange security.
         // EncryptedPrivateKeyInfo. The PBE algorithm is extracted from the encrypted
         // key info itself — an attacker who can tamper with the key file could specify
         // a weak PBE algorithm. The Cipher is initialized with the PBE key and the
         // algorithm parameters from the encrypted key info.
-        // Exploit: An attacker could exploit weak cipher suites or certificate validation gaps for MITM attacks.
-        // Improvement: Enforce strong cipher suite selection and certificate pinning where feasible.
+        // Exploit: A weak or compromised private key used for assertion
+        // signing could allow forged assertions for token exchange.
+        // Improvement: Enforce minimum key length for assertion signing
+        // and reject weak cryptographic algorithms.
         if (passphrase.isPresent()) {
             EncryptedPrivateKeyInfo keyInfo = new EncryptedPrivateKeyInfo(privateKeyContents);
             String algorithm = keyInfo.getAlgName();
@@ -119,7 +125,9 @@ public class AssertionUtils {
         return keyFactory.generatePrivate(keySpec);
     }
 
-    // SECURITY: (MEDIUM) Algorithm allowlist — only RS256 (SHA256withRSA) and
+    // SECURITY: SEC-OAUTH-126 (MEDIUM) Algorithm allowlist — only RS256 (SHA256withRSA) and
+    // Why: Assertion creation involves private key usage and claim
+    // construction that determines token exchange security.
     // ES256 (SHA256withECDSA) are supported. Unknown algorithms throw
     // NoSuchAlgorithmException (fail-closed). This prevents algorithm confusion
     // attacks where an attacker specifies a weak algorithm.
@@ -139,7 +147,9 @@ public class AssertionUtils {
         }
     }
 
-    // SECURITY: (HIGH) JCA digital signature: content -> UTF-8 bytes ->
+    // SECURITY: SEC-OAUTH-127 (HIGH) JCA digital signature: content -> UTF-8 bytes ->
+    // Why: Assertion creation involves private key usage and claim
+    // construction that determines token exchange security.
     // Signature.sign() -> Base64URL. The private key is used via
     // Signature.initSign() — the JCA provider handles the actual signing
     // operation. The signed content (JWT header.payload) is not sensitive, but

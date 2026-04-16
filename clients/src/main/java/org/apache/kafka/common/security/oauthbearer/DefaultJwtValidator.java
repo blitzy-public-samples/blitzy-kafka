@@ -40,7 +40,7 @@ import javax.security.auth.login.AppConfigurationEntry;
  * Delegation allows runtime selection based on configuration rather than compile-time type
  * hierarchy. The validator type is determined by whether the operator configures a JWKS endpoint.
  */
-// SECURITY: (MEDIUM) Default validator selection — routes to BrokerJwtValidator (JWKS-based
+// SECURITY: SEC-OAUTH-017 (MEDIUM) Default validator selection — routes to BrokerJwtValidator (JWKS-based
 // signature verification) when a VerificationKeyResolver is present, or ClientJwtValidator
 // (structural-only parsing without signature verification) when absent.
 // Why: The presence/absence of the key resolver determines whether the broker performs

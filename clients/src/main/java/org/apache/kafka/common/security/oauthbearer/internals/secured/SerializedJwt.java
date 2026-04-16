@@ -24,7 +24,7 @@ import org.apache.kafka.common.security.oauthbearer.JwtValidatorException;
  * splitting and making the three sections (header, payload, and signature) available to the user.
  */
 
-// SECURITY: (MEDIUM) JWT structural parsing — splits compact serialization into header,
+// SECURITY: SEC-OAUTH-118 (MEDIUM) JWT structural parsing — splits compact serialization into header,
 // payload, and signature sections at the "." delimiter.
 // Why: This is the first parser to touch the raw JWT string. Malformed input is rejected
 // here before reaching jose4j or any other validation logic.
@@ -70,12 +70,16 @@ public class SerializedJwt {
         if (token.isEmpty())
             throw new JwtValidatorException("Malformed JWT provided; expected three sections (header, payload, and signature)");
 
-        // SECURITY: (MEDIUM) Exact 3-segment validation — rejects JWTs with wrong number of sections.
+        // SECURITY: SEC-OAUTH-119 (MEDIUM) Exact 3-segment validation — rejects JWTs with wrong number of sections.
+        // Why: JWT serialization parsing handles untrusted token strings
+        // that could contain malformed or malicious content.
         // The dot delimiter is regex-escaped. Note: String.split("\\.") with no limit parameter
         // discards trailing empty strings — this means a token ending in "." would have fewer than
         // 3 segments and be rejected. This is the correct security behavior.
-        // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-        // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+        // Exploit: A malformed serialized JWT with missing or extra dots could
+        // bypass parsing validation and inject malicious claims.
+        // Improvement: Add strict format validation for JWT structure
+        // before attempting deserialization of the token parts.
         String[] splits = token.split("\\.");
 
         if (splits.length != 3)

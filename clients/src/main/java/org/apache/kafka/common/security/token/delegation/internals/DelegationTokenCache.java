@@ -31,7 +31,9 @@ import java.util.concurrent.ConcurrentHashMap;
 
 public class DelegationTokenCache {
 
-    // SECURITY: (MEDIUM) Thread-safe in-memory cache for active delegation tokens.
+    // SECURITY: SEC-TOKEN-009 (MEDIUM) Thread-safe in-memory cache for active delegation tokens.
+    // Why: Delegation tokens carry HMAC secrets that serve as
+    // authentication credentials for token-based access.
     // Stores tokenId->TokenInformation, hmac->tokenId, and tokenId->hmac mappings using
     // ConcurrentHashMap for lock-free reads. However, multi-map updates in updateCache()
     // and removeToken() are NOT atomic -- a concurrent reader may observe a partially-updated
@@ -78,11 +80,15 @@ public class DelegationTokenCache {
         return tokenInfo == null ? null : tokenInfo.owner().getName();
     }
 
-    // SECURITY: (MEDIUM) Non-atomic multi-map update -- adds token info, SCRAM credentials,
+    // SECURITY: SEC-TOKEN-010 (MEDIUM) Non-atomic multi-map update -- adds token info, SCRAM credentials,
+    // Why: Delegation tokens carry HMAC secrets that serve as
+    // authentication credentials for token-based access.
     // and HMAC mappings in sequence. A concurrent authentication attempt during this window
     // may find partial state (token info without SCRAM credentials, or vice versa).
-    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+    // Exploit: If the HMAC secret leaks via logs, serialization, or heap
+    // dump, an attacker can authenticate as the delegation token owner.
+    // Improvement: Implement short-lived delegation tokens with automatic
+    // renewal and strict audience binding to the originating broker.
     public void updateCache(DelegationToken token, Map<String, ScramCredential> scramCredentialMap) {
         //Update TokenCache
         String tokenId =  token.tokenInfo().tokenId();
@@ -95,11 +101,15 @@ public class DelegationTokenCache {
         tokenIdHmacCache.put(tokenId, hmac);
     }
 
-    // SECURITY: (MEDIUM) Token revocation -- removes token info and clears SCRAM credentials.
+    // SECURITY: SEC-TOKEN-011 (MEDIUM) Token revocation -- removes token info and clears SCRAM credentials.
+    // Why: Delegation tokens carry HMAC secrets that serve as
+    // authentication credentials for token-based access.
     // The removeToken->updateCredentials sequence is not atomic; a concurrent SCRAM auth
     // may still find valid credentials after token info has been removed.
-    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+    // Exploit: If the HMAC secret leaks via logs, serialization, or heap
+    // dump, an attacker can authenticate as the delegation token owner.
+    // Improvement: Implement short-lived delegation tokens with automatic
+    // renewal and strict audience binding to the originating broker.
     public void removeCache(String tokenId) {
         removeToken(tokenId);
         updateCredentials(tokenId, new HashMap<>());

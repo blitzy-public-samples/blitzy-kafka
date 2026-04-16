@@ -85,7 +85,9 @@ import java.util.concurrent.atomic.AtomicReference;
  *
  * This class is not thread safe!
  */
-// SECURITY: (HIGH) Core NIO event loop handling ALL network I/O for Kafka clients and brokers.
+// SECURITY: SEC-NET-019 (HIGH) Core NIO event loop handling ALL network I/O for Kafka clients and brokers.
+// Why: The NIO selector manages all network I/O and is the
+// first point of contact for untrusted client connections.
 // This class is the primary attack surface for connection-level denial-of-service (DoS) because it
 // manages channel acceptance, read/write I/O, idle expiry, and authentication failure handling in a
 // single-threaded select loop. A slow or malicious client can monopolize the selector thread by
@@ -162,7 +164,9 @@ public class Selector implements Selectable, AutoCloseable {
     // Alternative: Fixed byte threshold. Rationale: Proportional threshold adapts to different
     // pool sizes across broker and client configurations.
     private final long lowMemThreshold;
-    // SECURITY: (MEDIUM) Configurable delay before closing channels after authentication failure.
+    // SECURITY: SEC-NET-020 (MEDIUM) Configurable delay before closing channels after authentication failure.
+    // Why: The NIO selector manages all network I/O and is the
+    // first point of contact for untrusted client connections.
     // This delay prevents timing-based probing of valid usernames by ensuring failed auth responses
     // take consistent time regardless of failure reason.
     // Exploit: Without this delay, an attacker could measure response times to distinguish
@@ -575,7 +579,9 @@ public class Selector implements Selectable, AutoCloseable {
     // Key paths: Authentication success records metrics and logs; re-authentication updates
     // separate sensors; delayed auth failure close defers channel teardown by configured delay.
     //
-    // SECURITY: (HIGH) This method drives the authentication state machine for every connection.
+    // SECURITY: SEC-NET-021 (HIGH) This method drives the authentication state machine for every connection.
+    // Why: The NIO selector manages all network I/O and is the
+    // first point of contact for untrusted client connections.
     // The channel.prepare() call invokes SASL/SSL handshake processing. A malicious client that
     // connects but never completes the handshake holds a channel in the not-ready state indefinitely,
     // consuming selector resources.
@@ -753,7 +759,9 @@ public class Selector implements Selectable, AutoCloseable {
         }
     }
 
-    // SECURITY: (MEDIUM) Read path enforces maxReceiveSize via NetworkReceive to prevent a
+    // SECURITY: SEC-NET-022 (MEDIUM) Read path enforces maxReceiveSize via NetworkReceive to prevent a
+    // Why: The NIO selector manages all network I/O and is the
+    // first point of contact for untrusted client connections.
     // malicious client from sending an oversized request that exhausts broker heap memory.
     // The channel auto-mutes itself when the MemoryPool cannot allocate a receive buffer,
     // setting outOfMemory=true to trigger global back-pressure in the next poll cycle.
@@ -880,7 +888,9 @@ public class Selector implements Selectable, AutoCloseable {
         }
     }
 
-    // SECURITY: (MEDIUM) Idle connection expiry closes the least-recently-used connection when
+    // SECURITY: SEC-NET-023 (MEDIUM) Idle connection expiry closes the least-recently-used connection when
+    // Why: The NIO selector manages all network I/O and is the
+    // first point of contact for untrusted client connections.
     // the idle timeout elapses. This bounds resource consumption from connections that complete
     // authentication but then go silent (slowloris-style resource exhaustion).
     // Exploit: An attacker completes authentication on many connections and then holds them idle
@@ -1000,7 +1010,9 @@ public class Selector implements Selectable, AutoCloseable {
         }
     }
 
-    // SECURITY: (HIGH) Delays channel close after authentication failure to prevent timing-based
+    // SECURITY: SEC-NET-024 (HIGH) Delays channel close after authentication failure to prevent timing-based
+    // Why: The NIO selector manages all network I/O and is the
+    // first point of contact for untrusted client connections.
     // username enumeration. The delay is configured by failedAuthenticationDelayMs and ensures
     // that failed authentication responses are sent before the channel is torn down.
     // Exploit: Without this delay, an attacker could use response timing differences to enumerate
@@ -1035,7 +1047,9 @@ public class Selector implements Selectable, AutoCloseable {
      * The channel will be added to disconnect list when it is actually closed if `closeMode.notifyDisconnect`
      * is true.
      */
-    // SECURITY: (MEDIUM) Channel close must clean up all state maps (channels, closingChannels,
+    // SECURITY: SEC-NET-025 (MEDIUM) Channel close must clean up all state maps (channels, closingChannels,
+    // Why: The NIO selector manages all network I/O and is the
+    // first point of contact for untrusted client connections.
     // delayedClosingChannels, idleExpiryManager, immediatelyConnectedKeys) to prevent resource
     // leaks that could be exploited for DoS. The GRACEFUL mode retains the channel in
     // closingChannels to process buffered receives, creating a window where the channel consumes
@@ -1510,7 +1524,9 @@ public class Selector implements Selectable, AutoCloseable {
     /**
      * Encapsulate a channel that must be closed after a specific delay has elapsed due to authentication failure.
      */
-    // SECURITY: (HIGH) Delayed close mechanism for authentication failures — the channel remains
+    // SECURITY: SEC-NET-026 (HIGH) Delayed close mechanism for authentication failures — the channel remains
+    // Why: The NIO selector manages all network I/O and is the
+    // first point of contact for untrusted client connections.
     // open for failedAuthenticationDelayMs to send the error response before teardown. This
     // prevents timing side-channels but creates a resource-consumption window.
     // Exploit: An attacker rapidly sends invalid credentials to accumulate channels in the

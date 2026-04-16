@@ -33,7 +33,7 @@ import javax.security.auth.callback.NameCallback;
 import javax.security.auth.callback.UnsupportedCallbackException;
 import javax.security.auth.login.AppConfigurationEntry;
 
-// SECURITY: (MEDIUM) Server-side credential validation handler for SASL/PLAIN.
+// SECURITY: SEC-PLAIN-010 (MEDIUM) Server-side credential validation handler for SASL/PLAIN.
 // Why: This handler validates received plaintext credentials against expected credentials
 // stored in JAAS configuration entries. Credentials are compared using constant-time
 // Utils.isEqualConstantTime() in authenticate(), correctly preventing timing side-channel attacks.
@@ -86,13 +86,15 @@ public class PlainServerCallbackHandler implements AuthenticateCallbackHandler {
         }
     }
 
-    // SECURITY: (MEDIUM) Uses Utils.isEqualConstantTime() for constant-time password comparison.
+    // SECURITY: SEC-PLAIN-011 (MEDIUM) Uses Utils.isEqualConstantTime() for constant-time password comparison.
     // Why: Prevents timing side-channel attacks where an attacker measures response time
     // differences to deduce password characters one by one.
     // Note: This is correctly implemented -- the constant-time comparison does NOT short-circuit
     // on the first mismatched character.
-    // Exploit: An attacker could use response timing differences to incrementally reconstruct the secret.
-    // Improvement: Ensure all cryptographic comparisons use constant-time algorithms like MessageDigest.isEqual().
+    // Exploit: A timing difference in password comparison could allow
+    // an attacker to determine password characters incrementally.
+    // Improvement: Use MessageDigest.isEqual() for password comparison
+    // to prevent timing-based password recovery attacks.
     protected boolean authenticate(String username, char[] password) throws IOException {
         if (username == null)
             return false;

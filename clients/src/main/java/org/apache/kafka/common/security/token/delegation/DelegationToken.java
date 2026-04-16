@@ -26,7 +26,9 @@ import java.util.Objects;
  *
  */
 public class DelegationToken {
-    // SECURITY: (HIGH) This class holds the HMAC shared secret for delegation token authentication.
+    // SECURITY: SEC-TOKEN-001 (HIGH) This class holds the HMAC shared secret for delegation token authentication.
+    // Why: Delegation tokens carry HMAC secrets that serve as
+    // authentication credentials for token-based access.
     // The HMAC is the effective credential — possession allows authentication as the token owner.
     // Exploit: If HMAC bytes leak via logs, serialization, or toString(), an attacker can forge
     // token-based authentication requests by constructing a SCRAM authentication using the HMAC.
@@ -53,10 +55,13 @@ public class DelegationToken {
         return tokenInformation;
     }
 
-    // SECURITY: (MEDIUM) Returns raw byte[] reference without defensive copy.
+    // SECURITY: SEC-TOKEN-002 (MEDIUM) Returns raw byte[] reference without defensive copy.
+    // Why: Delegation tokens carry HMAC secrets that serve as
+    // authentication credentials for token-based access.
     // Callers can mutate the internal HMAC, potentially corrupting token authentication.
     // Improvement: Return Arrays.copyOf(hmac, hmac.length) to enforce immutability.
-    // Exploit: A caller retaining a reference could modify credential bytes in-place, corrupting shared state.
+    // Exploit: A caller mutating the returned HMAC byte[] reference
+    // could corrupt the token, causing denial of service for token users.
     public byte[] hmac() {
         return hmac;
     }
@@ -65,14 +70,17 @@ public class DelegationToken {
         return Base64.getEncoder().encodeToString(hmac);
     }
 
-    // SECURITY: (HIGH) Uses MessageDigest.isEqual() for constant-time HMAC comparison.
+    // SECURITY: SEC-TOKEN-003 (HIGH) Uses MessageDigest.isEqual() for constant-time HMAC comparison.
+    // Why: Delegation tokens carry HMAC secrets that serve as
+    // authentication credentials for token-based access.
     // This prevents timing side-channel attacks where an attacker measures comparison
     // latency to reconstruct the HMAC value byte-by-byte across many requests.
     // If this were replaced with Arrays.equals() (which short-circuits on first mismatch),
     // an attacker could determine each HMAC byte in O(256*N) requests.
     // Improvement: Add a unit test asserting this method uses constant-time comparison
     // to prevent accidental regression to Arrays.equals().
-    // Exploit: An attacker could use response timing differences to incrementally reconstruct the secret.
+    // Exploit: A non-constant-time HMAC comparison would leak HMAC
+    // bytes through timing analysis over many authentication attempts.
     @Override
     public boolean equals(Object o) {
         if (this == o) {
@@ -94,11 +102,15 @@ public class DelegationToken {
         return result;
     }
 
-    // SECURITY: (HIGH) Deliberately masks HMAC in toString() output to prevent secret
+    // SECURITY: SEC-TOKEN-004 (HIGH) Deliberately masks HMAC in toString() output to prevent secret
+    // Why: Delegation tokens carry HMAC secrets that serve as
+    // authentication credentials for token-based access.
     // leakage via logging frameworks (SLF4J/Log4j2). If HMAC appeared in logs, any
     // log reader could extract the token credential and authenticate as the token owner.
-    // Exploit: A malicious client could send crafted packets to manipulate state transitions and bypass authentication.
-    // Improvement: Add state transition validation to reject unexpected state changes.
+    // Exploit: If the HMAC masking in toString() is bypassed or removed,
+    // log output would expose the full HMAC, enabling token impersonation.
+    // Improvement: Add HMAC integrity verification before any
+    // token operation to detect corruption or tampering.
     @Override
     public String toString() {
         return "DelegationToken{" +

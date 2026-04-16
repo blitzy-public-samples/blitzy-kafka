@@ -55,7 +55,7 @@ import javax.security.auth.login.AppConfigurationEntry;
  * explicitly set via the {@code sasl.client.callback.handler.class}
  * configuration property.
  */
-// SECURITY: (LOW) Transfers OAuthBearerToken from JAAS Subject's private credentials to
+// SECURITY: SEC-OAUTH-054 (LOW) Transfers OAuthBearerToken from JAAS Subject's private credentials to
 // SASL callbacks during the client-side SASL exchange.
 // Why: This handler accesses the Subject's private credential store which holds bearer tokens.
 // The token selection logic (latest lifetime) could mask a token replacement attack.
@@ -113,13 +113,17 @@ public class OAuthBearerSaslClientCallbackHandler implements AuthenticateCallbac
         // empty
     }
 
-    // SECURITY: (LOW) Token retrieval from Subject's private credentials. The private
+    // SECURITY: SEC-OAUTH-055 (LOW) Token retrieval from Subject's private credentials. The private
+    // Why: Callback handler processes credential requests during
+    // SASL authentication, handling sensitive auth material.
     // credentials set is accessed via Subject.getPrivateCredentials() which requires
     // no special permissions in the current Kafka security model. The token's raw value
     // (a bearer JWT string) is accessible to any code that obtains a reference to the
     // returned OAuthBearerToken instance.
-    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+    // Exploit: A compromised callback handler could intercept and log
+    // SASL credentials (username/password) during the callback exchange.
+    // Improvement: Add channel binding to tie the SASL exchange
+    // to the TLS session, preventing token interception.
     private void handleCallback(OAuthBearerTokenCallback callback) throws IOException {
         if (callback.token() != null)
             throw new IllegalArgumentException("Callback had a token already");
@@ -132,7 +136,9 @@ public class OAuthBearerSaslClientCallbackHandler implements AuthenticateCallbac
         if (privateCredentials.size() == 1)
             callback.token(privateCredentials.iterator().next());
         else {
-            // SECURITY: (LOW) Multi-token race window — during refresh, old and new tokens briefly
+            // SECURITY: SEC-OAUTH-056 (LOW) Multi-token race window — during refresh, old and new tokens briefly
+            // Why: Callback handler processes credential requests during
+            // SASL authentication, handling sensitive auth material.
             // coexist. Selecting the longest-lived token is the correct choice for availability,
             // but note: an attacker who can inject tokens would exploit this exact behavior.
             // The WARN log message includes token lifetimes (dates) but not token values — correct.
@@ -144,8 +150,8 @@ public class OAuthBearerSaslClientCallbackHandler implements AuthenticateCallbac
             // thread. The multi-token window is O(milliseconds) during normal operation. This
             // also handles the KAFKA-7902 bug scenario gracefully. Risk: If more than 2 tokens
             // accumulate (leak), the WARN log is the only signal — no eviction occurs.
-            // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-            // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+            // Exploit: A compromised callback handler could intercept bearer tokens during the SASL callback exchang...
+            // Improvement: Add callback handler integrity checks to prevent malicious token interception during SASL...
             /*
              * There a very small window of time upon token refresh (on the order of milliseconds)
              * where both an old and a new token appear on the Subject's private credentials.

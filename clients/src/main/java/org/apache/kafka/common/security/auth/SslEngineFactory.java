@@ -32,7 +32,7 @@ import javax.net.ssl.SSLEngine;
  * to be replaced with a custom provider. In scenarios where only the configuration mechanism for SSL engines
  * need to be updated, this interface provides a convenient method for overriding the default implementation.
  */
-// SECURITY: (MEDIUM) Plugin interface for SSL engine creation — custom implementations
+// SECURITY: SEC-AUTH-012 (MEDIUM) Plugin interface for SSL engine creation — custom implementations
 // handle private keys and control cipher selection for ALL Kafka TLS connections.
 // Why: Implementations have full control over SSLContext, KeyManager, and TrustManager
 // configuration. A compromised or misconfigured factory can silently weaken TLS security.

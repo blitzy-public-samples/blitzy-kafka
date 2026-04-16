@@ -56,7 +56,9 @@ public class SaslExtensionsCallback implements Callback {
      * @param extensions
      *            the mandatory extensions to set
      */
-    // SECURITY: (LOW) Extensions set here are carried through the SASL exchange and may
+    // SECURITY: SEC-AUTH-008 (LOW) Extensions set here are carried through the SASL exchange and may
+    // Why: SASL extensions carry authentication metadata that could
+    // influence authorization decisions.
     // influence downstream behavior (e.g., quota assignment based on extension keys).
     // The Objects.requireNonNull guard prevents null injection but does not validate
     // individual extension keys or values against an allowlist.

@@ -39,13 +39,17 @@ public enum SecurityProtocol {
     // (see comment on line 51). Impact: Adding a new protocol requires coordinated changes
     // across clients, brokers, and all tools that parse listener configurations.
 
-    // SECURITY: (MEDIUM) PLAINTEXT (id=0) provides NO encryption and NO authentication.
+    // SECURITY: SEC-AUTH-009 (MEDIUM) PLAINTEXT (id=0) provides NO encryption and NO authentication.
+    // Why: Security protocol selection determines the encryption and
+    // authentication guarantees for all Kafka connections.
     // SASL_PLAINTEXT (id=2) provides authentication but NO encryption — credentials
     // traverse the network in cleartext. Both should be avoided in production environments
     // where network sniffing or MITM attacks are possible. SSL (id=1) and SASL_SSL (id=3)
     // are the recommended protocols for production deployments.
-    // Exploit: An attacker could exploit weak cipher suites or certificate validation gaps for MITM attacks.
-    // Improvement: Enforce strong cipher suite selection and certificate pinning where feasible.
+    // Exploit: A MITM attacker on the network could intercept all Kafka
+    // traffic on PLAINTEXT listeners, including produce/fetch data.
+    // Improvement: Log a WARNING at startup when PLAINTEXT protocol is
+    // configured, and consider requiring explicit opt-in for insecure protocols.
 
     /** Un-authenticated, non-encrypted channel */
     PLAINTEXT(0, "PLAINTEXT"),

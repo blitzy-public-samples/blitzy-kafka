@@ -74,7 +74,9 @@ import java.security.GeneralSecurityException;
  * embedded in the configuration, etc.
  */
 
-// SECURITY: (HIGH) Key material handling contract. Implementations hold private signing keys
+// SECURITY: SEC-OAUTH-123 (HIGH) Key material handling contract. Implementations hold private signing keys
+// Why: Assertion creation involves private key usage and claim
+// construction that determines token exchange security.
 // (DefaultAssertionCreator) or pre-signed assertion files (FileAssertionCreator). Improper
 // implementation could expose key material or return unsigned/weakly-signed assertions.
 // Exploit: A malicious AssertionCreator implementation (configured via assertionCreatorClass

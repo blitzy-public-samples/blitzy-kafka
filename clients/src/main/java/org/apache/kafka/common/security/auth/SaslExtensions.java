@@ -46,7 +46,7 @@ import javax.security.auth.Subject;
  *
  * See <a href="https://issues.apache.org/jira/browse/KAFKA-14062">KAFKA-14062</a> for more detail.
  */
-// SECURITY: (MEDIUM) SASL extension key-value pairs carried alongside authentication.
+// SECURITY: SEC-AUTH-007 (MEDIUM) SASL extension key-value pairs carried alongside authentication.
 // Why: Extensions are transmitted in the initial SASL client message and propagated through
 // the auth pipeline. They can influence downstream behavior such as quota assignment,
 // principal enrichment, or custom authorization decisions.

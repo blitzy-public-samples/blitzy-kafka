@@ -45,7 +45,9 @@ import static org.apache.kafka.common.security.oauthbearer.internals.secured.ass
  * passphrase, either use the same passphrase for each private key or else restart the client/application
  * so that the new private key and passphrase will be used.
  */
-// SECURITY: (HIGH) Private key material held in memory as java.security.PrivateKey — the JVM garbage
+// SECURITY: SEC-OAUTH-128 (HIGH) Private key material held in memory as java.security.PrivateKey — the JVM garbage
+// Why: Assertion creation involves private key usage and claim
+// construction that determines token exchange security.
 // collector cannot zero memory, so private key bytes persist in heap until overwritten by new allocations.
 // Exploit: A heap dump (e.g., via jmap, JDWP debug attachment, or /proc/pid/mem on Linux) reveals the
 // private key, enabling unlimited token generation against the OAuth provider.
@@ -66,7 +68,9 @@ public class DefaultAssertionCreator implements AssertionCreator {
     // without padding for compact serialization.
     private static final Base64.Encoder BASE64_ENCODER = Base64.getUrlEncoder().withoutPadding();
     private final String algorithm;
-    // SECURITY: (HIGH) CachedFile stores the parsed PrivateKey object in memory indefinitely. The key is
+    // SECURITY: SEC-OAUTH-129 (HIGH) CachedFile stores the parsed PrivateKey object in memory indefinitely. The key is
+    // Why: Assertion creation involves private key usage and claim
+    // construction that determines token exchange security.
     // refreshed only when the file's lastModified timestamp changes, but old keys are not explicitly
     // cleared from memory — they remain in heap until GC collects them.
     // Exploit: An attacker could exhaust server resources by sending oversized or excessive requests.
@@ -105,7 +109,9 @@ public class DefaultAssertionCreator implements AssertionCreator {
         return content + "." + signedContent;
     }
 
-    // SECURITY: (MEDIUM) PEM file parsing — strips BEGIN/END delimiters and newlines, then delegates to
+    // SECURITY: SEC-OAUTH-130 (MEDIUM) PEM file parsing — strips BEGIN/END delimiters and newlines, then delegates to
+    // Why: Assertion creation involves private key usage and claim
+    // construction that determines token exchange security.
     // AssertionUtils.privateKey(). The raw PEM content (String) passes through multiple intermediate
     // String objects during .replace() calls — each is a separate heap allocation containing key material.
     // Exploit: Memory forensics on a running JVM can recover multiple copies of the PEM-encoded key from

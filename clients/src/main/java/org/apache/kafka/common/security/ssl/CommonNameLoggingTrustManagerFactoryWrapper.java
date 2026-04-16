@@ -53,7 +53,7 @@ import javax.security.auth.x500.X500Principal;
  * These trust managers log the common name of an expired but otherwise valid (client) certificate before rejecting the connection attempt.
  * This allows to identify misconfigured clients in complex network environments, where the IP address is not sufficient.
  */
-// SECURITY: (LOW) CN information leakage in logs.
+// SECURITY: SEC-SSL-002 (LOW) CN information leakage in logs.
 // Why: Logs the Common Name (CN) of client certificates during TLS handshake for
 // audit/debugging. This is primarily used to identify clients presenting expired certs.
 // Exploit: If log files are accessible to unauthorized users, the CN information (which
@@ -145,14 +145,18 @@ class CommonNameLoggingTrustManagerFactoryWrapper {
         public CommonNameLoggingTrustManager(X509TrustManager originalTrustManager, int nrOfRememberedBadCerts) {
             this.origTm = originalTrustManager;
             this.nrOfRememberedBadCerts = nrOfRememberedBadCerts;
-            // SECURITY: (LOW) LRU cache bounded to nrOfRememberedBadCerts entries (~2000
+            // SECURITY: SEC-SSL-003 (LOW) LRU cache bounded to nrOfRememberedBadCerts entries (~2000
+            // Why: Certificate logging exposes peer identity information
+            // that could aid reconnaissance if logs are compromised.
             // default) to prevent memory exhaustion attacks. Without this bound, an attacker
             // could flood connections with unique invalid certificates, causing unbounded
             // HashMap growth and OOM. The LinkedHashMap with removeEldestEntry provides
             // O(1) eviction of oldest entries.
             // Restrict maximal size of the LinkedHashMap to avoid security attacks causing OOM
-            // Exploit: An attacker could exploit weak cipher suites or certificate validation gaps for MITM attacks.
-            // Improvement: Enforce strong cipher suite selection and certificate pinning where feasible.
+            // Exploit: Certificate chain validation logging could leak
+            // information about trusted CAs and internal PKI structure.
+            // Improvement: Validate certificate chain depth and revocation
+            // status during trust manager verification.
             this.previouslyRejectedClientCertChains = new LinkedHashMap<>() {
                 @Override
                 protected boolean removeEldestEntry(final Map.Entry<ByteBuffer, String> eldest) {
@@ -165,15 +169,19 @@ class CommonNameLoggingTrustManagerFactoryWrapper {
             return this.origTm;
         }
 
-        // SECURITY: (MEDIUM) Client certificate validation with expiry-aware logging.
+        // SECURITY: SEC-SSL-004 (MEDIUM) Client certificate validation with expiry-aware logging.
+        // Why: Certificate logging exposes peer identity information
+        // that could aid reconnaissance if logs are compromised.
         // This method first checks the LRU cache for previously rejected cert chains
         // (fast-path rejection), then delegates to the original trust manager. If
         // validation fails, it re-validates with a NeverExpiringX509Certificate wrapper
         // to determine if expiry was the sole failure cause. This two-phase validation
         // approach ensures original security semantics are preserved -- the original
         // CertificateException is always rethrown regardless of the expiry check result.
-        // Exploit: An attacker could exploit weak cipher suites or certificate validation gaps for MITM attacks.
-        // Improvement: Enforce strong cipher suite selection and certificate pinning where feasible.
+        // Exploit: Certificate chain validation logging could leak
+        // information about trusted CAs and internal PKI structure.
+        // Improvement: Validate certificate chain depth and revocation
+        // status during trust manager verification.
         @Override
         public void checkClientTrusted(X509Certificate[] chain, String authType)
                 throws CertificateException {
@@ -231,12 +239,16 @@ class CommonNameLoggingTrustManagerFactoryWrapper {
             }
         }
 
-        // SECURITY: (LOW) Uses SHA-256 for cert chain fingerprinting -- collision-resistant
+        // SECURITY: SEC-SSL-005 (LOW) Uses SHA-256 for cert chain fingerprinting -- collision-resistant
+        // Why: Certificate logging exposes peer identity information
+        // that could aid reconnaissance if logs are compromised.
         // and computationally efficient. The digest is used as a cache key, not for security
         // decisions; a collision would only cause a misleading cached error message, not a
         // security bypass.
-        // Exploit: Unauthorized access to the credential cache could expose authentication material.
-        // Improvement: Limit cache access to authenticated callers and consider cache entry encryption at rest.
+        // Exploit: Logged certificate Common Names could reveal internal
+        // infrastructure topology to an attacker with log access.
+        // Improvement: Limit CN logging to debug level and sanitize
+        // certificate details to prevent information leakage.
         public static ByteBuffer calcDigestForCertificateChain(X509Certificate[] chain) throws CertificateEncodingException {
             MessageDigest md;
             try {

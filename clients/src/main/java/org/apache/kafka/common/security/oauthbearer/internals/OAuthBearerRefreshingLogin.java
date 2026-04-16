@@ -76,7 +76,7 @@ import javax.security.auth.login.LoginException;
  * @see SaslConfigs#SASL_LOGIN_REFRESH_MIN_PERIOD_SECONDS_DOC
  * @see SaslConfigs#SASL_LOGIN_REFRESH_BUFFER_SECONDS_DOC
  */
-// SECURITY: (HIGH) Token refresh lifecycle -- orchestrates periodic JWT refresh for
+// SECURITY: SEC-OAUTH-047 (HIGH) Token refresh lifecycle -- orchestrates periodic JWT refresh for
 // both Kafka client and broker inter-broker communication.
 // Why: Token refresh is critical to continuous authentication. If refresh fails silently,
 // the broker/client continues with an expired credential until connection drops occur.
@@ -123,7 +123,9 @@ public class OAuthBearerRefreshingLogin implements Login {
          * lifetime remaining when the refresh occurs, so serializing them seems
          * reasonable.
          */
-        // SECURITY: (MEDIUM) Refresh operations are serialized on OAuthBearerRefreshingLogin.class.
+        // SECURITY: SEC-OAUTH-048 (MEDIUM) Refresh operations are serialized on OAuthBearerRefreshingLogin.class.
+        // Why: Token refresh handles credential rotation where race
+        // conditions could expose stale or inconsistent tokens.
         // This means all instances in the same JVM share a single lock for token refresh,
         // preventing concurrent refresh storms. However, this also means a blocked refresh
         // (e.g., stuck HTTP call to OAuth provider) blocks ALL other refreshes in the JVM.
@@ -135,13 +137,15 @@ public class OAuthBearerRefreshingLogin implements Login {
         // Kafka clients share the same OAuth provider. Token refresh is infrequent (minutes)
         // with substantial remaining lifetime, so serialization overhead is negligible.
         // Risk: A hung refresh (e.g., TCP timeout to OAuth provider) blocks all refreshes.
-        // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-        // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+        // Exploit: A race during token refresh could leave a window where the expired token is used or the refresh t...
+        // Improvement: Use atomic token swap during refresh to eliminate the window where expired or inconsistent to...
         Class<OAuthBearerRefreshingLogin> classToSynchronizeOnPriorToRefresh = OAuthBearerRefreshingLogin.class;
         expiringCredentialRefreshingLogin = new ExpiringCredentialRefreshingLogin(contextName, configuration,
                 new ExpiringCredentialRefreshConfig(configs, true), loginCallbackHandler,
                 classToSynchronizeOnPriorToRefresh) {
-            // SECURITY: (MEDIUM) ExpiringCredential adapter extracts token metadata from Subject
+            // SECURITY: SEC-OAUTH-049 (MEDIUM) ExpiringCredential adapter extracts token metadata from Subject
+            // Why: Token refresh handles credential rotation where race
+            // conditions could expose stale or inconsistent tokens.
             // private credentials. privateCredentialTokens.iterator().next() selects the first
             // token without sorting -- during the brief multi-token refresh window, this may
             // select either the old or new token. The refresh scheduler uses expireTimeMs()
@@ -156,8 +160,8 @@ public class OAuthBearerRefreshingLogin implements Login {
             // to the internal refresh scheduling infrastructure. The adapter allows the refresh
             // framework to be reused for non-OAuth credentials (e.g., Kerberos TGTs via
             // ExpiringCredentialRefreshingLogin).
-            // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-            // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+            // Exploit: A race during token refresh could leave a window where the expired token is used or the refre...
+            // Improvement: Use atomic token swap during refresh to eliminate the window where expired or inconsisten...
             @Override
             public ExpiringCredential expiringCredential() {
                 Set<OAuthBearerToken> privateCredentialTokens = expiringCredentialRefreshingLogin.subject()

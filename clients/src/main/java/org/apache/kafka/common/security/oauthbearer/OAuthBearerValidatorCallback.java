@@ -32,7 +32,9 @@ import javax.security.auth.callback.Callback;
  * OAuth Extensions Error Registry</a>. Callback handlers should communicate
  * other problems by raising an {@code IOException}.
  */
-// SECURITY: (MEDIUM) Broker-side validation callback — carries the raw JWT token value
+// SECURITY: SEC-OAUTH-036 (MEDIUM) Broker-side validation callback — carries the raw JWT token value
+// Why: Validator callbacks carry the validation result that
+// determines whether authentication succeeds.
 // from the SASL exchange to the callback handler for validation. The tokenValue field
 // contains the full bearer token in cleartext. Care must be taken to avoid logging
 // this value or exposing it in error messages.

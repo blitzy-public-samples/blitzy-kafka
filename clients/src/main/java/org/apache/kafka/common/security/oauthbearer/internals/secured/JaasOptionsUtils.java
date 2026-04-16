@@ -44,7 +44,7 @@ import javax.security.auth.login.AppConfigurationEntry;
  * is separated out here for easier, more direct testing.
  */
 
-// SECURITY: (MEDIUM) JAAS option extraction utility — reads SASL/SSL configuration from
+// SECURITY: SEC-OAUTH-098 (MEDIUM) JAAS option extraction utility — reads SASL/SSL configuration from
 // JAAS login module options. These options may contain sensitive material (passwords, key
 // store paths, trust store configurations).
 // Why: JAAS options are the primary mechanism for passing SSL client configuration to the
@@ -85,12 +85,16 @@ public class JaasOptionsUtils {
         this.options = getOptions(saslMechanism, jaasConfigEntries);
     }
 
-    // SECURITY: (LOW) Extracts options map from JAAS config entry. Validates mechanism
+    // SECURITY: SEC-OAUTH-099 (LOW) Extracts options map from JAAS config entry. Validates mechanism
+    // Why: JAAS option extraction handles sensitive configuration
+    // values including client secrets and credentials.
     // name matches OAUTHBEARER and exactly 1 config entry exists. The returned map is
     // unmodifiable (Collections.unmodifiableMap) to prevent downstream modification of
     // JAAS state.
-    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+    // Exploit: Sensitive JAAS options (client secrets, passwords) could
+    // leak through option value extraction if not properly secured.
+    // Improvement: Mask sensitive JAAS option values in log output
+    // and clear them from memory after extraction.
     public static Map<String, Object> getOptions(String saslMechanism, List<AppConfigurationEntry> jaasConfigEntries) {
         if (!OAuthBearerLoginModule.OAUTHBEARER_MECHANISM.equals(saslMechanism))
             throw new IllegalArgumentException(String.format("Unexpected SASL mechanism: %s", saslMechanism));
@@ -125,14 +129,18 @@ public class JaasOptionsUtils {
         return sslClientConfig.values();
     }
 
-    // SECURITY: (MEDIUM) Creates SSLSocketFactory from JAAS SSL options via SslFactory.
+    // SECURITY: SEC-OAUTH-100 (MEDIUM) Creates SSLSocketFactory from JAAS SSL options via SslFactory.
+    // Why: JAAS option extraction handles sensitive configuration
+    // values including client secrets and credentials.
     // The factory is used for HTTPS connections to the token endpoint and JWKS endpoint.
     // The SslFactory is configured in CLIENT mode — it will verify server certificates
     // using the trust store specified in JAAS options (or JVM default if not specified).
     // Note: The SSL config values are logged at DEBUG level — ensure DEBUG logging is
     // not enabled in production as it may reveal trust/key store paths.
-    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+    // Exploit: Sensitive JAAS options (client secrets, passwords) could
+    // leak through option value extraction if not properly secured.
+    // Improvement: Mask sensitive JAAS option values in log output
+    // and clear them from memory after extraction.
     public SSLSocketFactory createSSLSocketFactory() {
         Map<String, ?> sslClientConfig = getSslClientConfig();
         SslFactory sslFactory = new SslFactory(ConnectionMode.CLIENT);

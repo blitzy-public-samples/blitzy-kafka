@@ -18,7 +18,9 @@ package org.apache.kafka.common.security.authenticator;
 
 import org.apache.kafka.common.config.internals.BrokerSecurityConfigs;
 
-// SECURITY: (LOW) Internal SASL configuration constants used for inter-component
+// SECURITY: SEC-SASL-033 (LOW) Internal SASL configuration constants used for inter-component
+// Why: Internal SASL configuration keys control authentication
+// behavior that should not be externally overridable.
 // credential lifetime communication. The CREDENTIAL_LIFETIME_MS property is passed
 // via SaslServer.getNegotiatedProperty() -- a SASL framework API that allows server
 // and client to exchange metadata after authentication. A compromised SaslServer
@@ -33,8 +35,8 @@ import org.apache.kafka.common.config.internals.BrokerSecurityConfigs;
 // SessionLifetimeMs() to compute session expiration. Also read by SaslClientAuthenticator
 // via SaslAuthenticateResponse.sessionLifetimeMs (the broker forwards this value).
 // Depends on: BrokerSecurityConfigs.CONNECTIONS_MAX_REAUTH_MS_CONFIG (upper bound).
-// Exploit: A malicious client could send crafted packets to manipulate state transitions and bypass authentication.
-// Improvement: Add state transition validation to reject unexpected state changes.
+// Exploit: If internal SASL config keys are exposed via misconfigured listeners, an attacker could override authenti...
+// Improvement: Mark internal config keys as non-overridable to prevent external manipulation of SASL session paramet...
 public class SaslInternalConfigs {
     /**
      * The server (broker) specifies a positive session length in milliseconds to a

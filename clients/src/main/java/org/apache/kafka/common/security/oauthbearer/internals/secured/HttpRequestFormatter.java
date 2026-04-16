@@ -18,7 +18,7 @@ package org.apache.kafka.common.security.oauthbearer.internals.secured;
 
 import java.util.Map;
 
-// SECURITY: (MEDIUM) HTTP request formatting interface for OAuth token endpoint requests.
+// SECURITY: SEC-OAUTH-097 (MEDIUM) HTTP request formatting interface for OAuth token endpoint requests.
 // Why: Implementations construct HTTP headers and body containing sensitive credentials
 // (client secrets in Basic Authorization, assertions in form body). The formatted output
 // is passed directly to HttpJwtRetriever.post() without additional sanitization.

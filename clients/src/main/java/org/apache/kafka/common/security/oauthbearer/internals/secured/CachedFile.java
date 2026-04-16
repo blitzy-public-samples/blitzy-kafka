@@ -31,7 +31,7 @@ import java.nio.file.Files;
  *
  * @param <T> Type of the "transformed" file contents
  */
-// SECURITY: (LOW) Generic file caching utility with transformer and refresh policy.
+// SECURITY: SEC-OAUTH-077 (LOW) Generic file caching utility with transformer and refresh policy.
 // Why: Reads file contents into memory and caches the result. The file's integrity is
 // assumed — no checksum, signature, or permission verification is performed.
 // Exploit: TOCTOU (Time-of-check-time-of-use) race — snapshot() checks file.lastModified()
@@ -109,13 +109,17 @@ public class CachedFile<T> {
      * This transformer really only validates that the given file contents represent a properly-formed JWT.
      * If not, a {@link OAuthBearerIllegalTokenException} or {@link JwtValidatorException} is thrown.
      */
-    // SECURITY: (MEDIUM) Validates that file contents are a properly-formed JWT (3 dot-separated
+    // SECURITY: SEC-OAUTH-078 (MEDIUM) Validates that file contents are a properly-formed JWT (3 dot-separated
+    // Why: Cached file access depends on filesystem integrity to
+    // protect token material between reads.
     // segments with valid Base64 header and payload). Uses SerializedJwt for structural validation
     // and OAuthBearerUnsecuredJws.toMap() for JSON parsing validation. Does NOT verify signature —
     // this is a structural check only. A malformed file triggers OAuthBearerIllegalTokenException
     // or JwtValidatorException, preventing downstream processing of garbage data.
-    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+    // Exploit: An attacker with filesystem access could modify the cached
+    // token file between reads, injecting a forged token.
+    // Improvement: Add file integrity verification (e.g., checksum)
+    // before reading cached token data to detect tampering.
     public static final Transformer<String> STRING_JSON_VALIDATING_TRANSFORMER = (file, contents) -> {
         contents = contents.trim();
         SerializedJwt serializedJwt = new SerializedJwt(contents);
@@ -165,7 +169,9 @@ public class CachedFile<T> {
         return snapshot().transformed();
     }
 
-    // SECURITY: (LOW) Snapshot replacement — when refresh is needed, a new Snapshot is created
+    // SECURITY: SEC-OAUTH-079 (LOW) Snapshot replacement — when refresh is needed, a new Snapshot is created
+    // Why: Cached file access depends on filesystem integrity to
+    // protect token material between reads.
     // with current file metadata and contents. The old snapshot is replaced atomically (single
     // reference assignment, line 140). Concurrent readers may see either the old or new snapshot.
     // This is acceptable because snapshot replacement is monotonic (always moves forward).

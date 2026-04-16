@@ -86,7 +86,9 @@ import javax.security.sasl.SaslException;
 /**
  * Client-side SASL authenticator implementing a non-blocking I/O state machine.
  *
- * @implSpec SECURITY: (HIGH) Client-side SASL authentication state machine.
+ * @implSpec SECURITY: SEC-SASL-020 (HIGH) Client-side SASL authentication state machine.
+ * Why: The SASL client authenticator handles credential exchange
+ * with the broker during connection establishment.
  * This class sends credentials to the broker and processes authentication challenges.
  * The SaslState FSM has 13 states covering initial auth, re-auth, and error paths.
  * Exploit: (1) Credential leakage — if auth tokens are logged at DEBUG/TRACE level,
@@ -115,7 +117,9 @@ public class SaslClientAuthenticator implements Authenticator {
      * {@link #FAILED}.
      */
     /*
-     * SECURITY: (HIGH) Client-side authentication states. The 13-state FSM is
+     * SECURITY: SEC-SASL-021 (HIGH) Client-side authentication states. The 13-state FSM is
+     * Why: The SASL client authenticator handles credential exchange
+     * with the broker during connection establishment.
      * more complex than the server side (8 states) because it must handle
      * re-authentication with in-flight response queuing
      * (REAUTH_RECEIVE_HANDSHAKE_OR_OTHER_RESPONSE). States SEND_/RECEIVE_
@@ -165,12 +169,15 @@ public class SaslClientAuthenticator implements Authenticator {
      * used in NetworkClient for Kafka requests. Hence, we can guarantee that every SASL request will throw
      * SchemaException due to correlation id mismatch during reauthentication
      */
-    // SECURITY: (MEDIUM) Reserved correlation ID range prevents SASL responses
+    // SECURITY: SEC-SASL-022 (MEDIUM) Reserved correlation ID range prevents SASL responses
+    // Why: The SASL client authenticator handles credential exchange
+    // with the broker during connection establishment.
     // from being confused with in-flight Kafka API responses during re-auth.
     // Without this, a LIST_OFFSET response could be parsed as SASL_HANDSHAKE
     // response (schemas are accidentally compatible), causing incorrect auth
     // state transitions. Improvement: widen the reserved range for safety.
-    // Exploit: A malicious client could send crafted packets to manipulate state transitions and bypass authentication.
+    // Exploit: A malicious broker could send unexpected SASL handshake
+    // responses to force the client into an invalid authentication state.
     public static final int MAX_RESERVED_CORRELATION_ID = Integer.MAX_VALUE;
 
     /**
@@ -240,14 +247,18 @@ public class SaslClientAuthenticator implements Authenticator {
         this.time = time;
         this.log = logContext.logger(getClass());
         this.reauthInfo = new ReauthInfo();
-        // SECURITY: (HIGH) SaslClient is created under the Subject's privilege
+        // SECURITY: SEC-SASL-023 (HIGH) SaslClient is created under the Subject's privilege
+        // Why: The SASL client authenticator handles credential exchange
+        // with the broker during connection establishment.
         // context via SecurityManagerCompatibility.callAs(). clientPrincipalName
         // is only extracted for GSSAPI — for other mechanisms, the principal
         // comes from the SASL exchange (not the Subject), preventing spoofing
         // where the Subject principal differs from the authenticated identity.
-        // Exploit: A malicious client could send crafted packets to manipulate state transitions and bypass
+        // Exploit: A MITM attacker could downgrade the negotiated SASL mechanism
+        // by intercepting the mechanism list during handshake.
         // authentication.
-        // Improvement: Add state transition validation to reject unexpected state changes.
+        // Improvement: Add strict state transition guards to reject
+        // SASL messages received in unexpected authentication states.
 
         try {
             setSaslState(SaslState.SEND_APIVERSIONS_REQUEST);
@@ -292,7 +303,9 @@ public class SaslClientAuthenticator implements Authenticator {
      * followed by N bytes representing the opaque payload.
      */
     /*
-     * SECURITY: (HIGH) Client authentication state machine driver. The
+     * SECURITY: SEC-SASL-024 (HIGH) Client authentication state machine driver. The
+     * Why: The SASL client authenticator handles credential exchange
+     * with the broker during connection establishment.
      * @SuppressWarnings("fallthrough") is intentional: specific states
      * deliberately fall through to the next (e.g., RECEIVE_APIVERSIONS_RESPONSE
      * to SEND_HANDSHAKE_REQUEST). This fallthrough pattern reduces round-trips
@@ -604,7 +617,9 @@ public class SaslClientAuthenticator implements Authenticator {
     }
 
 
-    // SECURITY: (HIGH) Creates SASL token under Subject privilege context.
+    // SECURITY: SEC-SASL-025 (HIGH) Creates SASL token under Subject privilege context.
+    // Why: The SASL client authenticator handles credential exchange
+    // with the broker during connection establishment.
     // Kerberos errors are analyzed for retriability (KerberosError.retriable())
     // to distinguish transient failures (network issues) from permanent ones
     // (wrong credentials). Transient errors throw SaslException (retried as
@@ -661,13 +676,17 @@ public class SaslClientAuthenticator implements Authenticator {
         return netOutBuffer.completed();
     }
 
-    // SECURITY: (MEDIUM) Response parsing with re-authentication buffering.
+    // SECURITY: SEC-SASL-026 (MEDIUM) Response parsing with re-authentication buffering.
+    // Why: The SASL client authenticator handles credential exchange
+    // with the broker during connection establishment.
     // During re-auth, responses from pre-reauth requests may arrive and are
     // buffered in pendingAuthenticatedReceives for replay after re-auth
     // completes. A malicious broker could inject extra responses during
     // re-auth to confuse the client's request/response matching.
-    // Exploit: A malicious client could send crafted packets to manipulate state transitions and bypass authentication.
-    // Improvement: Add state transition validation to reject unexpected state changes.
+    // Exploit: A malicious broker could manipulate the SASL exchange to
+    // extract client credential material during authentication.
+    // Improvement: Add strict state transition guards to reject
+    // SASL messages received in unexpected authentication states.
     private AbstractResponse receiveKafkaResponse() throws IOException {
         if (netInBuffer == null)
             netInBuffer = new NetworkReceive(node);
@@ -703,13 +722,17 @@ public class SaslClientAuthenticator implements Authenticator {
         }
     }
 
-    // SECURITY: (MEDIUM) Validates the server's handshake response. Sets state
+    // SECURITY: SEC-SASL-027 (MEDIUM) Validates the server's handshake response. Sets state
+    // Why: The SASL client authenticator handles credential exchange
+    // with the broker during connection establishment.
     // to FAILED on any error, preventing further auth attempts on this channel.
     // The UnsupportedSaslMechanismException reveals the server's enabled
     // mechanisms list — this is information disclosure but necessary for client
     // configuration troubleshooting. Consider logging instead of in exception.
-    // Exploit: A malicious client could send crafted packets to manipulate state transitions and bypass authentication.
-    // Improvement: Add state transition validation to reject unexpected state changes.
+    // Exploit: A MITM attacker could downgrade the negotiated SASL mechanism
+    // by intercepting the mechanism list during handshake.
+    // Improvement: Add strict state transition guards to reject
+    // SASL messages received in unexpected authentication states.
     private void handleSaslHandshakeResponse(SaslHandshakeResponse response) {
         Errors error = response.error();
         if (error != Errors.NONE)

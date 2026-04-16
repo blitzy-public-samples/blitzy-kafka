@@ -25,7 +25,7 @@ import java.util.Objects;
  * Immutable refresh-related configuration for expiring credentials that can be
  * parsed from a producer/consumer/broker config.
  */
-// SECURITY: (MEDIUM) Configuration values directly affect token availability and refresh timing.
+// SECURITY: SEC-OAUTH-072 (MEDIUM) Configuration values directly affect token availability and refresh timing.
 // Why: Refresh parameters (window factor, jitter, min period, buffer) control when tokens are
 // refreshed relative to their expiry. Misconfiguration can cause premature refreshes (DoS on
 // the OAuth provider) or late refreshes (expired token errors, authentication failures).

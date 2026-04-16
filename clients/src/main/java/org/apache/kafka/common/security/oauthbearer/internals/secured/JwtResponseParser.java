@@ -24,7 +24,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.io.IOException;
 
-// SECURITY: (MEDIUM) Parses JSON response from OAuth token endpoint to extract JWT.
+// SECURITY: SEC-OAUTH-106 (MEDIUM) Parses JSON response from OAuth token endpoint to extract JWT.
 // Why: The token endpoint response is untrusted network input. A compromised token endpoint
 // could return malicious JSON payloads designed to exploit the JSON parser or downstream
 // token consumers.
@@ -47,7 +47,9 @@ public class JwtResponseParser {
     // token responses typically use access_token; OIDC may additionally include id_token.
     // The first non-blank match is returned — in the rare case both exist, access_token wins.
     private static final String[] JSON_PATHS = new String[] {"/access_token", "/id_token"};
-    // SECURITY: (LOW) Truncates response body to 1000 chars in error messages to prevent log
+    // SECURITY: SEC-OAUTH-107 (LOW) Truncates response body to 1000 chars in error messages to prevent log
+    // Why: Response parsing handles untrusted data from the
+    // authorization server's token endpoint.
     // flooding from large malicious responses. The full response body is still parsed by Jackson
     // (no size limit on parsing) — this only affects the error message snippet.
     // Exploit: An attacker could exhaust server resources by sending oversized or excessive requests.

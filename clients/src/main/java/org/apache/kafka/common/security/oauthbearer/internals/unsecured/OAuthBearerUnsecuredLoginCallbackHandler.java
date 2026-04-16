@@ -96,7 +96,9 @@ import javax.security.sasl.SaslException;
  * {@code listener.name.sasl_[plaintext|ssl].oauthbearer.sasl.login.callback.handler.class}
  * broker configuration property.
  */
-// SECURITY: (CRITICAL) DEVELOPMENT ONLY — NO PRODUCTION USE.
+// SECURITY: SEC-OAUTH-140 (CRITICAL) DEVELOPMENT ONLY — NO PRODUCTION USE.
+// Why: Unsecured token handling has ZERO cryptographic protection
+// and must never be used in production.
 // This unsecured implementation accepts tokens without signature verification.
 // A bad actor can forge any token with arbitrary claims (scope, subject, expiry).
 // Using this in production allows complete authentication bypass.
@@ -116,7 +118,7 @@ import javax.security.sasl.SaslException;
 // Impact: Tokens created here are consumed by OAuthBearerSaslClient for client-first
 // message construction, then validated by OAuthBearerUnsecuredValidatorCallbackHandler
 // (or a production validator) on the broker side.
-// Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+// Exploit: Unsigned tokens from this handler can be forged by any party; production use enables trivial impersonation.
 public class OAuthBearerUnsecuredLoginCallbackHandler implements AuthenticateCallbackHandler {
     private static final Logger log = LoggerFactory.getLogger(OAuthBearerUnsecuredLoginCallbackHandler.class);
     private static final String OPTION_PREFIX = "unsecuredLogin";
@@ -214,7 +216,7 @@ public class OAuthBearerUnsecuredLoginCallbackHandler implements AuthenticateCal
         // empty
     }
 
-    // SECURITY: (CRITICAL) Creates tokens from JAAS options without any OAuth provider
+    // SECURITY: SEC-OAUTH-141 (CRITICAL) Creates tokens from JAAS options without any OAuth provider
     // interaction — no token endpoint call, no client credentials, no authorization code.
     // Why: Any JAAS configuration can specify arbitrary claims via option prefixes
     // (unsecuredLoginStringClaim_, unsecuredLoginNumberClaim_, unsecuredLoginListClaim_).
@@ -274,14 +276,18 @@ public class OAuthBearerUnsecuredLoginCallbackHandler implements AuthenticateCal
         }
         try {
             Encoder urlEncoderNoPadding = Base64.getUrlEncoder().withoutPadding();
-            // SECURITY: (CRITICAL) Constructs an unsigned JWS:
+            // SECURITY: SEC-OAUTH-142 (CRITICAL) Constructs an unsigned JWS:
+            // Why: Unsecured token handling has ZERO cryptographic protection
+            // and must never be used in production.
             // Base64URL(header).Base64URL(claims).(empty signature). The header
             // is always {"alg":"none"}. The claims contain iat, exp, and all custom
             // claims from JAAS options. No cryptographic signing occurs. The
             // resulting token is a valid JWT compact serialization that any JWT
             // parser can decode — an attacker can trivially read all claims.
-            // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-            // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+            // Exploit: CRITICAL — unsecured JWS tokens have no signature;
+            // any attacker can forge tokens with arbitrary claims.
+            // Improvement: Add a runtime guard that prevents unsecured login
+            // handlers from being used outside development environments.
             OAuthBearerUnsecuredJws jws = new OAuthBearerUnsecuredJws(
                     String.format("%s.%s.",
                             urlEncoderNoPadding.encodeToString(headerJson.getBytes(StandardCharsets.UTF_8)),
@@ -295,7 +301,9 @@ public class OAuthBearerUnsecuredLoginCallbackHandler implements AuthenticateCal
         }
     }
 
-    // SECURITY: (MEDIUM) SASL extensions are sourced from JAAS options prefixed with
+    // SECURITY: SEC-OAUTH-143 (MEDIUM) SASL extensions are sourced from JAAS options prefixed with
+    // Why: Unsecured token handling has ZERO cryptographic protection
+    // and must never be used in production.
     // unsecuredLoginExtension_. Extensions are validated via
     // OAuthBearerClientInitialResponse.validateExtensions() which checks key/value
     // regex patterns and rejects the reserved "auth" key. However, extension VALUES

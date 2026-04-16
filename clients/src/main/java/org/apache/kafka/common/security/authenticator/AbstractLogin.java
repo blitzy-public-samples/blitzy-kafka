@@ -39,7 +39,9 @@ import javax.security.sasl.RealmCallback;
 /**
  * Base login class that implements methods common to typical SASL mechanisms.
  *
- * @implSpec SECURITY: (MEDIUM) JAAS Subject handling -- the Subject contains sensitive
+ * @implSpec SECURITY: SEC-SASL-001 (MEDIUM) JAAS Subject handling -- the Subject contains sensitive
+ * Why: The login abstraction manages JAAS Subject lifecycle and
+ * credential refresh for authentication mechanisms.
  * credentials (passwords, tokens, Kerberos tickets) as private credentials.
  * The login() method creates a LoginContext with a null Subject parameter,
  * meaning the LoginContext creates a new Subject internally. This Subject's lifecycle
@@ -86,13 +88,17 @@ public abstract class AbstractLogin implements Login {
         this.loginCallbackHandler = loginCallbackHandler;
     }
 
-    // SECURITY: (MEDIUM) LoginContext is created with null Subject, meaning JAAS
+    // SECURITY: SEC-SASL-002 (MEDIUM) LoginContext is created with null Subject, meaning JAAS
+    // Why: The login abstraction manages JAAS Subject lifecycle and
+    // credential refresh for authentication mechanisms.
     // creates a fresh Subject. The loginCallbackHandler handles credential provisioning
     // (username/password/realm callbacks). On successful login, the Subject contains
     // the authenticated principal and mechanism-specific credentials. log.info() does
     // NOT log credentials or principal names -- intentional to prevent leakage.
-    // Exploit: A malicious client could send crafted packets to manipulate state transitions and bypass authentication.
-    // Improvement: Add state transition validation to reject unexpected state changes.
+    // Exploit: An attacker could exploit the login lifecycle to intercept
+    // the JAAS Subject before credential refresh completes.
+    // Improvement: Add login state validation to reject operations
+    // on already-closed or partially-initialized login contexts.
 
     // DECISION: Passes null Subject to LoginContext constructor rather than a
     // pre-constructed Subject. This lets each JAAS login module populate the Subject
@@ -147,7 +153,9 @@ public abstract class AbstractLogin implements Login {
                     NameCallback nc = (NameCallback) callback;
                     nc.setName(nc.getDefaultName());
                 } else if (callback instanceof PasswordCallback) {
-                    // SECURITY: (MEDIUM) Rejects PasswordCallback with exception.
+                    // SECURITY: SEC-SASL-003 (MEDIUM) Rejects PasswordCallback with exception.
+                    // Why: The login abstraction manages JAAS Subject lifecycle and
+                    // credential refresh for authentication mechanisms.
                     // Safety net preventing interactive password input blocking in
                     // non-interactive server/client environments. Prevents accidental
                     // use of interactive login modules (e.g., Krb5LoginModule without

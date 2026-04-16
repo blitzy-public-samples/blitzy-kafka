@@ -24,7 +24,7 @@ import javax.security.auth.callback.Callback;
  * set authenticated flag to true if the client provided password in the callback
  * matches the expected password.
  */
-// SECURITY: (MEDIUM) Carries plaintext username/password during SASL/PLAIN authentication.
+// SECURITY: SEC-PLAIN-001 (MEDIUM) Carries plaintext username/password during SASL/PLAIN authentication.
 // Why: This callback transports raw credentials (char[] password) between the SaslServer
 // and the CallbackHandler. The password field is a final reference but its contents are
 // mutable and never zeroed after use.
@@ -42,10 +42,14 @@ import javax.security.auth.callback.Callback;
 // Impact: If callback is not handled, authentication silently fails (authenticated=false).
 // Also consumed by authenticator/SaslServerAuthenticator via PLAIN mechanism delegation.
 public class PlainAuthenticateCallback implements Callback {
-    // SECURITY: (MEDIUM) Raw credential storage -- char[] chosen over String to allow zeroing,
+    // SECURITY: SEC-PLAIN-002 (MEDIUM) Raw credential storage -- char[] chosen over String to allow zeroing,
+    // Why: PLAIN mechanism handles cleartext credentials that have
+    // no cryptographic protection.
     // but this class does not implement zeroing. Callers must manage credential lifecycle.
-    // Exploit: Unauthorized access to the credential cache could expose authentication material.
-    // Improvement: Limit cache access to authenticated callers and consider cache entry encryption at rest.
+    // Exploit: The authenticated flag and cleartext password in the
+    // callback could be intercepted by a malicious callback handler.
+    // Improvement: Clear the password char[] after authentication
+    // completes to minimize credential exposure in memory.
     private final char[] password;
     private boolean authenticated;
 

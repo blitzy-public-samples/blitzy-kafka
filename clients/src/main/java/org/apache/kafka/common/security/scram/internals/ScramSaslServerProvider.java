@@ -21,7 +21,7 @@ import org.apache.kafka.common.security.scram.internals.ScramSaslServer.ScramSas
 import java.security.Provider;
 import java.security.Security;
 
-// SECURITY: (LOW) JCA security provider registration for server-side SCRAM SASL mechanisms.
+// SECURITY: SEC-SCRAM-053 (LOW) JCA security provider registration for server-side SCRAM SASL mechanisms.
 // Why: Registers SaslServerFactory entries for SCRAM-SHA-256 and SCRAM-SHA-512 into the
 // global JVM security provider list via Security.addProvider(). Same security considerations
 // as ScramSaslClientProvider apply — provider registration is global JVM state.

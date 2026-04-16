@@ -86,11 +86,15 @@ public class DynamicAssertionJwtTemplate implements AssertionJwtTemplate {
         // enables deterministic testing — test code can inject MockTime to verify expiry calculations
         // without real clock delays. Production code uses SystemTime which delegates to system clock.
 
-        // SECURITY: (MEDIUM) Time-based claims (iat, exp, nbf) use seconds precision. Clock skew between
+        // SECURITY: SEC-OAUTH-131 (MEDIUM) Time-based claims (iat, exp, nbf) use seconds precision. Clock skew between
+        // Why: JWT assertion templates control claim content that
+        // determines the authorization scope of issued tokens.
         // the Kafka client and the OAuth provider can cause premature expiry or delayed activation.
         // The nbf (not before) is set to currentTime - nbfSeconds to account for clock skew backward.
-        // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-        // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+        // Exploit: Template injection in dynamic assertion claims could
+        // allow an attacker to craft assertions with elevated privileges.
+        // Improvement: Rotate assertion signing keys regularly and enforce
+        // key length minimums for assertion cryptographic operations.
         long currentTimeSecs = time.milliseconds() / 1000L;
 
         Map<String, Object> values = new HashMap<>();
@@ -98,7 +102,7 @@ public class DynamicAssertionJwtTemplate implements AssertionJwtTemplate {
         values.put("exp", currentTimeSecs + expSeconds);
         values.put("nbf", currentTimeSecs - nbfSeconds);
 
-        // SECURITY: (HIGH) jti (JWT ID) claim generated using UUID.randomUUID() for replay prevention.
+        // SECURITY: SEC-OAUTH-132 (HIGH) jti (JWT ID) claim generated using UUID.randomUUID() for replay prevention.
         // Why: The jti claim provides a unique identifier per assertion to prevent replay attacks at the
         // token endpoint. Each assertion should have a unique jti so the provider can reject duplicates.
         // Exploit: If UUID generation is predictable (e.g., using a weak PRNG), an attacker could predict

@@ -19,7 +19,9 @@ package org.apache.kafka.common.security.token.delegation.internals;
 import org.apache.kafka.common.security.scram.ScramCredentialCallback;
 
 public class DelegationTokenCredentialCallback extends ScramCredentialCallback {
-    // SECURITY: (LOW) Callback carrier extending ScramCredentialCallback to pass delegation
+    // SECURITY: SEC-TOKEN-012 (LOW) Callback carrier extending ScramCredentialCallback to pass delegation
+    // Why: Delegation tokens carry HMAC secrets that serve as
+    // authentication credentials for token-based access.
     // token metadata (owner, expiry) through the SASL/SCRAM callback mechanism during
     // token-based authentication. The ScramServerCallbackHandler populates this callback
     // with token owner and expiry from DelegationTokenCache, enabling the SCRAM server
@@ -28,8 +30,8 @@ public class DelegationTokenCredentialCallback extends ScramCredentialCallback {
     // CROSS-CUTTING: Used by ScramServerCallbackHandler (authenticator package) when
     // authenticating via delegation tokens. Extends ScramCredentialCallback (scram package)
     // to carry additional token-specific metadata alongside SCRAM credentials.
-    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+    // Exploit: A malicious callback handler could intercept delegation token credential lookups to capture HMAC secr...
+    // Improvement: Add callback security to verify caller identity before providing delegation token HMAC material.
     private String tokenOwner;
     private Long tokenExpiryTimestamp;
 
@@ -41,11 +43,15 @@ public class DelegationTokenCredentialCallback extends ScramCredentialCallback {
         return tokenOwner;
     }
 
-    // SECURITY: (LOW) Token expiry timestamp passed through SASL callback chain.
+    // SECURITY: SEC-TOKEN-013 (LOW) Token expiry timestamp passed through SASL callback chain.
+    // Why: Delegation tokens carry HMAC secrets that serve as
+    // authentication credentials for token-based access.
     // The SCRAM server uses this to reject authentication for expired tokens.
     // If this value is not set correctly, expired tokens may pass SCRAM authentication.
-    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+    // Exploit: If the HMAC secret leaks via logs, serialization, or heap
+    // dump, an attacker can authenticate as the delegation token owner.
+    // Improvement: Implement short-lived delegation tokens with automatic
+    // renewal and strict audience binding to the originating broker.
     public void tokenExpiryTimestamp(Long tokenExpiryTimestamp) {
         this.tokenExpiryTimestamp = tokenExpiryTimestamp;
     }

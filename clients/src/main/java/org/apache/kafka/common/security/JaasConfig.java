@@ -44,7 +44,9 @@ import javax.security.auth.login.Configuration;
  * }
  * </pre>
  *
- * @implSpec SECURITY: (MEDIUM) This class parses untrusted JAAS configuration strings
+ * @implSpec SECURITY: SEC-JAAS-001 (MEDIUM) This class parses untrusted JAAS configuration strings
+ * Why: JAAS configuration parsing handles untrusted input that
+ * determines which authentication modules are loaded at runtime.
  * (from sasl.jaas.config) using java.io.StreamTokenizer, which has complex tokenization
  * rules. Malformed or crafted config strings could cause unexpected parsing behavior.
  * Exploit: An attacker with config write access could inject a malicious login module
@@ -72,13 +74,17 @@ class JaasConfig extends Configuration {
     private final List<AppConfigurationEntry> configEntries;
 
     public JaasConfig(String loginContextName, String jaasConfigParams) {
-        // SECURITY: (MEDIUM) StreamTokenizer configured with slashSlash and slashStar comments
+        // SECURITY: SEC-JAAS-002 (MEDIUM) StreamTokenizer configured with slashSlash and slashStar comments
+        // Why: JAAS configuration parsing handles untrusted input that
+        // determines which authentication modules are loaded at runtime.
         // enabled — comment sequences (//, /* */) inside JAAS config values will be
         // silently consumed, potentially hiding injected content from human review.
         // Characters '-', '_', '$' are added as word chars to support Java class names
         // with inner classes and hyphens in option keys.
-        // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-        // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+        // Exploit: An attacker with JAAS config write access could embed content in
+        // StreamTokenizer comment sequences (//, /* */) to hide injected module names.
+        // Improvement: Add pre-parse regex validation to reject configs
+        // containing suspicious class names or unquoted special characters.
         StreamTokenizer tokenizer = new StreamTokenizer(new StringReader(jaasConfigParams));
         tokenizer.slashSlashComments(true);
         tokenizer.slashStarComments(true);
@@ -143,7 +149,9 @@ class JaasConfig extends Configuration {
         return controlFlag;
     }
 
-    // SECURITY: (MEDIUM) Parses one login module entry from the token stream. The login
+    // SECURITY: SEC-JAAS-003 (MEDIUM) Parses one login module entry from the token stream. The login
+    // Why: JAAS configuration parsing handles untrusted input that
+    // determines which authentication modules are loaded at runtime.
     // module class name (tokenizer.sval at entry) comes directly from the config string
     // without class-name validation — class loading is deferred to JAAS runtime. A crafted
     // class name could reference any class on the classpath. Post-parse validation occurs
@@ -154,20 +162,24 @@ class JaasConfig extends Configuration {
     // reading key=value pairs until ';' or EOF. Error paths: EOF before control flag,
     // missing '=' in options, EOF before option value, missing terminating ';'. All
     // errors throw IllegalArgumentException with descriptive messages.
-    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+    // Exploit: An attacker with JAAS config write access could inject a malicious LoginModule class name,
+    // Improvement: Add pre-parse validation to reject suspicious class names and unquoted special characters.
     private AppConfigurationEntry parseAppConfigurationEntry(StreamTokenizer tokenizer) throws IOException {
         String loginModule = tokenizer.sval;
         if (tokenizer.nextToken() == StreamTokenizer.TT_EOF)
             throw new IllegalArgumentException("Login module control flag not specified in JAAS config");
         LoginModuleControlFlag controlFlag = loginModuleControlFlag(tokenizer.sval);
         Map<String, String> options = new HashMap<>();
-        // SECURITY: (MEDIUM) Key=value option parsing. Option values are read as raw
+        // SECURITY: SEC-JAAS-004 (MEDIUM) Key=value option parsing. Option values are read as raw
+        // Why: JAAS configuration parsing handles untrusted input that
+        // determines which authentication modules are loaded at runtime.
         // StreamTokenizer tokens. Values containing special characters ('=', ';')
         // must be quoted per JAAS syntax. Unquoted values terminate at whitespace,
         // which could cause option value truncation if not properly quoted.
-        // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-        // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+        // Exploit: An attacker with JAAS config write access could embed content in
+        // StreamTokenizer comment sequences (//, /* */) to hide injected module names.
+        // Improvement: Add pre-parse regex validation to reject configs
+        // containing suspicious class names or unquoted special characters.
         while (tokenizer.nextToken() != StreamTokenizer.TT_EOF && tokenizer.ttype != ';') {
             String key = tokenizer.sval;
             if (tokenizer.nextToken() != '=' || tokenizer.nextToken() == StreamTokenizer.TT_EOF || tokenizer.sval == null)

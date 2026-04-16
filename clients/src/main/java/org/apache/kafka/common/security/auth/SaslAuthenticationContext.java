@@ -22,7 +22,7 @@ import java.util.Optional;
 import javax.net.ssl.SSLSession;
 import javax.security.sasl.SaslServer;
 
-// SECURITY: (LOW) SaslAuthenticationContext carries the javax.security.sasl.SaslServer
+// SECURITY: SEC-AUTH-006 (LOW) SaslAuthenticationContext carries the javax.security.sasl.SaslServer
 // instance for SASL-authenticated connections. The SaslServer.getAuthorizationID()
 // provides the authenticated identity used for ACL evaluation.
 // Why: This context bridges the SASL authentication result to the authorization layer.

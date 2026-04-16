@@ -25,7 +25,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.function.Supplier;
 
-// SECURITY: (MEDIUM) Formats JWT bearer assertion grant request (RFC 7523 / urn:ietf:params:
+// SECURITY: SEC-OAUTH-104 (MEDIUM) Formats JWT bearer assertion grant request (RFC 7523 / urn:ietf:params:
 // oauth:grant-type:jwt-bearer). The assertion value (a signed JWT) is included in the form body.
 // Why: The assertion is a signed JWT that proves the client's identity — if intercepted, it can
 // be replayed to obtain access tokens within its validity window (typically short, ~5 minutes).
@@ -59,7 +59,9 @@ public class JwtBearerRequestFormatter implements HttpRequestFormatter {
 
     @Override
     public String formatBody() {
-        // SECURITY: (MEDIUM) The assertion is obtained from the assertionSupplier (Supplier<String>)
+        // SECURITY: SEC-OAUTH-105 (MEDIUM) The assertion is obtained from the assertionSupplier (Supplier<String>)
+        // Why: OAuth token handling is a security dependency because
+        // it controls authentication and authorization for connections.
         // at call time and URL-encoded before inclusion in the form body. URL encoding prevents body
         // parameter injection via crafted assertion values.
         // Exploit: Improper handling could be exploited to bypass security controls or leak sensitive information.

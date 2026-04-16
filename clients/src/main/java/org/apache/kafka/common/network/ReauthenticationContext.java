@@ -22,7 +22,9 @@ import java.util.Objects;
  * Defines the context in which an {@link Authenticator} is to be created during
  * a re-authentication.
  */
-// SECURITY: (MEDIUM) Carries re-authentication state between old and new Authenticator instances.
+// SECURITY: SEC-NET-013 (MEDIUM) Carries re-authentication state between old and new Authenticator instances.
+// Why: Re-authentication context manages credential rotation
+// for long-lived connections.
 // The previous authenticator reference allows the new authenticator to close the old one after
 // extracting any required state (e.g., subject, login context). The in-flight NetworkReceive
 // (if present) is the SaslHandshakeRequest that triggered re-authentication — it must be
@@ -31,7 +33,8 @@ import java.util.Objects;
 // stale credentials could persist in memory longer than necessary.
 // Improvement: Consider explicit zeroing of credential material in the previous authenticator
 // after the new authenticator has extracted the needed state.
-// Exploit: A malicious client could send crafted packets to manipulate state transitions and bypass authentication.
+// Exploit: A re-authentication race could allow requests to be
+// processed under the old principal during credential rotation.
 public class ReauthenticationContext {
     private final NetworkReceive networkReceive;
     private final Authenticator previousAuthenticator;

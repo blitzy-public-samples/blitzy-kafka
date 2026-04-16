@@ -38,7 +38,7 @@ import javax.security.auth.login.LoginException;
  * server when the login is a type that has a limited lifetime/will expire. The
  * credentials for the login must implement {@link ExpiringCredential}.
  */
-// SECURITY: (HIGH) Background daemon thread runs token refresh with broker/client privileges.
+// SECURITY: SEC-OAUTH-073 (HIGH) Background daemon thread runs token refresh with broker/client privileges.
 // The refresh thread has access to the Subject and can modify its credential set.
 // Why: This class is the scheduling engine for ALL expiring credential refresh -- both
 // OAUTHBEARER and Kerberos TGT. The refresh daemon runs with the same privileges as the Kafka
@@ -428,7 +428,9 @@ public abstract class ExpiringCredentialRefreshingLogin implements AutoCloseable
         return proposedRefreshMs;
     }
 
-    // SECURITY: (HIGH) Performs the actual logout/reLogin cycle under a class-level lock.
+    // SECURITY: SEC-OAUTH-074 (HIGH) Performs the actual logout/reLogin cycle under a class-level lock.
+    // Why: Expiring credential lifecycle management determines when
+    // authentication material becomes invalid.
     // The synchronized block on mandatoryClassToSynchronizeOnPriorToRefresh (line 364) ensures
     // only one refresh across ALL instances (sharing the same lock class) runs at a time.
     // The method accesses and mutates: loginContext, expiringCredential, hasExpiringCredential,

@@ -227,14 +227,18 @@ public class ConfigurationUtils {
      * No effort is made to connect to the URL in the validation step.
      */
 
-    // SECURITY: (MEDIUM) URL protocol validation -- only http, https, and file protocols
+    // SECURITY: SEC-OAUTH-087 (MEDIUM) URL protocol validation -- only http, https, and file protocols
+    // Why: OAuth configuration determines which authorization server
+    // endpoints are trusted for token operations.
     // allowed. This prevents SSRF (Server-Side Request Forgery) via exotic protocols like
     // ftp://, jar://, or ldap:// which could be used to access internal resources.
     // The additional allowlist check via throwIfURLIsNotAllowed() validates the specific URL
     // against a configurable system property (ALLOWED_SASL_OAUTHBEARER_URLS_CONFIG).
     // Default: all URLs allowed.
-    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+    // Exploit: A misconfigured or manipulated OAuth configuration could
+    // redirect token requests to an attacker-controlled endpoint.
+    // Improvement: Validate OAuth endpoint URLs against an allowlist
+    // to prevent redirection to attacker-controlled servers.
     public URL validateUrl(String name) {
         String value = validateString(name);
         URL url;
@@ -295,13 +299,17 @@ public class ConfigurationUtils {
         return value;
     }
 
-    // SECURITY: (LOW) Config lookup with SASL mechanism prefix fallback. First checks for
+    // SECURITY: SEC-OAUTH-088 (LOW) Config lookup with SASL mechanism prefix fallback. First checks for
+    // Why: OAuth configuration determines which authorization server
+    // endpoints are trusted for token operations.
     // mechanism-prefixed key (e.g., "OAUTHBEARER.sasl.login.retry.backoff.ms"), then falls
     // back to the unprefixed key. This enables per-listener isolation of OAUTHBEARER
     // configuration. The prefix is set by ListenerName.saslMechanismPrefix() during
     // construction.
-    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+    // Exploit: A misconfigured or manipulated OAuth configuration could
+    // redirect token requests to an attacker-controlled endpoint.
+    // Improvement: Validate OAuth endpoint URLs against an allowlist
+    // to prevent redirection to attacker-controlled servers.
     @SuppressWarnings("unchecked")
     public <T> T get(String name) {
         T value = (T) configs.get(prefix + name);
@@ -312,7 +320,7 @@ public class ConfigurationUtils {
         return (T) configs.get(name);
     }
 
-    // SECURITY: (MEDIUM) Reflective class instantiation from configuration value.
+    // SECURITY: SEC-OAUTH-089 (MEDIUM) Reflective class instantiation from configuration value.
     // Why: This method instantiates arbitrary classes specified in configuration. If the
     // config is controlled by an attacker (e.g., via dynamic config update or JAAS option
     // injection), they could specify a malicious class that executes arbitrary code during
@@ -452,7 +460,9 @@ public class ConfigurationUtils {
         );
     }
 
-    // SECURITY: (MEDIUM) Resource allowlist enforcement. URLs and files are checked against
+    // SECURITY: SEC-OAUTH-090 (MEDIUM) Resource allowlist enforcement. URLs and files are checked against
+    // Why: OAuth configuration determines which authorization server
+    // endpoints are trusted for token operations.
     // a system property-based allowlist. The default allows ALL resources (empty allowlist =
     // allow all).
     // Exploit: If the system property is not configured, any URL/file can be used as JWKS

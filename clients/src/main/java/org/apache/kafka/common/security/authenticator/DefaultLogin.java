@@ -31,7 +31,9 @@ package org.apache.kafka.common.security.authenticator;
  * Default non-refreshing {@link Login} implementation for mechanisms that do not
  * require credential refresh (e.g., PLAIN, SCRAM).
  *
- * @implSpec SECURITY: (LOW) Default non-refreshing login implementation. close() is
+ * @implSpec SECURITY: SEC-SASL-014 (LOW) Default non-refreshing login implementation. close() is
+ * Why: Default login handles JAAS Subject initialization for
+ * non-refreshing authentication mechanisms.
  * a no-op, meaning the JAAS Subject and its credentials persist in memory until the
  * LoginManager releases its reference and the Login is garbage collected. For PLAIN
  * mechanism, this means the plaintext password stored in the Subject's private

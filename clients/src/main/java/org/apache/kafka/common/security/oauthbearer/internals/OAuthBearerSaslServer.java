@@ -50,7 +50,7 @@ import javax.security.sasl.SaslServerFactory;
  * for example).
  */
 /*
- * SECURITY: (HIGH) Broker-side SASL OAUTHBEARER server — parses client initial payload,
+ * SECURITY: SEC-OAUTH-059 (HIGH) Broker-side SASL OAUTHBEARER server — parses client initial payload,
  * validates token via AuthenticateCallbackHandler, and enforces authorization ID matching.
  * Why: This is the broker's trust enforcement point for OAUTHBEARER — all token validation
  * is delegated to the callbackHandler. If the handler is misconfigured or compromised,
@@ -76,7 +76,7 @@ import javax.security.sasl.SaslServerFactory;
 public class OAuthBearerSaslServer implements SaslServer {
 
     private static final Logger log = LoggerFactory.getLogger(OAuthBearerSaslServer.class);
-    // SECURITY: (LOW) Token exposed via getNegotiatedProperty() after successful auth,
+    // SECURITY: SEC-OAUTH-060 (LOW) Token exposed via getNegotiatedProperty() after successful auth,
     // enabling custom authorizers to access JWT claims for fine-grained authorization.
     // Why: Token object (and raw value) remains in memory until dispose() is called.
     // Exploit: Memory dump or heap analysis could extract valid tokens post-auth.
@@ -118,7 +118,7 @@ public class OAuthBearerSaslServer implements SaslServer {
      */
     @Override
     public byte[] evaluateResponse(byte[] response) throws SaslException, SaslAuthenticationException {
-        // SECURITY: (HIGH) Entry point for client authentication. Checks control-A
+        // SECURITY: SEC-OAUTH-061 (HIGH) Entry point for client authentication. Checks control-A
         // error ack — prevents retrying modified tokens in the same SASL exchange.
         // Why: Two-phase error protocol ensures exchange must restart on failure.
         // Exploit: Without ack, attacker could resend modified tokens in same session.
@@ -193,7 +193,7 @@ public class OAuthBearerSaslServer implements SaslServer {
         extensions = null;
     }
 
-    // SECURITY: (HIGH) Token validation delegated to callbackHandler.handle(). The
+    // SECURITY: SEC-OAUTH-062 (HIGH) Token validation delegated to callbackHandler.handle(). The
     // callback pattern means this class has NO control over the validation logic.
     // Why: If the handler is misconfigured or compromised, all tokens are accepted.
     // Exploit: Malicious callback handler plugin accepts all tokens unconditionally.
@@ -225,7 +225,7 @@ public class OAuthBearerSaslServer implements SaslServer {
          * We support the client specifying an authorization ID as per the SASL
          * specification, but it must match the principal name if it is specified.
          */
-        // SECURITY: (HIGH) Authorization ID must match token principalName to prevent
+        // SECURITY: SEC-OAUTH-063 (HIGH) Authorization ID must match token principalName to prevent
         // privilege escalation — client cannot authenticate with token A as user B.
         // Why: Without this check, a low-privilege token could gain elevated access.
         // Exploit: Remove check → any valid token holder impersonates any principal.
@@ -248,7 +248,7 @@ public class OAuthBearerSaslServer implements SaslServer {
         return new byte[0];
     }
 
-    // SECURITY: (MEDIUM) Extension validation via OAuthBearerExtensionsValidatorCallback.
+    // SECURITY: SEC-OAUTH-064 (MEDIUM) Extension validation via OAuthBearerExtensionsValidatorCallback.
     // Why: If handler doesn't support extension validation, ALL extensions are silently
     // accepted without validation for backward compatibility (pre-KIP-368 handlers).
     // Exploit: Malicious client sends crafted extensions that bypass validation entirely.
@@ -273,7 +273,7 @@ public class OAuthBearerSaslServer implements SaslServer {
         return extensionsCallback.validatedExtensions();
     }
 
-    // SECURITY: (MEDIUM) Error response sent to client as JSON.
+    // SECURITY: SEC-OAUTH-065 (MEDIUM) Error response sent to client as JSON.
     // Why: errorStatus, errorScope, errorOpenIDConfiguration are NOT sanitized.
     // Exploit: Attacker triggers validation errors to extract internal server
     // configuration (URLs, paths) leaked through error details to the client.
@@ -289,7 +289,7 @@ public class OAuthBearerSaslServer implements SaslServer {
         return jsonErrorResponse;
     }
 
-    // SECURITY: (MEDIUM) Internal error wrapping — original exception message is
+    // SECURITY: SEC-OAUTH-066 (MEDIUM) Internal error wrapping — original exception message is
     // included in SaslException which may be sent to the client.
     // Why: Generic prefix appends e.getMessage() which could contain stack details.
     // Exploit: Triggering internal error reveals server-side class names and paths.

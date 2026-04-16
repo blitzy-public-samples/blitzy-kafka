@@ -24,7 +24,7 @@ import java.util.Map;
 /**
  * An interface for generating security providers.
  */
-// SECURITY: (LOW) Plugin interface for registering custom JCA security providers.
+// SECURITY: SEC-AUTH-010 (LOW) Plugin interface for registering custom JCA security providers.
 // Why: Implementations are loaded via reflection from SecurityConfig and registered
 // with java.security.Security.addProvider(). A malicious or misconfigured provider
 // could replace standard cryptographic algorithms (e.g., substitute a weak PRNG,

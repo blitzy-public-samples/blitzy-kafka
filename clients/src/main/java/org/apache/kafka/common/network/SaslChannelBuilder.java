@@ -76,7 +76,7 @@ import java.util.function.Supplier;
 import javax.security.auth.Subject;
 import javax.security.auth.kerberos.KerberosPrincipal;
 
-// SECURITY: (HIGH) SaslChannelBuilder constructs authenticated SASL channels
+// SECURITY: SEC-NET-014 (HIGH) SaslChannelBuilder constructs authenticated SASL channels
 // for both SASL_PLAINTEXT and SASL_SSL security protocols. This builder
 // orchestrates the JAAS configuration, LoginManager lifecycle, per-mechanism
 // callback handler instantiation, and SASL authenticator creation.
@@ -104,7 +104,7 @@ import javax.security.auth.kerberos.KerberosPrincipal;
 // buildChannel() is called.
 // Impact: Changes to any SASL mechanism's callback handler interface
 // break this builder.
-// Exploit: A malicious client could send crafted packets to manipulate state transitions and bypass authentication.
+// Exploit: A MITM could intercept the SASL mechanism negotiation to downgrade to a weaker mechanism like PLAIN.
 public class SaslChannelBuilder implements ChannelBuilder, ListenerReconfigurable {
     static final String GSS_NATIVE_PROP = "sun.security.jgss.native";
 
@@ -202,7 +202,9 @@ public class SaslChannelBuilder implements ChannelBuilder, ListenerReconfigurabl
                 if (principalToLocalRules != null)
                     kerberosShortNamer = KerberosShortNamer.fromUnparsedRules(defaultRealm, principalToLocalRules);
             }
-            // SECURITY: (HIGH) LoginManager instances are reference-counted
+            // SECURITY: SEC-NET-015 (HIGH) LoginManager instances are reference-counted
+            // Why: Channel builder configures SASL authentication parameters
+            // for all new client connections.
             // singletons per mechanism. Sharing LoginManagers across
             // connections for the same mechanism improves performance
             // (avoids repeated Kerberos TGT acquisition) but means a
@@ -214,7 +216,8 @@ public class SaslChannelBuilder implements ChannelBuilder, ListenerReconfigurabl
             // to hijack all connections using that mechanism.
             // Improvement: Consider per-connection LoginManager isolation
             // for high-security deployments at the cost of performance.
-            // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+            // Exploit: A MITM could intercept the SASL mechanism negotiation
+            // to downgrade to a weaker mechanism like PLAIN.
             for (Map.Entry<String, JaasContext> entry : jaasContexts.entrySet()) {
                 String mechanism = entry.getKey();
                 // With static JAAS configuration, use KerberosLogin if Kerberos is enabled. With dynamic JAAS configuration,
@@ -379,7 +382,9 @@ public class SaslChannelBuilder implements ChannelBuilder, ListenerReconfigurabl
         return new KerberosPrincipal("tmp", 1).getRealm();
     }
 
-    // SECURITY: (MEDIUM) Client callback handler is loaded via reflection
+    // SECURITY: SEC-NET-016 (MEDIUM) Client callback handler is loaded via reflection
+    // Why: Channel builder configures SASL authentication parameters
+    // for all new client connections.
     // from the SASL_CLIENT_CALLBACK_HANDLER_CLASS config. If not set,
     // a default handler is selected based on the mechanism. Reflective
     // class loading from user-provided config means a misconfigured or
@@ -389,7 +394,8 @@ public class SaslChannelBuilder implements ChannelBuilder, ListenerReconfigurabl
     // Improvement: Validate that the configured class implements
     // AuthenticateCallbackHandler before instantiation, and consider
     // restricting class loading to trusted packages.
-    // Exploit: A malicious client could send crafted packets to manipulate state transitions and bypass authentication.
+    // Exploit: A MITM could intercept the SASL mechanism negotiation
+    // to downgrade to a weaker mechanism like PLAIN.
     private void createClientCallbackHandler(Map<String, ?> configs) {
         @SuppressWarnings("unchecked")
         Class<? extends AuthenticateCallbackHandler> clazz = (Class<? extends AuthenticateCallbackHandler>) configs.get(SaslConfigs.SASL_CLIENT_CALLBACK_HANDLER_CLASS);
@@ -399,7 +405,9 @@ public class SaslChannelBuilder implements ChannelBuilder, ListenerReconfigurabl
         saslCallbackHandlers.put(clientSaslMechanism, callbackHandler);
     }
 
-    // SECURITY: (MEDIUM) Callback handlers are instantiated via reflection from
+    // SECURITY: SEC-NET-017 (MEDIUM) Callback handlers are instantiated via reflection from
+    // Why: Channel builder configures SASL authentication parameters
+    // for all new client connections.
     // class names specified in SASL configuration. For PLAIN mechanism,
     // PlainServerCallbackHandler is used by default on the server side.
     // For SCRAM, ScramServerCallbackHandler retrieves stored credentials
@@ -412,7 +420,8 @@ public class SaslChannelBuilder implements ChannelBuilder, ListenerReconfigurabl
     // standard authentication checks if not properly validated.
     // Improvement: Log a warning when a custom (non-default) callback
     // handler is loaded, and consider a security audit hook.
-    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+    // Exploit: A MITM could intercept the SASL mechanism negotiation
+    // to downgrade to a weaker mechanism like PLAIN.
     private void createServerCallbackHandlers(Map<String, ?> configs) {
         for (String mechanism : jaasContexts.keySet()) {
             AuthenticateCallbackHandler callbackHandler;
@@ -482,7 +491,9 @@ public class SaslChannelBuilder implements ChannelBuilder, ListenerReconfigurabl
         }
     }
 
-    // SECURITY: (MEDIUM) Native GSSCredential is acquired for Kerberos
+    // SECURITY: SEC-NET-018 (MEDIUM) Native GSSCredential is acquired for Kerberos
+    // Why: Channel builder configures SASL authentication parameters
+    // for all new client connections.
     // (GSSAPI) server-mode operation. The GSSCredential is stored as a
     // private credential in the Subject and shared across all connections
     // using the same Kerberos principal. If GSSCredential expires and

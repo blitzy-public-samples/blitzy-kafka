@@ -79,7 +79,9 @@ import javax.security.auth.login.AppConfigurationEntry;
  * It is worth noting that this class is not suitable for production use due to the use of unsecured JWT tokens and
  * validation of every given extension.
  */
-// SECURITY: (CRITICAL) DEVELOPMENT ONLY -- NO PRODUCTION USE.
+// SECURITY: SEC-OAUTH-144 (CRITICAL) DEVELOPMENT ONLY -- NO PRODUCTION USE.
+// Why: Unsecured token handling has ZERO cryptographic protection
+// and must never be used in production.
 // This unsecured implementation accepts tokens without signature verification.
 // A bad actor can forge any token with arbitrary claims (scope, subject, expiry).
 // Using this in production allows complete authentication bypass.
@@ -98,7 +100,7 @@ import javax.security.auth.login.AppConfigurationEntry;
 // Contract: configure() -> handle() lifecycle. Single-threaded per SASL exchange.
 // Impact: Replacing this handler with a secured implementation (e.g.,
 // OAuthBearerValidatorCallbackHandler using JWKS) is the REQUIRED step for production.
-// Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+// Exploit: Without signature validation, any crafted token string will be accepted as a valid authentication credent...
 public class OAuthBearerUnsecuredValidatorCallbackHandler implements AuthenticateCallbackHandler {
     private static final Logger log = LoggerFactory.getLogger(OAuthBearerUnsecuredValidatorCallbackHandler.class);
     private static final String OPTION_PREFIX = "unsecuredValidator";
@@ -141,7 +143,9 @@ public class OAuthBearerUnsecuredValidatorCallbackHandler implements Authenticat
         this.moduleOptions = Collections
                 .unmodifiableMap((Map<String, String>) jaasConfigEntries.get(0).getOptions());
         configured = true;
-        // SECURITY: (MEDIUM) Configuration captured from JAAS options without sanitization.
+        // SECURITY: SEC-OAUTH-145 (MEDIUM) Configuration captured from JAAS options without sanitization.
+        // Why: Unsecured token handling has ZERO cryptographic protection
+        // and must never be used in production.
         // moduleOptions may contain attacker-controlled values if the JAAS config file is
         // writable. No validation is performed on option values until handle() is called.
         // Exploit: A malformed JAAS configuration could disable authentication or load a malicious login module.
@@ -163,7 +167,9 @@ public class OAuthBearerUnsecuredValidatorCallbackHandler implements Authenticat
                     validationCallback.error(failureScope != null ? "insufficient_scope" : "invalid_token",
                             failureScope, failureReason.failureOpenIdConfig());
                 }
-            // SECURITY: (MEDIUM) All extensions are accepted unconditionally:
+            // SECURITY: SEC-OAUTH-146 (MEDIUM) All extensions are accepted unconditionally:
+            // Why: Unsecured token handling has ZERO cryptographic protection
+            // and must never be used in production.
             // extensionsCallback.valid(extensionName) for every extension. In a production
             // validator, extensions should be validated against an allowlist.
             // Exploit: A malicious client can inject arbitrary SASL extensions that
@@ -182,7 +188,9 @@ public class OAuthBearerUnsecuredValidatorCallbackHandler implements Authenticat
         // empty
     }
 
-    // SECURITY: (CRITICAL) Validates unsecured tokens -- constructs OAuthBearerUnsecuredJws
+    // SECURITY: SEC-OAUTH-147 (CRITICAL) Validates unsecured tokens -- constructs OAuthBearerUnsecuredJws
+    // Why: Unsecured token handling has ZERO cryptographic protection
+    // and must never be used in production.
     // and runs claim checks. Since tokens have NO cryptographic signature, validation only
     // checks structural validity (3-part JWS format, alg=none, non-empty signature segment)
     // and claim semantics (expiry, not-before, scope, principal existence). None of these

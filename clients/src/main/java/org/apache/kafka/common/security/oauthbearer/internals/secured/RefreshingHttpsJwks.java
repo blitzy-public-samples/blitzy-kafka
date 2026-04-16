@@ -56,7 +56,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
  * @see org.jose4j.keys.resolvers.VerificationKeyResolver
  * @see BrokerJwtValidator
  */
-// SECURITY: (HIGH) Background JWKS cache refresh — maintains cached key material for JWT
+// SECURITY: SEC-OAUTH-108 (HIGH) Background JWKS cache refresh — maintains cached key material for JWT
 // signature validation. During refresh failure, old keys continue to be used indefinitely.
 // Why: The cached jsonWebKeys list is the sole source of truth for JWT signature validation
 // on the broker. If the JWKS endpoint becomes unreachable, stale keys remain in use.
@@ -84,7 +84,9 @@ public final class RefreshingHttpsJwks implements OAuthBearerConfigurable {
 
     private static final Logger log = LoggerFactory.getLogger(RefreshingHttpsJwks.class);
 
-    // SECURITY: (MEDIUM) Fixed-size LRU cache for missing key IDs. Size 16 limits memory
+    // SECURITY: SEC-OAUTH-109 (MEDIUM) Fixed-size LRU cache for missing key IDs. Size 16 limits memory
+    // Why: JWKS refresh controls the key set used for JWT validation;
+    // a compromised refresh poisons all token verification.
     // but an attacker rotating through > 16 unique kid values can evict earlier entries,
     // causing repeated refresh attempts for previously seen (and rate-limited) kid values.
     // DECISION: 16 entries chosen as a reasonable upper bound for concurrent key rotation
@@ -93,18 +95,24 @@ public final class RefreshingHttpsJwks implements OAuthBearerConfigurable {
     // Improvement: Enforce strict per-connection resource limits and implement connection rate limiting.
     private static final int MISSING_KEY_ID_CACHE_MAX_ENTRIES = 16;
 
-    // SECURITY: (MEDIUM) 60-second cooldown per missing key ID. Prevents rapid-fire
+    // SECURITY: SEC-OAUTH-110 (MEDIUM) 60-second cooldown per missing key ID. Prevents rapid-fire
+    // Why: JWKS refresh controls the key set used for JWT validation;
+    // a compromised refresh poisons all token verification.
     // refresh attempts for the same unknown kid. After an expedited refresh is scheduled
     // for a kid, subsequent requests for the same kid within 60s are silently ignored.
     // Exploit: Improper handling could be exploited to bypass security controls or leak sensitive information.
     // Improvement: Add comprehensive logging for security-relevant operations and enforce fail-closed semantics.
     static final long MISSING_KEY_ID_CACHE_IN_FLIGHT_MS = 60000;
 
-    // SECURITY: (MEDIUM) Maximum kid length — prevents memory exhaustion from maliciously
+    // SECURITY: SEC-OAUTH-111 (MEDIUM) Maximum kid length — prevents memory exhaustion from maliciously
+    // Why: JWKS refresh controls the key set used for JWT validation;
+    // a compromised refresh poisons all token verification.
     // long kid values in crafted JWTs. Kid values exceeding 1000 characters are rejected
     // without caching, with only the first 1000 characters logged.
-    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+    // Exploit: During the JWKS refresh interval, a compromised endpoint
+    // could serve a malicious key set that validates forged tokens.
+    // Improvement: Implement JWKS key pinning to detect unexpected key
+    // rotation and alert on suspicious key set changes.
     static final int MISSING_KEY_ID_MAX_KEY_LENGTH = 1000;
 
     private static final int SHUTDOWN_TIMEOUT = 10;
@@ -141,14 +149,18 @@ public final class RefreshingHttpsJwks implements OAuthBearerConfigurable {
      * Protects {@link #missingKeyIds} and {@link #jsonWebKeys}.
      */
 
-    // SECURITY: (MEDIUM) ReentrantReadWriteLock protecting jsonWebKeys and missingKeyIds.
+    // SECURITY: SEC-OAUTH-112 (MEDIUM) ReentrantReadWriteLock protecting jsonWebKeys and missingKeyIds.
+    // Why: JWKS refresh controls the key set used for JWT validation;
+    // a compromised refresh poisons all token verification.
     // Read lock used by getJsonWebKeys() — allows concurrent JWT validations.
     // Write lock used by refresh() and maybeExpediteRefresh() — serializes cache updates.
     // Thread-safety contract: Multiple authentication threads can read cached keys
     // concurrently; only the refresh thread (ScheduledExecutorService) or expedited
     // refresh modifies the cache.
-    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+    // Exploit: During the JWKS refresh interval, a compromised endpoint
+    // could serve a malicious key set that validates forged tokens.
+    // Improvement: Implement JWKS key pinning to detect unexpected key
+    // rotation and alert on suspicious key set changes.
     private final ReadWriteLock refreshLock = new ReentrantReadWriteLock();
 
     private final Map<String, Long> missingKeyIds;
@@ -157,11 +169,15 @@ public final class RefreshingHttpsJwks implements OAuthBearerConfigurable {
      * Flag to prevent concurrent refresh invocations.
      */
 
-    // SECURITY: (LOW) AtomicBoolean gate preventing concurrent refresh invocations.
+    // SECURITY: SEC-OAUTH-113 (LOW) AtomicBoolean gate preventing concurrent refresh invocations.
+    // Why: JWKS refresh controls the key set used for JWT validation;
+    // a compromised refresh poisons all token verification.
     // Without this, multiple expedited refresh attempts could spawn concurrent HTTP
     // requests to the JWKS endpoint, amplifying a DoS attack surface.
-    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+    // Exploit: During the JWKS refresh interval, a compromised endpoint
+    // could serve a malicious key set that validates forged tokens.
+    // Improvement: Implement JWKS key pinning to detect unexpected key
+    // rotation and alert on suspicious key set changes.
     private final AtomicBoolean refreshInProgressFlag = new AtomicBoolean(false);
 
     /**
@@ -391,13 +407,17 @@ public final class RefreshingHttpsJwks implements OAuthBearerConfigurable {
 
             log.info("OAuth JWKS refresh of {} complete", httpsJwks.getLocation());
         } catch (ExecutionException e) {
-            // SECURITY: (HIGH) On refresh failure, the existing jsonWebKeys cache is NOT
+            // SECURITY: SEC-OAUTH-114 (HIGH) On refresh failure, the existing jsonWebKeys cache is NOT
+            // Why: JWKS refresh controls the key set used for JWT validation;
+            // a compromised refresh poisons all token verification.
             // cleared — old keys remain valid. This is a deliberate
             // availability-over-security trade-off: a transient JWKS endpoint failure
             // should not cause all authentication to fail.
             // Risk: Revoked/rotated keys remain trusted until a successful refresh.
-            // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-            // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+            // Exploit: During the JWKS refresh interval, a compromised endpoint
+            // could serve a malicious key set that validates forged tokens.
+            // Improvement: Implement JWKS key pinning to detect unexpected key
+            // rotation and alert on suspicious key set changes.
             log.warn("OAuth JWKS refresh of {} encountered an error; not updating local JWKS cache", httpsJwks.getLocation(), e);
         } finally {
             refreshInProgressFlag.set(false);

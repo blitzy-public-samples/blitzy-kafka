@@ -154,7 +154,7 @@ import static org.apache.kafka.common.security.oauthbearer.internals.secured.Con
  * SASL handshake.
  */
 
-// SECURITY: (HIGH) Client-side OAuth login handler -- retrieves JWT tokens from OAuth provider
+// SECURITY: SEC-OAUTH-026 (HIGH) Client-side OAuth login handler -- retrieves JWT tokens from OAuth provider
 // and validates them before caching in the JAAS Subject's private credentials.
 // Why: This handler manages the full token lifecycle: retrieval -> validation -> caching.
 // The retrieved token (containing client_id, client_secret in the request) passes through
@@ -178,7 +178,9 @@ public class OAuthBearerLoginCallbackHandler implements AuthenticateCallbackHand
 
     private static final Logger log = LoggerFactory.getLogger(OAuthBearerLoginCallbackHandler.class);
 
-    // SECURITY: (HIGH) Client credentials (clientId, clientSecret) defined as JAAS module
+    // SECURITY: SEC-OAUTH-027 (HIGH) Client credentials (clientId, clientSecret) defined as JAAS module
+    // Why: The login callback handler manages token acquisition and
+    // credential setup for OAUTHBEARER authentication.
     // options. These are sensitive values that appear in sasl.jaas.config. The config value
     // is of type Password which masks toString(), but JAAS option values are plain strings
     // stored in memory.
@@ -281,7 +283,9 @@ public class OAuthBearerLoginCallbackHandler implements AuthenticateCallbackHand
         }
     }
 
-    // SECURITY: (HIGH) Token retrieval and validation in sequence. The accessToken string
+    // SECURITY: SEC-OAUTH-028 (HIGH) Token retrieval and validation in sequence. The accessToken string
+    // Why: The login callback handler manages token acquisition and
+    // credential setup for OAUTHBEARER authentication.
     // may contain sensitive data (the JWT itself). It is passed to jwtValidator.validate()
     // which performs at minimum structural validation. On failure, "invalid_token" error
     // is set on callback with the exception message -- this message should NOT contain
@@ -302,7 +306,9 @@ public class OAuthBearerLoginCallbackHandler implements AuthenticateCallbackHand
         }
     }
 
-    // SECURITY: (MEDIUM) SASL extensions extracted from JAAS moduleOptions with "extension_"
+    // SECURITY: SEC-OAUTH-029 (MEDIUM) SASL extensions extracted from JAAS moduleOptions with "extension_"
+    // Why: The login callback handler manages token acquisition and
+    // credential setup for OAUTHBEARER authentication.
     // prefix. Extension keys/values are validated via OAuthBearerClientInitialResponse.
     // validateExtensions() which enforces RFC 7628 patterns.
     // Exploit: If moduleOptions are sourced from untrusted config (e.g., dynamic per-user

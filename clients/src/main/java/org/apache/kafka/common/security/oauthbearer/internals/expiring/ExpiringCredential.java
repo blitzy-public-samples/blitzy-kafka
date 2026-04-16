@@ -21,7 +21,7 @@ package org.apache.kafka.common.security.oauthbearer.internals.expiring;
  * 
  * @see ExpiringCredentialRefreshingLogin
  */
-// SECURITY: (MEDIUM) Interface defines the credential expiry contract used by the refresh
+// SECURITY: SEC-OAUTH-069 (MEDIUM) Interface defines the credential expiry contract used by the refresh
 // scheduler. Implementations must ensure thread-safe access to startTimeMs()/expireTimeMs()
 // as these are read by the background refresh thread and written during credential rotation.
 // Why: The credential's expiry timestamp drives the refresh scheduler in
@@ -79,11 +79,15 @@ public interface ExpiringCredential {
      * @return the time when the credential expires, in terms of the number of
      *         milliseconds since the epoch
      */
-    // SECURITY: (HIGH) expireTimeMs() is the critical security-relevant method — it determines when
+    // SECURITY: SEC-OAUTH-070 (HIGH) expireTimeMs() is the critical security-relevant method — it determines when
+    // Why: Expiring credential lifecycle management determines when
+    // authentication material becomes invalid.
     // the credential is no longer valid. Returning a manipulated value (too far in the future
     // or too far in the past) directly impacts authentication reliability.
-    // Exploit: Unauthorized access to the credential cache could expose authentication material.
-    // Improvement: Limit cache access to authenticated callers and consider cache entry encryption at rest.
+    // Exploit: An attacker could present an expired credential during
+    // the refresh buffer window before the system detects expiration.
+    // Improvement: Enforce strict expiry checks before returning
+    // credential data and add access auditing for credential reads.
     long expireTimeMs();
 
     /**
@@ -96,11 +100,15 @@ public interface ExpiringCredential {
      *         terms of the number of milliseconds since the epoch, if any,
      *         otherwise null
      */
-    // SECURITY: (MEDIUM) If absoluteLastRefreshTimeMs() returns a time before expireTimeMs(), the refresh
+    // SECURITY: SEC-OAUTH-071 (MEDIUM) If absoluteLastRefreshTimeMs() returns a time before expireTimeMs(), the refresh
+    // Why: Expiring credential lifecycle management determines when
+    // authentication material becomes invalid.
     // thread will exit (ExpiringCredentialRefreshingLogin line 309-316), leaving the credential
     // to expire without further refresh attempts. A malicious implementation could use this to
     // force credential expiry by returning a past timestamp.
-    // Exploit: Unauthorized access to the credential cache could expose authentication material.
-    // Improvement: Limit cache access to authenticated callers and consider cache entry encryption at rest.
+    // Exploit: An attacker could present an expired credential during
+    // the refresh buffer window before the system detects expiration.
+    // Improvement: Enforce strict expiry checks before returning
+    // credential data and add access auditing for credential reads.
     Long absoluteLastRefreshTimeMs();
 }

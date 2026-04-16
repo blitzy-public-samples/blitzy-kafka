@@ -27,7 +27,7 @@ import java.util.Map;
  * is used both for passing ScramCredentialUpsertion and for the internal 
  * UserScramCredentialRecord. Do not change the type field.
  */
-// SECURITY: (MEDIUM) SCRAM mechanism variant definitions -- SHA-256 and SHA-512.
+// SECURITY: SEC-SCRAM-032 (MEDIUM) SCRAM mechanism variant definitions -- SHA-256 and SHA-512.
 // Why: Defines the cryptographic algorithm parameters and iteration count bounds for all SCRAM
 // authentication in Kafka. The minimum iteration count (4096) directly controls brute-force
 // resistance of SCRAM credentials.
@@ -61,7 +61,10 @@ import java.util.Map;
 // Impact: Changing mechanism names breaks JAAS configuration and SASL negotiation.
 public enum ScramMechanism {
 
-    // SECURITY: (MEDIUM) SHA-256 variant -- 256-bit hash output. Currently secure against known cryptanalysis.
+    // SECURITY: SEC-SCRAM-033 (MEDIUM) SHA-256 variant -- 256-bit
+    // hash output. Currently secure against known cryptanalysis.
+    // Why: SCRAM mechanism configuration determines the cryptographic
+    // strength of the challenge-response authentication.
     // min=4096, max=16384 iterations. Type byte 1 -- persisted in metadata records, must not change.
     // DECISION: Iteration bounds [4096, 16384]. The minimum (4096) follows RFC 5802 Section 5.1.
     // The maximum (16384) balances security with authentication latency -- at 16384 iterations,
@@ -70,7 +73,9 @@ public enum ScramMechanism {
     // minimum.
     // Improvement: Enforce a minimum iteration count floor and consider periodic increases as hardware improves.
     SCRAM_SHA_256((byte) 1, "SHA-256", "HmacSHA256", 4096, 16384),
-    // SECURITY: (MEDIUM) SHA-512 variant -- 512-bit hash output. Higher security margin than SHA-256.
+    // SECURITY: SEC-SCRAM-034 (MEDIUM) SHA-512 variant -- 512-bit hash output. Higher security margin than SHA-256.
+    // Why: SCRAM mechanism configuration determines the cryptographic
+    // strength of the challenge-response authentication.
     // min=4096, max=16384 iterations. Type byte 2 -- persisted in metadata records, must not change.
     // SHA-512 has slightly higher computational cost but provides stronger collision resistance.
     // Exploit: A weakness in the hash algorithm could enable preimage or collision attacks.
@@ -86,7 +91,9 @@ public enum ScramMechanism {
     private final String mechanismName;
     private final String hashAlgorithm;
     private final String macAlgorithm;
-    // SECURITY: (HIGH) Minimum iteration count for PBKDF2 key derivation. Set to 4096 per RFC 5802
+    // SECURITY: SEC-SCRAM-035 (HIGH) Minimum iteration count for PBKDF2 key derivation. Set to 4096 per RFC 5802
+    // Why: SCRAM mechanism configuration determines the cryptographic
+    // strength of the challenge-response authentication.
     // Section 5.1. Enforced in ScramSaslServer.evaluateResponse() and ScramSaslClient.evaluateChallenge().
     // Lowering this value would reduce brute-force resistance of all SCRAM credentials.
     // Exploit: An attacker could brute-force weak passwords if the iteration count is set below the recommended

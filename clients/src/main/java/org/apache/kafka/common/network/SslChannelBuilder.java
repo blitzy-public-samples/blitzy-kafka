@@ -38,7 +38,9 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.function.Supplier;
 
-// SECURITY: (MEDIUM) SslChannelBuilder constructs SSL/TLS channels using SslFactory
+// SECURITY: SEC-NET-027 (MEDIUM) SslChannelBuilder constructs SSL/TLS channels using SslFactory
+// Why: SSL channel builder configures TLS parameters that
+// determine transport encryption strength.
 // for SSLEngine configuration. Implements ListenerReconfigurable to support dynamic
 // SSL certificate rotation without broker restart. The SslFactory is replaced atomically
 // during reconfiguration.
@@ -56,7 +58,7 @@ import java.util.function.Supplier;
 // Contract: SslFactory must be configured before buildChannel() is called.
 // Impact: If SslFactory changes its SSLEngine initialization (e.g., different cipher
 // suites), all connections created by this builder are affected.
-// Exploit: An attacker could exploit weak cipher suites or certificate validation gaps for MITM attacks.
+// Exploit: Misconfigured SSL channel parameters could weaken TLS protection, enabling passive decryption or MITM att...
 public class SslChannelBuilder implements ChannelBuilder, ListenerReconfigurable {
     private final ListenerName listenerName;
     private final boolean isInterBrokerListener;

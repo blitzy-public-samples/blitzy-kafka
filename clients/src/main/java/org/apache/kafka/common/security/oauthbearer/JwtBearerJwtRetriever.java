@@ -121,7 +121,7 @@ import static org.apache.kafka.common.security.oauthbearer.internals.secured.ass
  * common but requires private key access. The mode is selected by presence of
  * SASL_OAUTHBEARER_ASSERTION_FILE config.
  */
-// SECURITY: (HIGH) JWT bearer assertion grant flow
+// SECURITY: SEC-OAUTH-021 (HIGH) JWT bearer assertion grant flow
 // (urn:ietf:params:oauth:grant-type:jwt-bearer).
 // Why: This retriever creates signed JWT assertions using a private key, then exchanges
 // them for access tokens at the OAuth provider's token endpoint. The private key is the
@@ -167,17 +167,23 @@ public class JwtBearerJwtRetriever implements JwtRetriever {
         String scope = cu.validateString(SASL_OAUTHBEARER_SCOPE, false);
 
         if (cu.validateString(SASL_OAUTHBEARER_ASSERTION_FILE, false) != null) {
-            // SECURITY: (MEDIUM) File-based assertion — reads a pre-signed JWT assertion
+            // SECURITY: SEC-OAUTH-022 (MEDIUM) File-based assertion — reads a pre-signed JWT assertion
+            // Why: JWT bearer assertion retrieval handles signed assertions
+            // used to obtain access tokens from the auth server.
             // from a file. If the file is writable by unauthorized users, they could
             // replace the assertion with one granting elevated privileges. Ensure
             // assertion file has restrictive permissions (600).
-            // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-            // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+            // Exploit: A stolen or forged JWT assertion could be replayed to
+            // the token endpoint to obtain valid access tokens.
+            // Improvement: Enforce TLS certificate pinning on token endpoint
+            // connections to prevent MITM-based token interception.
             File assertionFile = cu.validateFile(SASL_OAUTHBEARER_ASSERTION_FILE);
             assertionCreator = new FileAssertionCreator(assertionFile);
             assertionJwtTemplate = new StaticAssertionJwtTemplate();
         } else {
-            // SECURITY: (HIGH) Private key loaded from filesystem via
+            // SECURITY: SEC-OAUTH-023 (HIGH) Private key loaded from filesystem via
+            // Why: JWT bearer assertion retrieval handles signed assertions
+            // used to obtain access tokens from the auth server.
             // cu.validateFile(). The passphrase (if present) is retrieved via
             // cu.validatePassword() which uses the Password type for masking. However,
             // the actual key material is held in memory as a java.security.PrivateKey
@@ -201,12 +207,16 @@ public class JwtBearerJwtRetriever implements JwtRetriever {
             assertionJwtTemplate = layeredAssertionJwtTemplate(cu, time);
         }
 
-        // SECURITY: (HIGH) Assertion created on every retrieve() call via
+        // SECURITY: SEC-OAUTH-024 (HIGH) Assertion created on every retrieve() call via
+        // Why: JWT bearer assertion retrieval handles signed assertions
+        // used to obtain access tokens from the auth server.
         // assertionCreator.create(). Each assertion gets fresh iat/exp claims
         // (via Time.SYSTEM). If assertion creation fails, JwtRetrieverException is
         // thrown — the exception message should not contain key material.
-        // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-        // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+        // Exploit: A stolen or forged JWT assertion could be replayed to
+        // the token endpoint to obtain valid access tokens.
+        // Improvement: Enforce TLS certificate pinning on token endpoint
+        // connections to prevent MITM-based token interception.
         Supplier<String> assertionSupplier = () -> {
             try {
                 return assertionCreator.create(assertionJwtTemplate);

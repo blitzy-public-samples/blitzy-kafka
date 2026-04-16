@@ -22,7 +22,7 @@ import org.apache.kafka.common.security.oauthbearer.internals.OAuthBearerSaslCli
 import java.security.Provider;
 import java.security.Security;
 
-// SECURITY: (LOW) Global JVM-wide SASL provider registration for OAUTHBEARER client factory.
+// SECURITY: SEC-OAUTH-057 (LOW) Global JVM-wide SASL provider registration for OAUTHBEARER client factory.
 // Why: Security.addProvider() modifies the JVM-global security provider list. Once registered,
 // the OAUTHBEARER mechanism is available to ALL SASL contexts in the JVM.
 // Exploit: In a shared JVM environment (e.g., application server hosting multiple Kafka clients),
@@ -50,7 +50,9 @@ public final class OAuthBearerSaslClientProvider extends Provider {
                 OAuthBearerSaslClientFactory.class.getName());
     }
 
-    // SECURITY: (LOW) No idempotency check — calling initialize() multiple times adds duplicate
+    // SECURITY: SEC-OAUTH-058 (LOW) No idempotency check — calling initialize() multiple times adds duplicate
+    // Why: The SASL client transmits bearer tokens during the
+    // OAUTHBEARER authentication exchange.
     // providers. While harmless (SASL framework uses the first match), it wastes memory and
     // could confuse provider enumeration tools.
     // Exploit: An attacker could exhaust server resources by sending oversized or excessive requests.

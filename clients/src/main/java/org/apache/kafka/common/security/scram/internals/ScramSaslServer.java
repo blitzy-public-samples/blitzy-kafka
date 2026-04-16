@@ -53,7 +53,7 @@ import javax.security.sasl.SaslServerFactory;
  *
  * @see <a href="https://tools.ietf.org/html/rfc5802">RFC 5802</a>
  */
-// SECURITY: (CRITICAL) Server-side SCRAM challenge-response handler implementing RFC 5802.
+// SECURITY: SEC-SCRAM-047 (CRITICAL) Server-side SCRAM challenge-response handler implementing RFC 5802.
 // Why: This class handles raw SASL tokens from untrusted clients, performs cryptographic
 // proof verification, and manages the server-side SCRAM state machine. Incorrect state
 // transitions, timing leaks, or proof verification flaws would allow authentication bypass.
@@ -77,11 +77,15 @@ import javax.security.sasl.SaslServerFactory;
 public class ScramSaslServer implements SaslServer {
 
     private static final Logger log = LoggerFactory.getLogger(ScramSaslServer.class);
-    // SECURITY: (HIGH) Allowlist of supported SCRAM extensions. Only TOKEN_AUTH_CONFIG ("tokenauth")
+    // SECURITY: SEC-SCRAM-048 (HIGH) Allowlist of supported SCRAM extensions. Only TOKEN_AUTH_CONFIG ("tokenauth")
+    // Why: The SCRAM server handles challenge-response verification
+    // for all SCRAM-authenticated client connections.
     // is permitted. Unsupported extensions are logged and ignored (not rejected), which is a
     // deliberate lenient policy to avoid breaking forward compatibility.
-    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+    // Exploit: The SCRAM server exchange could be exploited through
+    // message manipulation to bypass challenge-response verification.
+    // Improvement: Add nonce uniqueness verification and rate limiting
+    // to prevent SCRAM challenge replay across authentication sessions.
     private static final Set<String> SUPPORTED_EXTENSIONS = Set.of(ScramLoginModule.TOKEN_AUTH_CONFIG);
 
     // DECISION: Explicit enum state machine rather than if-else chains or boolean flags.
@@ -155,14 +159,18 @@ public class ScramSaslServer implements SaslServer {
                         String username = ScramFormatter.username(saslName);
                         NameCallback nameCallback = new NameCallback("username", username);
                         ScramCredentialCallback credentialCallback;
-                        // SECURITY: (HIGH) Delegation token auth path -- branches on
+                        // SECURITY: SEC-SCRAM-049 (HIGH) Delegation token auth path -- branches on
+                        // Why: The SCRAM server handles challenge-response verification
+                        // for all SCRAM-authenticated client connections.
                         // client extension. If tokenAuthenticated() is true, uses
                         // DelegationTokenCredentialCallback instead of ScramCredentialCallback.
                         // Risk: If dispatch logic is flawed, a regular SCRAM auth could be
                         // routed to token lookup, bypassing token expiry checks.
-                        // Exploit: A malicious client could send crafted packets to manipulate state transitions and
+                        // Exploit: An attacker could extract SCRAM credentials from the
+                        // credential callback to mount offline dictionary attacks.
                         // bypass authentication.
-                        // Improvement: Add state transition validation to reject unexpected state changes.
+                        // Improvement: Add SCRAM state machine guards to reject messages
+                        // received in unexpected authentication states.
                         if (scramExtensions.tokenAuthenticated()) {
                             DelegationTokenCredentialCallback tokenCallback = new DelegationTokenCredentialCallback();
                             credentialCallback = tokenCallback;
@@ -178,10 +186,14 @@ public class ScramSaslServer implements SaslServer {
                             this.tokenExpiryTimestamp = null;
                         }
                         this.scramCredential = credentialCallback.scramCredential();
-                        // SECURITY: (HIGH) Fail-closed -- null credential causes immediate
+                        // SECURITY: SEC-SCRAM-050 (HIGH) Fail-closed -- null credential causes immediate
+                        // Why: The SCRAM server handles challenge-response verification
+                        // for all SCRAM-authenticated client connections.
                         // SaslException, preventing auth with non-existent users.
-                        // Exploit: Unauthorized access to the credential cache could expose authentication material.
-                        // Improvement: Limit cache access to authenticated callers and consider cache entry encryption
+                        // Exploit: An attacker could extract SCRAM credentials from the
+                        // credential callback to mount offline dictionary attacks.
+                        // Improvement: Add access auditing for credential cache lookups
+                        // and rate-limit authentication attempts per principal.
                         // at rest.
                         if (scramCredential == null)
                             throw new SaslException("Authentication failed: Invalid user credentials");
@@ -284,7 +296,7 @@ public class ScramSaslServer implements SaslServer {
         this.state = state;
     }
 
-    // SECURITY: (CRITICAL) Constant-time proof verification using MessageDigest.isEqual().
+    // SECURITY: SEC-SCRAM-051 (CRITICAL) Constant-time proof verification using MessageDigest.isEqual().
     // This method reconstructs StoredKey from the client's proof and compares it against
     // the expected StoredKey using a constant-time comparison to prevent timing attacks.
     // Why: Non-constant-time comparison (e.g., Arrays.equals()) would allow an attacker to
@@ -292,8 +304,10 @@ public class ScramSaslServer implements SaslServer {
     // Computation: computedStoredKey = H(clientSignature XOR clientProof) must equal
     // expectedStoredKey. If they match, the client has proven knowledge of ClientKey.
     // Visible for testing
-    // Exploit: An attacker could use response timing differences to incrementally reconstruct the secret.
-    // Improvement: Ensure all cryptographic comparisons use constant-time algorithms like MessageDigest.isEqual().
+    // Exploit: A non-constant-time proof comparison could leak the
+    // stored key through timing side-channel analysis.
+    // Improvement: Add unit tests asserting constant-time comparison
+    // to prevent accidental regression to Arrays.equals().
     void verifyClientProof(ClientFinalMessage clientFinalMessage) throws SaslException {
         try {
             byte[] expectedStoredKey = scramCredential.storedKey();
@@ -306,12 +320,15 @@ public class ScramSaslServer implements SaslServer {
         }
     }
 
-    // SECURITY: (MEDIUM) Credential clearing after authentication completes or fails.
+    // SECURITY: SEC-SCRAM-052 (MEDIUM) Credential clearing after authentication completes or fails.
+    // Why: The SCRAM server handles challenge-response verification
+    // for all SCRAM-authenticated client connections.
     // Sets references to null but does NOT zero the underlying byte arrays (salt,
     // storedKey, serverKey). Contents remain in memory until garbage collected.
     // Improvement: Zero byte arrays explicitly before nulling references to reduce
     // the window for heap dump credential extraction.
-    // Exploit: A caller retaining a reference could modify credential bytes in-place, corrupting shared state.
+    // Exploit: An attacker could extract SCRAM credentials from the
+    // credential callback to mount offline dictionary attacks.
     private void clearCredentials() {
         scramCredential = null;
         clientFirstMessage = null;

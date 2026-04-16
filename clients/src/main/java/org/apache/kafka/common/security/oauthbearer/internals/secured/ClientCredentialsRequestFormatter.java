@@ -28,7 +28,7 @@ import java.util.Map;
 import static org.apache.kafka.common.config.SaslConfigs.SASL_OAUTHBEARER_CLIENT_CREDENTIALS_CLIENT_ID;
 import static org.apache.kafka.common.config.SaslConfigs.SASL_OAUTHBEARER_CLIENT_CREDENTIALS_CLIENT_SECRET;
 
-// SECURITY: (MEDIUM) Formats client_credentials grant request body and Basic Authorization header.
+// SECURITY: SEC-OAUTH-083 (MEDIUM) Formats client_credentials grant request body and Basic Authorization header.
 // Why: Client secret is included in both the request body parameters and the Basic Authorization
 // header (Base64-encoded clientId:clientSecret). These credentials must be transmitted over HTTPS.
 // Exploit: (1) If the token endpoint URL uses HTTP instead of HTTPS, the client secret is sent
@@ -75,13 +75,17 @@ public class ClientCredentialsRequestFormatter implements HttpRequestFormatter {
         clientSecret = clientSecret.trim();
         scope = Utils.isBlank(scope) ? null : scope.trim();
 
-        // SECURITY: (LOW) URL-encoding of clientId, clientSecret, and scope per
+        // SECURITY: SEC-OAUTH-084 (LOW) URL-encoding of clientId, clientSecret, and scope per
+        // Why: Request formatting handles client secrets that must be
+        // protected during transmission to the token endpoint.
         // RFC 6749 Section 2.3.1. This prevents injection of additional form parameters
         // via special characters in credentials. Without URL encoding, a clientId
         // containing "&scope=admin" could inject an admin scope.
         // according to RFC-6749 clientId & clientSecret must be urlencoded, see https://tools.ietf.org/html/rfc6749#section-2.3.1
-        // Exploit: Unauthorized access to the credential cache could expose authentication material.
-        // Improvement: Limit cache access to authenticated callers and consider cache entry encryption at rest.
+        // Exploit: Client secret exposure in the HTTP request body could
+        // occur if TLS is not enforced or if request logging is enabled.
+        // Improvement: Clear client secret from memory immediately after
+        // formatting the request to minimize secret exposure window.
         if (urlencode) {
             clientId = URLEncoder.encode(clientId, StandardCharsets.UTF_8);
             clientSecret = URLEncoder.encode(clientSecret, StandardCharsets.UTF_8);
@@ -98,7 +102,9 @@ public class ClientCredentialsRequestFormatter implements HttpRequestFormatter {
     @Override
     public Map<String, String> formatHeaders() {
         String s = String.format("%s:%s", clientId, clientSecret);
-        // SECURITY: (MEDIUM) Per RFC 7617 / KAFKA-14496, uses non-URL-safe Base64
+        // SECURITY: SEC-OAUTH-085 (MEDIUM) Per RFC 7617 / KAFKA-14496, uses non-URL-safe Base64
+        // Why: Request formatting handles client secrets that must be
+        // protected during transmission to the token endpoint.
         // encoder for the Basic Authorization header. The clientId:clientSecret string
         // is UTF-8 encoded then Base64 encoded. Note: Base64.getEncoder() (not
         // getUrlEncoder()) is used intentionally. The encoded string is prefixed with

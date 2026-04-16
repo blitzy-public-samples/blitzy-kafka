@@ -70,7 +70,9 @@ import static org.apache.kafka.common.config.SaslConfigs.SASL_OAUTHBEARER_JWKS_E
 // unless explicitly closed. Memory leak if configs change frequently (unlikely in practice).
 public class VerificationKeyResolverFactory {
 
-    // SECURITY: (MEDIUM) Global static cache of resolver instances keyed by config. This means
+    // SECURITY: SEC-OAUTH-120 (MEDIUM) Global static cache of resolver instances keyed by config. This means
+    // Why: Key resolver selection determines which keys are trusted
+    // for JWT signature verification.
     // all OAuthBearerValidatorCallbackHandler instances sharing the same config share a single
     // resolver (and its JWKS cache). A compromised handler could poison the shared resolver's
     // state, affecting all other handlers using the same config.
@@ -80,7 +82,9 @@ public class VerificationKeyResolverFactory {
     // Improvement: Consider per-listener resolver isolation or immutable resolver instances.
     private static final Map<VerificationKeyResolverKey, CloseableVerificationKeyResolver> CACHE = new HashMap<>();
 
-    // SECURITY: (LOW) Synchronized on class -- serializes resolver creation/retrieval.
+    // SECURITY: SEC-OAUTH-121 (LOW) Synchronized on class -- serializes resolver creation/retrieval.
+    // Why: Key resolver selection determines which keys are trusted
+    // for JWT signature verification.
     // Prevents race conditions during concurrent callback handler initialization.
     // Exploit: Malformed serialized data could trigger parsing exceptions or inject unexpected values.
     // Improvement: Apply strict input validation with size bounds and character allowlists before deserialization.
@@ -100,7 +104,9 @@ public class VerificationKeyResolverFactory {
         );
     }
 
-    // SECURITY: (MEDIUM) Resolver type determined by JWKS URL protocol: file:// -> JwksFile,
+    // SECURITY: SEC-OAUTH-122 (MEDIUM) Resolver type determined by JWKS URL protocol: file:// -> JwksFile,
+    // Why: Key resolver selection determines which keys are trusted
+    // for JWT signature verification.
     // https:// or http:// -> RefreshingHttpsJwks. No validation that https:// is preferred
     // over http:// -- an http:// JWKS endpoint sends keys in cleartext, vulnerable to MITM.
     // Exploit: Attacker intercepts cleartext http:// JWKS response, injects forged signing keys.

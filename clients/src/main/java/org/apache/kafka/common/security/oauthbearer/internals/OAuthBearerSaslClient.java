@@ -51,7 +51,7 @@ import javax.security.sasl.SaslException;
  *      Section 2.1</a>
  *
  */
-// SECURITY: (MEDIUM) Client-side SASL OAUTHBEARER implementation -- sends the bearer
+// SECURITY: SEC-OAUTH-050 (MEDIUM) Client-side SASL OAUTHBEARER implementation -- sends the bearer
 // token to the broker in the SASL client-first message.
 // Why: The token is transmitted as-is (Base64-encoded JWT) in the initial SASL message.
 // If the SASL layer is NOT wrapped in TLS, the token travels in cleartext over the network.
@@ -132,14 +132,18 @@ public class OAuthBearerSaslClient implements SaslClient {
             OAuthBearerTokenCallback callback = new OAuthBearerTokenCallback();
             switch (state) {
                 case SEND_CLIENT_FIRST_MESSAGE:
-                    // SECURITY: (MEDIUM) Token value obtained from Subject via callback, then
+                    // SECURITY: SEC-OAUTH-051 (MEDIUM) Token value obtained from Subject via callback, then
+                    // Why: The SASL client transmits bearer tokens during the
+                    // OAUTHBEARER authentication exchange.
                     // embedded in OAuthBearerClientInitialResponse and sent as bytes. The raw
                     // token string is briefly held in memory as part of the response byte
                     // array. After this point, the token is on the wire -- network security
                     // (TLS) is the only protection.
-                    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are
+                    // Exploit: A MITM could intercept the OAUTHBEARER SASL exchange
+                    // to capture the bearer token transmitted during authentication.
                     // leaked.
-                    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer
+                    // Improvement: Add channel binding to tie the SASL exchange
+                    // to the TLS session, preventing token interception.
                     // validation.
                     if (challenge != null && challenge.length != 0)
                         throw new SaslException("Expected empty challenge");
@@ -150,7 +154,9 @@ public class OAuthBearerSaslClient implements SaslClient {
 
                     return new OAuthBearerClientInitialResponse(callback.token().value(), extensions).toBytes();
                 case RECEIVE_SERVER_FIRST_MESSAGE:
-                    // SECURITY: (LOW) Server error response is JSON containing status, scope,
+                    // SECURITY: SEC-OAUTH-052 (LOW) Server error response is JSON containing status, scope,
+                    // Why: The SASL client transmits bearer tokens during the
+                    // OAUTHBEARER authentication exchange.
                     // and openid-configuration fields. The client logs this at DEBUG level --
                     // ensure DEBUG logging is not enabled in production as error details could
                     // reveal server config. The client responds with control-A (0x01) per
@@ -189,11 +195,15 @@ public class OAuthBearerSaslClient implements SaslClient {
         return state == State.COMPLETE;
     }
 
-    // SECURITY: (MEDIUM) OAUTHBEARER does NOT support SASL integrity or privacy layers.
+    // SECURITY: SEC-OAUTH-053 (MEDIUM) OAUTHBEARER does NOT support SASL integrity or privacy layers.
+    // Why: The SASL client transmits bearer tokens during the
+    // OAUTHBEARER authentication exchange.
     // wrap() and unwrap() throw IllegalStateException. This means the token exchange
     // has NO built-in replay protection or message integrity -- TLS MUST be used.
-    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+    // Exploit: A MITM could intercept the OAUTHBEARER SASL exchange
+    // to capture the bearer token transmitted during authentication.
+    // Improvement: Add channel binding to tie the SASL exchange
+    // to the TLS session, preventing token interception.
     @Override
     public byte[] unwrap(byte[] incoming, int offset, int len) {
         if (!isComplete())

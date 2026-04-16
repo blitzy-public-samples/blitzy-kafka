@@ -26,7 +26,7 @@ import javax.security.auth.Subject;
 import javax.security.auth.callback.CallbackHandler;
 import javax.security.auth.spi.LoginModule;
 
-// SECURITY: (MEDIUM) JAAS LoginModule for SCRAM authentication (SCRAM-SHA-256 and SCRAM-SHA-512).
+// SECURITY: SEC-SCRAM-013 (MEDIUM) JAAS LoginModule for SCRAM authentication (SCRAM-SHA-256 and SCRAM-SHA-512).
 // Why: This module registers JCA security providers and injects credentials into the JAAS Subject.
 // Credentials (username/password) are extracted from JAAS config options and stored in Subject
 // public/private credential sets -- these remain in memory for the JVM lifetime unless explicitly cleared.
@@ -61,7 +61,9 @@ public class ScramLoginModule implements LoginModule {
     // soon as the class is loaded by JAAS, before any SASL negotiation begins. This avoids
     // race conditions where a SASL mechanism is requested before providers are registered.
     //
-    // SECURITY: (MEDIUM) Static provider registration -- both SCRAM client and server providers
+    // SECURITY: SEC-SCRAM-014 (MEDIUM) Static provider registration -- both SCRAM client and server providers
+    // Why: The SCRAM login module handles credential injection and
+    // JAAS integration for SCRAM authentication.
     // are registered on class load. This is global JVM state. If provider registration order is
     // manipulated (e.g., a malicious provider with the same mechanism name registered earlier),
     // a weaker or compromised SCRAM implementation could be selected during SASL negotiation.
@@ -74,15 +76,21 @@ public class ScramLoginModule implements LoginModule {
 
     @Override
     public void initialize(Subject subject, CallbackHandler callbackHandler, Map<String, ?> sharedState, Map<String, ?> options) {
-        // SECURITY: (MEDIUM) Username extracted via unchecked cast from options Map. A ClassCastException
+        // SECURITY: SEC-SCRAM-015 (MEDIUM) Username extracted via unchecked cast from options Map. A ClassCastException
+        // Why: The SCRAM login module handles credential injection and
+        // JAAS integration for SCRAM authentication.
         // here would prevent authentication but is not handled gracefully. The username is added
         // to public credentials -- visible to any code with access to the Subject.
-        // Exploit: Unauthorized access to the credential cache could expose authentication material.
-        // Improvement: Limit cache access to authenticated callers and consider cache entry encryption at rest.
+        // Exploit: SCRAM credentials stored in JAAS options could leak
+        // through configuration dumps or process memory inspection.
+        // Improvement: Zero out credential arrays after JAAS login module
+        // processing to minimize credential lifetime in memory.
         String username = (String) options.get(USERNAME_CONFIG);
         if (username != null)
             subject.getPublicCredentials().add(username);
-        // SECURITY: (MEDIUM) Password added to Subject's private credentials as a String.
+        // SECURITY: SEC-SCRAM-016 (MEDIUM) Password added to Subject's private credentials as a String.
+        // Why: The SCRAM login module handles credential injection and
+        // JAAS integration for SCRAM authentication.
         // Strings are immutable and may be interned by the JVM, making them difficult to
         // erase from memory. A heap dump or memory scanner could extract the plaintext password.
         // Exploit: An attacker on the network can intercept all data including credentials in transit.
@@ -91,12 +99,16 @@ public class ScramLoginModule implements LoginModule {
         if (password != null)
             subject.getPrivateCredentials().add(password);
 
-        // SECURITY: (LOW) Token authentication flag -- when tokenauth=true, a SCRAM extensions
+        // SECURITY: SEC-SCRAM-017 (LOW) Token authentication flag -- when tokenauth=true, a SCRAM extensions
+        // Why: The SCRAM login module handles credential injection and
+        // JAAS integration for SCRAM authentication.
         // map is injected into public credentials. This signals ScramSaslClient to include
         // the tokenauth extension in the client-first message, triggering delegation token
         // credential lookup on the server side instead of regular SCRAM credentials.
-        // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-        // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+        // Exploit: SCRAM credentials stored in JAAS options could leak
+        // through configuration dumps or process memory inspection.
+        // Improvement: Clear credential options from JAAS config after
+        // extraction to prevent credentials lingering in the config map.
         boolean useTokenAuthentication = "true".equalsIgnoreCase((String) options.get(TOKEN_AUTH_CONFIG));
         if (useTokenAuthentication) {
             Map<String, String> scramExtensions = Collections.singletonMap(TOKEN_AUTH_CONFIG, "true");

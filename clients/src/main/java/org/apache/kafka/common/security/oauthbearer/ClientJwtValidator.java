@@ -66,7 +66,7 @@ import static org.apache.kafka.common.config.SaslConfigs.SASL_OAUTHBEARER_SUB_CL
  * parsing even in production, by design.
  */
 
-// SECURITY: (HIGH) Client-side JWT parsing — performs ONLY structural validation,
+// SECURITY: SEC-OAUTH-011 (HIGH) Client-side JWT parsing — performs ONLY structural validation,
 // NOT cryptographic signature verification. This is by design (broker does full
 // verification).
 // Why: Client-side validation is a lightweight sanity check before sending the
@@ -147,15 +147,19 @@ public class ClientJwtValidator implements JwtValidator {
         SerializedJwt serializedJwt = new SerializedJwt(accessToken);
         Map<String, Object> payload;
 
-        // SECURITY: (HIGH) Uses OAuthBearerUnsecuredJws.toMap() which performs
+        // SECURITY: SEC-OAUTH-012 (HIGH) Uses OAuthBearerUnsecuredJws.toMap() which performs
+        // Why: Client-side JWT validation ensures tokens from the
+        // authorization server meet security requirements.
         // Base64 decoding and JSON deserialization WITHOUT signature
         // verification. This means the token payload is parsed from
         // potentially untrusted data — malformed JSON or oversized payloads
         // could cause excessive memory allocation. The
         // OAuthBearerIllegalTokenException catches structural issues but not
         // resource exhaustion.
-        // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-        // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+        // Exploit: A manipulated JWT on the client side could bypass
+        // local claim validation and send requests with invalid identity.
+        // Improvement: Add strict clock skew limits and consider online
+        // token introspection for high-security deployments.
         try {
             payload = OAuthBearerUnsecuredJws.toMap(serializedJwt.getPayload());
         } catch (OAuthBearerIllegalTokenException e) {
@@ -165,11 +169,15 @@ public class ClientJwtValidator implements JwtValidator {
         Object scopeRaw = getClaim(payload, scopeClaimName);
         Collection<String> scopeRawCollection;
 
-        // SECURITY: (MEDIUM) Scope type coercion — same fail-closed pattern
+        // SECURITY: SEC-OAUTH-013 (MEDIUM) Scope type coercion — same fail-closed pattern
+        // Why: Client-side JWT validation ensures tokens from the
+        // authorization server meet security requirements.
         // as BrokerJwtValidator. Unexpected types default to empty set
         // (no scopes = restricted access).
-        // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-        // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+        // Exploit: A manipulated JWT on the client side could bypass
+        // local claim validation and send requests with invalid identity.
+        // Improvement: Add strict clock skew limits and consider online
+        // token introspection for high-security deployments.
         if (scopeRaw instanceof String)
             scopeRawCollection = Collections.singletonList((String) scopeRaw);
         else if (scopeRaw instanceof Collection)
@@ -182,12 +190,16 @@ public class ClientJwtValidator implements JwtValidator {
         Number issuedAtRaw = (Number) getClaim(payload, ISSUED_AT_CLAIM_NAME);
 
         Set<String> scopes = ClaimValidationUtils.validateScopes(scopeClaimName, scopeRawCollection);
-        // SECURITY: (LOW) Numeric claim values are multiplied by 1000L to
+        // SECURITY: SEC-OAUTH-014 (LOW) Numeric claim values are multiplied by 1000L to
+        // Why: Client-side JWT validation ensures tokens from the
+        // authorization server meet security requirements.
         // convert epoch seconds to milliseconds. Integer overflow is
         // theoretically possible for timestamps far in the future
         // (~year 292278994) but practically irrelevant for token lifetimes.
-        // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-        // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+        // Exploit: A manipulated JWT on the client side could bypass
+        // local claim validation and send requests with invalid identity.
+        // Improvement: Add strict clock skew limits and consider online
+        // token introspection for high-security deployments.
         long expiration = ClaimValidationUtils.validateExpiration(EXPIRATION_CLAIM_NAME,
             expirationRaw != null ? expirationRaw.longValue() * 1000L : null);
         String subject = ClaimValidationUtils.validateSubject(subClaimName, subRaw);

@@ -23,7 +23,7 @@ import java.security.NoSuchAlgorithmException;
 
 import javax.net.ssl.TrustManager;
 
-// SECURITY: (LOW) SSL engine factory that adds CN logging to TLS connections.
+// SECURITY: SEC-SSL-001 (LOW) SSL engine factory that adds CN logging to TLS connections.
 // Why: Extends DefaultSslEngineFactory to log the Common Name (CN) of client
 // certificates during TLS handshake via CommonNameLoggingTrustManagerFactoryWrapper.
 // This is useful for identifying misconfigured clients presenting expired certs.

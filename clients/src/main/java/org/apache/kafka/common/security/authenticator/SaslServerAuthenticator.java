@@ -110,7 +110,9 @@ import javax.security.sasl.SaslServer;
  * explicit and auditable. Risk: Complex state management with deferred transitions
  * (pendingSaslState) is error-prone.
  *
- * @implSpec SECURITY: (CRITICAL) Server-side SASL authentication state machine.
+ * @implSpec SECURITY: SEC-SASL-034 (CRITICAL) Server-side SASL authentication state machine.
+ * Why: The SASL server authenticator is the broker's primary
+ * authentication gatekeeper for all client connections.
  * This class processes untrusted network data from clients during authentication.
  * The SaslState FSM enforces that authentication proceeds through a strict sequence
  * of states; any deviation is a potential bypass vector. The state machine handles
@@ -142,7 +144,9 @@ public class SaslServerAuthenticator implements Authenticator {
      * state and likewise ends at either {@link #COMPLETE} or {@link #FAILED}.
      */
     /*
-     * SECURITY: (CRITICAL) The SaslState enum defines the server-side authentication
+     * SECURITY: SEC-SASL-035 (CRITICAL) The SaslState enum defines the server-side authentication
+     * Why: The SASL server authenticator is the broker's primary
+     * authentication gatekeeper for all client connections.
      * finite state machine. Each state represents a security boundary — transitioning
      * between states changes what requests the server will accept from the client.
      * A bug in state transition logic could allow an unauthenticated client to reach
@@ -239,7 +243,9 @@ public class SaslServerAuthenticator implements Authenticator {
         if (enabledMechanisms == null || enabledMechanisms.isEmpty())
             throw new IllegalArgumentException("No SASL mechanisms are enabled");
         this.enabledMechanisms = new ArrayList<>(new HashSet<>(enabledMechanisms));
-        // SECURITY: (HIGH) De-duplicating via HashSet prevents a mechanism from
+        // SECURITY: SEC-SASL-036 (HIGH) De-duplicating via HashSet prevents a mechanism from
+        // Why: The SASL server authenticator is the broker's primary
+        // authentication gatekeeper for all client connections.
         // appearing multiple times which could confuse callback handler selection.
         // Exploit: Duplicate mechanisms could cause the server to instantiate
         // multiple SaslServer instances for the same mechanism, wasting resources.
@@ -257,7 +263,9 @@ public class SaslServerAuthenticator implements Authenticator {
         // authenticator or the transport layer
         this.principalBuilder = ChannelBuilders.createPrincipalBuilder(configs, kerberosNameParser, null);
 
-        // SECURITY: (MEDIUM) saslAuthRequestMaxReceiveSize limits the maximum SASL
+        // SECURITY: SEC-SASL-037 (MEDIUM) saslAuthRequestMaxReceiveSize limits the maximum SASL
+        // Why: The SASL server authenticator is the broker's primary
+        // authentication gatekeeper for all client connections.
         // request payload to prevent memory exhaustion DoS. Default is 512KB.
         // Exploit: Without this limit, a malicious client could send multi-GB
         // payloads during SASL exchange to exhaust broker heap memory.
@@ -268,7 +276,9 @@ public class SaslServerAuthenticator implements Authenticator {
             saslAuthRequestMaxReceiveSize = BrokerSecurityConfigs.DEFAULT_SASL_SERVER_MAX_RECEIVE_SIZE;
     }
 
-    // SECURITY: (CRITICAL) SaslServer instantiation runs under the server's JAAS
+    // SECURITY: SEC-SASL-038 (CRITICAL) SaslServer instantiation runs under the server's JAAS
+    // Why: The SASL server authenticator is the broker's primary
+    // authentication gatekeeper for all client connections.
     // Subject via SecurityManagerCompatibility.callAs(). For GSSAPI, a separate
     // code path (createSaslKerberosServer) extracts the service principal from the
     // Subject. Exploit: If the Subject contains multiple principals, the wrong
@@ -339,7 +349,9 @@ public class SaslServerAuthenticator implements Authenticator {
      * paths: AuthenticationException deferred FAILED with response;
      * IOException/other immediate FAILED with throw.
      */
-    // SECURITY: (CRITICAL) Main authentication loop — processes raw network bytes
+    // SECURITY: SEC-SASL-039 (CRITICAL) Main authentication loop — processes raw network bytes
+    // Why: The SASL server authenticator is the broker's primary
+    // authentication gatekeeper for all client connections.
     // and dispatches to state-specific handlers. The @SuppressWarnings("fallthrough")
     // is intentional: there is NO fallthrough in this switch — each case either
     // calls a handler or throws. The catch blocks differentiate between
@@ -480,7 +492,9 @@ public class SaslServerAuthenticator implements Authenticator {
         setSaslState(saslState, null);
     }
 
-    // SECURITY: (HIGH) Deferred state transition — if there are pending network
+    // SECURITY: SEC-SASL-040 (HIGH) Deferred state transition — if there are pending network
+    // Why: The SASL server authenticator is the broker's primary
+    // authentication gatekeeper for all client connections.
     // writes (netOutBuffer not completed), state change is deferred to
     // pendingSaslState. This means the actual saslState may lag behind the logical
     // state, creating a window where the server is in a different state than
@@ -533,7 +547,9 @@ public class SaslServerAuthenticator implements Authenticator {
     }
 
     /*
-     * SECURITY: (CRITICAL) Processes SASL authentication tokens from the client.
+     * SECURITY: SEC-SASL-041 (CRITICAL) Processes SASL authentication tokens from the client.
+     * Why: The SASL server authenticator is the broker's primary
+     * authentication gatekeeper for all client connections.
      * Two code paths: (1) Legacy raw token (enableKafkaSaslAuthenticateHeaders
      * =false): evaluateResponse directly on raw bytes, (2) Modern Kafka-framed:
      * parses SaslAuthenticateRequest header, validates API key, then
@@ -636,7 +652,9 @@ public class SaslServerAuthenticator implements Authenticator {
     }
 
     /*
-     * SECURITY: (HIGH) Processes Kafka protocol requests during the handshake
+     * SECURITY: SEC-SASL-042 (HIGH) Processes Kafka protocol requests during the handshake
+     * Why: The SASL server authenticator is the broker's primary
+     * authentication gatekeeper for all client connections.
      * phase. Only API_VERSIONS and SASL_HANDSHAKE requests are accepted; all
      * other API keys are rejected with InvalidRequestException. Exploit: A client
      * could send valid Kafka API requests (e.g., Produce, Fetch) during the
@@ -770,7 +788,9 @@ public class SaslServerAuthenticator implements Authenticator {
         flushNetOutBufferAndUpdateInterestOps();
     }
 
-    // SECURITY: (HIGH) Re-authentication state tracking. The
+    // SECURITY: SEC-SASL-043 (HIGH) Re-authentication state tracking. The
+    // Why: The SASL server authenticator is the broker's primary
+    // authentication gatekeeper for all client connections.
     // ensurePrincipalUnchanged() method prevents identity switching during
     // re-authentication. The saslMechanismUnchanged() method prevents mechanism
     // downgrade (e.g., switching from SCRAM-SHA-512 to PLAIN).
@@ -831,7 +851,9 @@ public class SaslServerAuthenticator implements Authenticator {
             return false;
         }
 
-        // SECURITY: (MEDIUM) Session lifetime calculation uses the minimum of
+        // SECURITY: SEC-SASL-044 (MEDIUM) Session lifetime calculation uses the minimum of
+        // Why: The SASL server authenticator is the broker's primary
+        // authentication gatekeeper for all client connections.
         // broker-configured max reauth time and credential expiration. If both are
         // unset, no session expiration occurs — connections persist indefinitely.
         // Exploit: Compromised credentials remain valid on existing connections

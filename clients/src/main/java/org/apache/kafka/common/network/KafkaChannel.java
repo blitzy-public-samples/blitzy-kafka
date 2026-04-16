@@ -64,7 +64,9 @@ import java.util.function.Supplier;
  * to memory pressure or other reasons</li>
  * </ul>
  */
-// SECURITY: (HIGH) Represents a single authenticated Kafka connection with transport-layer
+// SECURITY: SEC-NET-006 (HIGH) Represents a single authenticated Kafka connection with transport-layer
+// Why: Kafka channel manages connection lifecycle including
+// authentication state and ready/mute transitions.
 // encryption and SASL/SSL authentication. This class manages the authentication lifecycle
 // (handshake → authenticate → ready → re-authenticate), mute/unmute flow control, and
 // send/receive I/O. A channel that completes transport handshake but fails authentication
@@ -203,7 +205,9 @@ public class KafkaChannel implements AutoCloseable {
      * For SSL with client authentication enabled, {@link TransportLayer#handshake()} performs
      * authentication. For SASL, authentication is performed by {@link Authenticator#authenticate()}.
      */
-    // SECURITY: (HIGH) Drives the two-phase authentication: first TransportLayer handshake
+    // SECURITY: SEC-NET-007 (HIGH) Drives the two-phase authentication: first TransportLayer handshake
+    // Why: Kafka channel manages connection lifecycle including
+    // authentication state and ready/mute transitions.
     // (SSL/TLS), then Authenticator.authenticate() (SASL). Authentication failures are wrapped
     // in DelayedResponseAuthenticationException to trigger Selector's delayed-close logic,
     // preventing timing-based credential probing.
@@ -365,7 +369,9 @@ public class KafkaChannel implements AutoCloseable {
      * Delay channel close on authentication failure. This will remove all read/write operations from the channel until
      * {@link #completeCloseOnAuthenticationFailure()} is called to finish up the channel close.
      */
-    // SECURITY: (MEDIUM) Removes OP_WRITE interest to pause I/O while the authentication failure
+    // SECURITY: SEC-NET-008 (MEDIUM) Removes OP_WRITE interest to pause I/O while the authentication failure
+    // Why: Kafka channel manages connection lifecycle including
+    // authentication state and ready/mute transitions.
     // response is prepared. The channel remains open in a quiescent state until
     // completeCloseOnAuthenticationFailure() re-adds OP_WRITE to flush the error response.
     // Exploit: If completeCloseOnAuthenticationFailure() is never called due to a bug,
@@ -589,7 +595,9 @@ public class KafkaChannel implements AutoCloseable {
      * @throws IllegalStateException
      *             if this channel is not "ready"
      */
-    // SECURITY: (HIGH) Server-side re-authentication enforces a minimum 1-second interval between
+    // SECURITY: SEC-NET-009 (HIGH) Server-side re-authentication enforces a minimum 1-second interval between
+    // Why: Kafka channel manages connection lifecycle including
+    // authentication state and ready/mute transitions.
     // re-auth attempts to prevent a client from overwhelming the broker with rapid re-authentication
     // requests that consume CPU for SASL computation. The session expiration time check ensures
     // re-auth is only triggered for sessions that support it.

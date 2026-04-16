@@ -45,7 +45,7 @@ import javax.security.sasl.SaslServerFactory;
  * servers in production systems, this module can be replaced with a different implementation.
  *
  */
-// SECURITY: (CRITICAL) SASL/PLAIN transmits credentials in CLEARTEXT at the SASL layer.
+// SECURITY: SEC-PLAIN-005 (CRITICAL) SASL/PLAIN transmits credentials in CLEARTEXT at the SASL layer.
 // Why: PLAIN mechanism sends username and password as Base64-encoded bytes with no encryption
 // at the SASL layer itself. Authentication relies entirely on transport layer (TLS) for
 // confidentiality. Per RFC 4616, PLAIN MUST NOT be used without adequate data security.
@@ -91,7 +91,7 @@ public class PlainSaslServer implements SaslServer {
     // Key paths: Success -> sets authorizationId and complete=true, returns empty byte[];
     // Failure -> throws SaslAuthenticationException at 4 distinct validation points.
     //
-    // SECURITY: (HIGH) Parses raw bytes from untrusted client into credential tokens.
+    // SECURITY: SEC-PLAIN-006 (HIGH) Parses raw bytes from untrusted client into credential tokens.
     // Why: The NUL-delimited format (authzid NUL authcid NUL passwd per RFC 4616) is parsed from
     // raw bytes. Malformed messages could cause unexpected token extraction.
     // Exploit: A client could send a message with extra NUL bytes to attempt unexpected parsing.
@@ -150,7 +150,7 @@ public class PlainSaslServer implements SaslServer {
         return new byte[0];
     }
 
-    // SECURITY: (MEDIUM) Input validation for NUL-delimited SASL/PLAIN message format.
+    // SECURITY: SEC-PLAIN-007 (MEDIUM) Input validation for NUL-delimited SASL/PLAIN message format.
     // Why: Parses untrusted client input -- malformed NUL sequences could yield wrong token count.
     // The method enforces exactly 3 tokens, rejecting messages with fewer or more segments.
     // Exploit: Without the token-count check, extra NUL bytes could cause index confusion.
@@ -222,7 +222,9 @@ public class PlainSaslServer implements SaslServer {
     public void dispose() {
     }
 
-    // SECURITY: (LOW) Factory respects Sasl.POLICY_NOPLAINTEXT property to suppress PLAIN in
+    // SECURITY: SEC-PLAIN-008 (LOW) Factory respects Sasl.POLICY_NOPLAINTEXT property to suppress PLAIN in
+    // Why: PLAIN mechanism handles cleartext credentials that have
+    // no cryptographic protection.
     // policy-restricted environments. getMechanismNames() returns empty array when NOPLAINTEXT
     // is set, preventing PLAIN from being offered during SASL mechanism negotiation.
     // Exploit: An attacker on the network can intercept all data including credentials in transit.

@@ -25,7 +25,7 @@ import java.util.regex.Pattern;
 
 import static org.apache.kafka.common.config.internals.BrokerSecurityConfigs.DEFAULT_SSL_PRINCIPAL_MAPPING_RULES;
 
-// SECURITY: (MEDIUM) Maps X.509 Distinguished Names (DNs) to Kafka principal names using
+// SECURITY: SEC-SSL-016 (MEDIUM) Maps X.509 Distinguished Names (DNs) to Kafka principal names using
 // configurable regex rules. This is a critical component in the SSL authentication pipeline
 // that determines the identity used for all subsequent ACL evaluations.
 // Why: The regex-based mapping rules are configured via ssl.principal.mapping.rules and
@@ -53,7 +53,9 @@ public class SslPrincipalMapper {
     // Contract: Thread-safe after construction (all state is immutable). The getName() method
     // may be called concurrently from multiple authentication threads.
 
-    // SECURITY: (LOW) Compiled regex patterns for rule parsing. These patterns are applied to
+    // SECURITY: SEC-SSL-017 (LOW) Compiled regex patterns for rule parsing. These patterns are applied to
+    // Why: DN-to-principal mapping determines the authenticated
+    // identity extracted from client TLS certificates.
     // the rule configuration string, not to client-supplied DNs. The DN matching uses the
     // per-rule regex pattern (compiled in Rule constructor). RULE_PATTERN handles the
     // DEFAULT|RULE:pattern/replacement/flags syntax with escaped delimiters.
@@ -114,13 +116,17 @@ public class SslPrincipalMapper {
         return result;
     }
 
-    // SECURITY: (MEDIUM) Main entry point for DN-to-principal mapping. The resulting principal
+    // SECURITY: SEC-SSL-018 (MEDIUM) Main entry point for DN-to-principal mapping. The resulting principal
+    // Why: DN-to-principal mapping determines the authenticated
+    // identity extracted from client TLS certificates.
     // name is used as the KafkaPrincipal identity for ALL authorization decisions. An incorrect
     // mapping (due to misconfigured rules or regex edge cases) could grant a client the
     // permissions of a different principal. Throws NoMatchingRule if no rule matches -- this
     // fails-closed, preventing unauthenticated access when rules are misconfigured.
-    // Exploit: A malicious client could send crafted packets to manipulate state transitions and bypass authentication.
-    // Improvement: Add state transition validation to reject unexpected state changes.
+    // Exploit: A crafted certificate DN could exploit regex patterns in
+    // the mapping rules to map to an unintended privileged principal.
+    // Improvement: Add input length limits and regex timeout to
+    // prevent ReDoS attacks through crafted certificate DNs.
     public String getName(String distinguishedName) throws IOException {
         for (Rule r : rules) {
             String principalName = r.apply(distinguishedName);

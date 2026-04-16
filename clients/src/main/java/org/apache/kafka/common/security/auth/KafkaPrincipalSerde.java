@@ -22,7 +22,7 @@ import org.apache.kafka.common.errors.SerializationException;
  * Serializer/Deserializer interface for {@link KafkaPrincipal} for the purpose of inter-broker forwarding.
  * Any serialization/deserialization failure should raise a {@link SerializationException} to be consistent.
  */
-// SECURITY: (MEDIUM) Principal serialization/deserialization for inter-broker forwarding.
+// SECURITY: SEC-AUTH-004 (MEDIUM) Principal serialization/deserialization for inter-broker forwarding.
 // Why: When a broker forwards a request to the controller (e.g., CreateTopics to the active
 // controller), the client's KafkaPrincipal must be serialized, transmitted over the network,
 // and deserialized at the destination with fidelity. The deserialized principal is used for

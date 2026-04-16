@@ -111,7 +111,7 @@ import static org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginCallb
  * ClientCredentialsRequestFormatter) from HTTP transport (HttpJwtRetriever), enabling independent
  * testing and reuse. HttpJwtRetriever handles SSL, retry, and connection management.
  */
-// SECURITY: (HIGH) OAuth client_credentials grant flow — sends clientId and clientSecret
+// SECURITY: SEC-OAUTH-007 (HIGH) OAuth client_credentials grant flow — sends clientId and clientSecret
 // to the token endpoint over HTTPS to obtain a JWT access token.
 // Why: This class handles the most sensitive credentials in the OAUTHBEARER flow —
 // the client_id and client_secret are transmitted to the OAuth provider.
@@ -181,13 +181,17 @@ public class ClientCredentialsJwtRetriever implements JwtRetriever {
      * This utility method ensures that we have a non-{@code null} value to use in the
      * {@link HttpJwtRetriever} constructor.
      */
-    // SECURITY: (LOW) URL encoding of Authorization header. When urlencodeHeader=true,
+    // SECURITY: SEC-OAUTH-008 (LOW) URL encoding of Authorization header. When urlencodeHeader=true,
+    // Why: Client credentials retrieval handles client_secret
+    // transmission to the authorization server.
     // client_id and client_secret are URL-encoded before base64 encoding for the
     // Authorization: Basic header per RFC-6749 Section 2.3.1. This prevents special
     // characters in credentials from breaking HTTP header parsing on the OAuth provider
     // side and ensures interoperability with strict RFC-compliant providers.
-    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+    // Exploit: Client credentials (client_id/client_secret) in the HTTP
+    // request could be intercepted if TLS is not enforced to the token endpoint.
+    // Improvement: Enforce TLS certificate pinning on token endpoint
+    // connections to prevent MITM-based token interception.
     static boolean validateUrlencodeHeader(ConfigurationUtils configurationUtils) {
         Boolean urlencodeHeader = configurationUtils.get(SASL_OAUTHBEARER_HEADER_URLENCODE);
         return Objects.requireNonNullElse(urlencodeHeader, DEFAULT_SASL_OAUTHBEARER_HEADER_URLENCODE);
@@ -222,7 +226,9 @@ public class ClientCredentialsJwtRetriever implements JwtRetriever {
             );
         }
 
-        // SECURITY: (HIGH) Client secret retrieved via cu.validatePassword() (Password type,
+        // SECURITY: SEC-OAUTH-009 (HIGH) Client secret retrieved via cu.validatePassword() (Password type,
+        // Why: Client credentials retrieval handles client_secret
+        // transmission to the authorization server.
         // masked in toString) from config, or via jou.validateString() (plain String, visible
         // in toString) from JAAS options. The JAAS path exposes the secret in memory as a
         // plain String which cannot be reliably zeroed after use. Prefer the config path.
@@ -262,7 +268,9 @@ public class ClientCredentialsJwtRetriever implements JwtRetriever {
             boolean isPresentInConfig = cu.containsKey(configName);
             boolean isPresentInJaas = jou.containsKey(jaasName);
 
-            // SECURITY: (MEDIUM) Logging deprecation warnings — LOG.warn() messages include
+            // SECURITY: SEC-OAUTH-010 (MEDIUM) Logging deprecation warnings — LOG.warn() messages include
+            // Why: Client credentials retrieval handles client_secret
+            // transmission to the authorization server.
             // the config key names but NOT the values. This is correct — secret values must
             // never be logged. The warning helps operators migrate from less secure JAAS
             // options to config properties (Password-typed, masked in toString).

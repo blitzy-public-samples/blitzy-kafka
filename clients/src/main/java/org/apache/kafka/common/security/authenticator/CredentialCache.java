@@ -21,7 +21,7 @@ import java.util.concurrent.ConcurrentHashMap;
 /**
  * Thread-safe, typed in-memory credential registry for SASL mechanism credentials.
  *
- * @implSpec SECURITY: (MEDIUM) In-memory credential storage using ConcurrentHashMap.
+ * @implSpec SECURITY: SEC-SASL-004 (MEDIUM) In-memory credential storage using ConcurrentHashMap.
  * Why: Stores SCRAM/token credentials keyed by username. Credentials include SCRAM
  * salted password hashes (ScramCredential) and delegation token HMAC secrets.
  * Exploit: (1) Cache poisoning -- if a concurrent credential update races with
@@ -57,11 +57,15 @@ public class CredentialCache {
 
     private final ConcurrentHashMap<String, Cache<?>> cacheMap = new ConcurrentHashMap<>();
 
-    // SECURITY: (LOW) putIfAbsent ensures only one Cache instance per mechanism,
+    // SECURITY: SEC-SASL-005 (LOW) putIfAbsent ensures only one Cache instance per mechanism,
+    // Why: The credential cache holds authentication material in memory
+    // that, if leaked, enables impersonation.
     // preventing mechanism confusion where credentials for SCRAM-SHA-256 are
     // accidentally accessible via the SCRAM-SHA-512 mechanism name.
-    // Exploit: Unauthorized access to the credential cache could expose authentication material.
-    // Improvement: Limit cache access to authenticated callers and consider cache entry encryption at rest.
+    // Exploit: A compromised broker plugin could read SCRAM credentials from
+    // the cache and use them for offline brute-force attacks.
+    // Improvement: Add access auditing to credential cache operations
+    // and consider credential encryption at rest in memory.
     public <C> Cache<C> createCache(String mechanism, Class<C> credentialClass) {
         Cache<C> cache = new Cache<>(credentialClass);
         @SuppressWarnings("unchecked")
@@ -69,11 +73,15 @@ public class CredentialCache {
         return oldCache == null ? cache : oldCache;
     }
 
-    // SECURITY: (LOW) Runtime type validation prevents type confusion where a
+    // SECURITY: SEC-SASL-006 (LOW) Runtime type validation prevents type confusion where a
+    // Why: The credential cache holds authentication material in memory
+    // that, if leaked, enables impersonation.
     // Cache<ScramCredential> could be retrieved as Cache<DelegationTokenData>.
     // This ensures mechanism-level credential isolation at the type system level.
-    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+    // Exploit: A compromised broker plugin could read SCRAM credentials from
+    // the cache and use them for offline brute-force attacks.
+    // Improvement: Add access auditing to credential cache operations
+    // and consider credential encryption at rest in memory.
     @SuppressWarnings("unchecked")
     public <C> Cache<C> cache(String mechanism, Class<C> credentialClass) {
         Cache<?> cache = cacheMap.get(mechanism);
@@ -85,7 +93,9 @@ public class CredentialCache {
             return null;
     }
 
-    // SECURITY: (MEDIUM) Per-mechanism credential storage. The ConcurrentHashMap
+    // SECURITY: SEC-SASL-007 (MEDIUM) Per-mechanism credential storage. The ConcurrentHashMap
+    // Why: The credential cache holds authentication material in memory
+    // that, if leaked, enables impersonation.
     // provides thread-safe read/write but individual operations are NOT transactional.
     // A put() followed by a separate authorization check is NOT atomic -- credentials
     // could be read between update and authorization, creating a TOCTOU race.
@@ -94,8 +104,8 @@ public class CredentialCache {
     // validation. Alternative: Separate classes per credential type. Rationale:
     // Generics enable a single cache implementation for all SASL mechanisms while
     // the credentialClass field enables safe downcasting in cache() method.
-    // Exploit: Unauthorized access to the credential cache could expose authentication material.
-    // Improvement: Limit cache access to authenticated callers and consider cache entry encryption at rest.
+    // Exploit: A compromised broker plugin could read SCRAM credentials from the cache for offline brute-force attacks.
+    // Improvement: Add access auditing to credential cache operations and consider credential encryption at rest in ...
     public static class Cache<C> {
         private final Class<C> credentialClass;
         private final ConcurrentHashMap<String, C> credentials;

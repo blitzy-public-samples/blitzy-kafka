@@ -32,7 +32,7 @@ import java.util.Properties;
  * </pre>
  *
  */
-// SECURITY: (MEDIUM) Credential serialization/deserialization for SCRAM credential persistence.
+// SECURITY: SEC-SCRAM-018 (MEDIUM) Credential serialization/deserialization for SCRAM credential persistence.
 // Why: This utility serializes ScramCredential (salt, storedKey, serverKey, iterations) to a
 // comma-delimited string format for storage in ZooKeeper or KRaft metadata records. The
 // serialized format contains security-sensitive derived cryptographic material.
@@ -74,11 +74,15 @@ public final class ScramCredentialUtils {
 
     private ScramCredentialUtils() {}
 
-    // SECURITY: (HIGH) Serializes raw credential bytes as Base64. The output string contains storedKey
+    // SECURITY: SEC-SCRAM-019 (HIGH) Serializes raw credential bytes as Base64. The output string contains storedKey
+    // Why: SCRAM credentials contain derived key material that
+    // enables offline attacks if exposed.
     // and serverKey which are security-sensitive -- serverKey enables server impersonation.
     // This string should be stored in access-controlled storage (ZooKeeper ACLs or KRaft metadata).
-    // Exploit: Unauthorized access to the credential cache could expose authentication material.
-    // Improvement: Limit cache access to authenticated callers and consider cache entry encryption at rest.
+    // Exploit: External mutation of the returned byte[] reference could
+    // corrupt the stored credential, causing authentication failures.
+    // Improvement: Encrypt SCRAM credential bytes during storage and
+    // add integrity verification on deserialization.
     public static String credentialToString(ScramCredential credential) {
         return String.format("%s=%s,%s=%s,%s=%s,%s=%d",
                SALT,
@@ -91,12 +95,17 @@ public final class ScramCredentialUtils {
                credential.iterations());
     }
 
-    // SECURITY: (MEDIUM) Deserialization performs size check (exactly 4 properties) and key presence check,
+    // SECURITY: SEC-SCRAM-020 (MEDIUM) Deserialization performs
+    // size check (exactly 4 properties) and key presence check,
+    // Why: SCRAM credentials contain derived key material that
+    // enables offline attacks if exposed.
     // but does NOT validate: (1) byte array lengths (salt, storedKey, serverKey could be empty),
     // (2) iteration count bounds (could be 0, negative, or extremely large), (3) Base64 validity
     // (invalid Base64 throws IllegalArgumentException from Base64.getDecoder().decode()).
-    // Exploit: A caller retaining a reference could modify credential bytes in-place, corrupting shared state.
-    // Improvement: Return defensive copies of sensitive byte arrays via Arrays.copyOf().
+    // Exploit: External mutation of the returned byte[] reference could
+    // corrupt the stored credential, causing authentication failures.
+    // Improvement: Return Arrays.copyOf() for salt, storedKey, and
+    // serverKey accessors to prevent external credential mutation.
     public static ScramCredential credentialFromString(String str) {
         Properties props = toProps(str);
         if (props.size() != 4 || !props.containsKey(SALT) || !props.containsKey(STORED_KEY) ||

@@ -26,7 +26,7 @@ import javax.security.auth.callback.Callback;
  * Optional callback used for SCRAM mechanisms if any extensions need to be set
  * in the SASL/SCRAM exchange.
  */
-// SECURITY: (LOW) JAAS Callback for SCRAM protocol extensions (RFC 5802 extensions).
+// SECURITY: SEC-SCRAM-011 (LOW) JAAS Callback for SCRAM protocol extensions (RFC 5802 extensions).
 // Why: Extensions are included in the client-first SCRAM message and are visible to
 // the server. Currently used for delegation token authentication signaling (tokenauth=true).
 // Exploit: If an attacker can inject arbitrary extensions into the SCRAM client-first
@@ -62,7 +62,9 @@ public class ScramExtensionsCallback implements Callback {
     /**
      * Sets the SCRAM extensions on this callback. Maps passed in should be unmodifiable
      */
-    // SECURITY: (MEDIUM) No validation on extension keys or values. Javadoc states maps should be
+    // SECURITY: SEC-SCRAM-012 (MEDIUM) No validation on extension keys or values. Javadoc states maps should be
+    // Why: SCRAM extensions carry authentication metadata that could
+    // influence the challenge-response exchange.
     // unmodifiable, but this is not enforced — a mutable map could be modified after being
     // set, changing the SCRAM message content mid-authentication.
     // Exploit: Malicious extensions or callback values could inject unexpected behavior into the auth flow.

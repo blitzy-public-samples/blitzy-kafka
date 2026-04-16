@@ -23,7 +23,7 @@ import org.apache.kafka.common.utils.Utils;
 import java.util.Collections;
 import java.util.Map;
 
-// SECURITY: (LOW) SCRAM protocol extensions wrapper for delegation token support.
+// SECURITY: SEC-SCRAM-021 (LOW) SCRAM protocol extensions wrapper for delegation token support.
 // Why: Extensions are included in the SCRAM client-first message and are visible to the server.
 // The primary extension is "tokenauth=true" which switches the server to delegation token
 // credential lookup instead of regular SCRAM credentials.
@@ -48,7 +48,9 @@ public class ScramExtensions extends SaslExtensions {
         this(Collections.emptyMap());
     }
 
-    // SECURITY: (MEDIUM) Parses extension string using Utils.parseMap() with "=" key-value separator
+    // SECURITY: SEC-SCRAM-022 (MEDIUM) Parses extension string using Utils.parseMap() with "=" key-value separator
+    // Why: SCRAM extensions carry authentication metadata that could
+    // influence the challenge-response exchange.
     // and "," pair separator. No validation on extension keys or values -- arbitrary extensions
     // can be passed through to the server.
     // Exploit: Malformed serialized data could trigger parsing exceptions or inject unexpected values.
@@ -61,12 +63,16 @@ public class ScramExtensions extends SaslExtensions {
         super(extensionMap);
     }
 
-    // SECURITY: (MEDIUM) Checks if the "tokenauth" extension is set to "true". This single boolean flag
+    // SECURITY: SEC-SCRAM-023 (MEDIUM) Checks if the "tokenauth" extension is set to "true". This single boolean flag
+    // Why: SCRAM extensions carry authentication metadata that could
+    // influence the challenge-response exchange.
     // controls the entire credential dispatch path in ScramSaslServer (line 112 in that file).
     // The value is parsed from the extension map using Boolean.parseBoolean(), which returns
     // false for any value other than case-insensitive "true" -- this is safe default behavior.
-    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+    // Exploit: Injection of malicious SCRAM extensions could alter
+    // authentication parameters or bypass server-side validation.
+    // Improvement: Add strict validation of extension keys and values
+    // to reject injection attempts in SCRAM extensions.
     public boolean tokenAuthenticated() {
         return Boolean.parseBoolean(map().get(ScramLoginModule.TOKEN_AUTH_CONFIG));
     }

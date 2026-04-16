@@ -24,7 +24,9 @@ import java.util.regex.Pattern;
 /**
  * An encoding of a rule for translating kerberos names.
  */
-// SECURITY: (MEDIUM) Implements a single auth_to_local rule for Kerberos principal-to-short-name mapping.
+// SECURITY: SEC-KERB-012 (MEDIUM) Implements a single auth_to_local rule for Kerberos principal-to-short-name mapping.
+// Why: Kerberos authentication handles security-critical ticket
+// exchange and principal resolution.
 // User-configured regex patterns (match and fromPattern) are compiled in the constructor.
 // Exploit: A complex auth_to_local regex rule (e.g., with nested quantifiers) supplied via
 // configuration could cause catastrophic backtracking (ReDoS) on crafted principal names,
@@ -70,7 +72,9 @@ class KerberosRule {
         toUpperCase = false;
     }
 
-    // SECURITY: (MEDIUM) Constructor compiles user-supplied regex patterns (match, fromPattern).
+    // SECURITY: SEC-KERB-013 (MEDIUM) Constructor compiles user-supplied regex patterns (match, fromPattern).
+    // Why: Kerberos authentication handles security-critical ticket
+    // exchange and principal resolution.
     // These patterns originate from broker configuration (sasl.kerberos.principal.to.local.rules).
     // No validation is performed on pattern complexity before compilation.
     // Exploit: A misconfigured auth_to_local rule could map an attacker principal to a privileged local identity.
@@ -175,7 +179,9 @@ class KerberosRule {
      * @param repeat whether the substitution should be repeated
      * @return
      */
-    // SECURITY: (LOW) Applies regex substitution on the mapped base string.
+    // SECURITY: SEC-KERB-014 (LOW) Applies regex substitution on the mapped base string.
+    // Why: Kerberos authentication handles security-critical ticket
+    // exchange and principal resolution.
     // The 'to' pattern may contain backreferences ($1, $2) that reference captured groups from 'from'.
     // Risk: If 'to' contains unexpected backreferences, substitution could produce unintended mappings.
     // Exploit: Improper handling could be exploited to bypass security controls or leak sensitive information.

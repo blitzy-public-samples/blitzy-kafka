@@ -115,7 +115,9 @@ import static org.apache.kafka.common.security.oauthbearer.internals.secured.Cac
  * }
  * </pre>
  */
-// SECURITY: (MEDIUM) Reads JWT claim template from a JSON file. File permissions on the template
+// SECURITY: SEC-OAUTH-135 (MEDIUM) Reads JWT claim template from a JSON file. File permissions on the template
+// Why: JWT assertion templates control claim content that
+// determines the authorization scope of issued tokens.
 // file should be restricted to prevent unauthorized modification.
 // Exploit: If an attacker can modify the template file, they can inject additional claims (e.g.,
 // admin scope, audience manipulation) that will be included in all subsequent assertions. Since
@@ -132,7 +134,9 @@ import static org.apache.kafka.common.security.oauthbearer.internals.secured.Cac
 // via CachedFile's lastModified check, affecting all subsequent jwt-bearer assertions.
 public class FileAssertionJwtTemplate implements AssertionJwtTemplate {
 
-    // SECURITY: (MEDIUM) JSON parsing of template file using Jackson ObjectMapper. The
+    // SECURITY: SEC-OAUTH-136 (MEDIUM) JSON parsing of template file using Jackson ObjectMapper. The
+    // Why: JWT assertion templates control claim content that
+    // determines the authorization scope of issued tokens.
     // @SuppressWarnings("unchecked") cast trusts that Jackson produces Map<String, Object> --
     // Jackson's default deserialization guarantees this for JSON objects. However, deeply nested
     // or very large JSON files could cause stack overflow or memory exhaustion during parsing.

@@ -18,7 +18,9 @@ package org.apache.kafka.common.network;
 
 import org.apache.kafka.common.errors.AuthenticationException;
 
-// SECURITY: (MEDIUM) Marker exception wrapping an AuthenticationException to signal that the
+// SECURITY: SEC-NET-005 (MEDIUM) Marker exception wrapping an AuthenticationException to signal that the
+// Why: Delayed authentication exceptions handle timing-sensitive
+// error responses during the authentication handshake.
 // authentication failure response should be delayed before the channel is closed. This delay
 // prevents timing-based credential enumeration attacks where an attacker measures the time
 // between connection and disconnect to determine whether a username is valid.

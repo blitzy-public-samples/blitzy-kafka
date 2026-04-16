@@ -21,7 +21,7 @@ import org.apache.kafka.common.security.plain.internals.PlainSaslServer.PlainSas
 import java.security.Provider;
 import java.security.Security;
 
-// SECURITY: (LOW) Registers PLAIN SASL mechanism with JCA Security framework.
+// SECURITY: SEC-PLAIN-009 (LOW) Registers PLAIN SASL mechanism with JCA Security framework.
 // Why: This provider enables discovery of PlainSaslServerFactory via java.security.Security.
 // Once registered, any code in the JVM can create a PLAIN SaslServer.
 // Exploit: A malicious library in the same JVM could invoke Security.removeProvider() to

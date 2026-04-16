@@ -43,7 +43,9 @@ import java.util.Set;
  *
  * @see <a href="https://tools.ietf.org/html/rfc7515">RFC 7515</a>
  */
-// SECURITY: (CRITICAL) DEVELOPMENT ONLY — NO PRODUCTION USE.
+// SECURITY: SEC-OAUTH-137 (CRITICAL) DEVELOPMENT ONLY — NO PRODUCTION USE.
+// Why: Unsecured token handling has ZERO cryptographic protection
+// and must never be used in production.
 // This unsecured implementation accepts tokens without signature verification.
 // A bad actor can forge any token with arbitrary claims (scope, subject, expiry).
 // Using this in production allows complete authentication bypass.
@@ -66,7 +68,7 @@ import java.util.Set;
 // consistent, validated values. Claims map is immutable. Scope is immutable.
 // Impact: The toMap() method is used by production code (ClientJwtValidator) —
 // changes to its parsing behavior affect secured token validation as well.
-// Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+// Exploit: CRITICAL -- unsecured JWS tokens have no signature; any attacker can forge tokens with arbitrary claims.
 public class OAuthBearerUnsecuredJws implements OAuthBearerToken {
     private final String compactSerialization;
     private final List<String> splits;
@@ -98,7 +100,7 @@ public class OAuthBearerUnsecuredJws implements OAuthBearerToken {
      */
     public OAuthBearerUnsecuredJws(String compactSerialization, String principalClaimName, String scopeClaimName)
             throws OAuthBearerIllegalTokenException {
-        // SECURITY: (CRITICAL) Parses JWT compact serialization WITHOUT any
+        // SECURITY: SEC-OAUTH-138 (CRITICAL) Parses JWT compact serialization WITHOUT any
         // signature verification. Validates structural integrity only: (1) no
         // ".." sequences, (2) exactly 3 dot-separated Base64URL segments, (3)
         // header alg must be "none", (4) signature segment must be empty.
@@ -327,7 +329,7 @@ public class OAuthBearerUnsecuredJws implements OAuthBearerToken {
      * @throws OAuthBearerIllegalTokenException
      *             if the given Base64URL-encoded value cannot be decoded or parsed
      */
-    // SECURITY: (HIGH) Decodes Base64URL segment and parses as JSON via
+    // SECURITY: SEC-OAUTH-139 (HIGH) Decodes Base64URL segment and parses as JSON via
     // Jackson ObjectMapper. Processes untrusted input — the Base64URL-encoded
     // token segments come directly from the network (via the SASL exchange).
     // Why: This method is public and static, callable from anywhere to decode

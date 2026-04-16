@@ -62,7 +62,9 @@ public class NetworkReceive implements Receive {
     // protocol's big-endian int32 length prefix. Allocated eagerly in every
     // constructor because every receive must read the size prefix first.
     private final ByteBuffer size;
-    // SECURITY: (MEDIUM) maxSize limits the maximum allowed receive size to
+    // SECURITY: SEC-NET-010 (MEDIUM) maxSize limits the maximum allowed receive size to
+    // Why: Network receive buffers handle untrusted data from
+    // the network that could be crafted for attacks.
     // prevent a malicious client from sending an extremely large size prefix
     // (e.g., Integer.MAX_VALUE) that would cause the broker to allocate a huge
     // buffer, leading to OOM denial-of-service.

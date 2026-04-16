@@ -55,7 +55,9 @@ import javax.security.auth.login.LoginException;
 public class KerberosLogin extends AbstractLogin {
     private static final Logger log = LoggerFactory.getLogger(KerberosLogin.class);
 
-    // SECURITY: (HIGH) KerberosLogin manages a background daemon thread that periodically
+    // SECURITY: SEC-KERB-005 (HIGH) KerberosLogin manages a background daemon thread that periodically
+    // Why: Kerberos login manages TGT acquisition and renewal that
+    // underpins all Kerberos-authenticated connections.
     // refreshes Kerberos TGT credentials. Race condition: between TGT expiry and successful
     // renewal, the broker may lack valid credentials, causing authentication failures.
     // Exploit: An attacker could time requests during the renewal window when old TGT has
@@ -163,7 +165,9 @@ public class KerberosLogin extends AbstractLogin {
         // TGT's existing expiry date and the configured minTimeBeforeRelogin. For testing and development,
         // you can decrease the interval of expiration of tickets (for example, to 3 minutes) by running:
         //  "modprinc -maxlife 3mins <principal>" in kadmin.
-        // SECURITY: (HIGH) TGT renewal daemon thread runs for the lifetime of the JVM.
+        // SECURITY: SEC-KERB-006 (HIGH) TGT renewal daemon thread runs for the lifetime of the JVM.
+        // Why: Kerberos login manages TGT acquisition and renewal that
+        // underpins all Kerberos-authenticated connections.
         // Race condition between TGT expiry check and actual renewal: during this window,
         // authentication requests may use an expired TGT.
         // The 10-second retry sleep on failure extends the vulnerability window.
@@ -238,7 +242,9 @@ public class KerberosLogin extends AbstractLogin {
                         + " Exiting refresh thread.", principal, nextRefreshDate);
                     return;
                 }
-                // SECURITY: (MEDIUM) Executes external shell command (kinit) for ticket
+                // SECURITY: SEC-KERB-007 (MEDIUM) Executes external shell command (kinit) for ticket
+                // Why: Kerberos login manages TGT acquisition and renewal that
+                // underpins all Kerberos-authenticated connections.
                 // cache renewal. Exploit: If kinitCmd config is attacker-controlled,
                 // arbitrary command execution is possible. The kinitCmd value comes from
                 // SaslConfigs.SASL_KERBEROS_KINIT_CMD (user-configurable).
@@ -369,7 +375,9 @@ public class KerberosLogin extends AbstractLogin {
             return proposedRefresh;
     }
 
-    // SECURITY: (LOW) Iterates Subject's private credentials to find the TGT by matching
+    // SECURITY: SEC-KERB-008 (LOW) Iterates Subject's private credentials to find the TGT by matching
+    // Why: Kerberos login manages TGT acquisition and renewal that
+    // underpins all Kerberos-authenticated connections.
     // the krbtgt service principal pattern. Returns null if no TGT found (triggers
     // minTimeBeforeRelogin wait).
     // Risk: If Subject.getPrivateCredentials throws SecurityException under a restrictive
@@ -399,7 +407,9 @@ public class KerberosLogin extends AbstractLogin {
         return true;
     }
 
-    // SECURITY: (MEDIUM) reLogin synchronizes on KerberosLogin.class (class-level lock).
+    // SECURITY: SEC-KERB-009 (MEDIUM) reLogin synchronizes on KerberosLogin.class (class-level lock).
+    // Why: Kerberos login manages TGT acquisition and renewal that
+    // underpins all Kerberos-authenticated connections.
     // This prevents concurrent re-login attempts but blocks all other KerberosLogin
     // instances during renewal.
     // Exploit: A slow KDC response could cause a denial-of-service by holding the class lock.

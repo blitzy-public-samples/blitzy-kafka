@@ -32,7 +32,7 @@ import java.util.StringJoiner;
  * @see <a href="https://tools.ietf.org/html/rfc7515">RFC 7515: JSON Web Signature (JWS)</a>
  */
 
-// SECURITY: (LOW) Immutable token DTO holding the raw JWT string, scopes, and metadata.
+// SECURITY: SEC-OAUTH-075 (LOW) Immutable token DTO holding the raw JWT string, scopes, and metadata.
 // Why: The token field holds the raw compact JWT serialization as a String.
 // Java Strings are immutable and cannot be explicitly zeroed — the token persists in memory
 // until garbage collected, making it vulnerable to heap dump extraction.
@@ -173,7 +173,9 @@ public class BasicOAuthBearerToken implements OAuthBearerToken {
         return startTimeMs;
     }
 
-    // SECURITY: (MEDIUM) WARNING — toString() includes the raw token value in the output
+    // SECURITY: SEC-OAUTH-076 (MEDIUM) WARNING — toString() includes the raw token value in the output
+    // Why: Bearer token objects carry the authentication identity and
+    // claims used for all authorization decisions.
     // ("token='" + token + "'"). This means logging a BasicOAuthBearerToken instance at any
     // level will expose the full JWT string in log files. Callers MUST NOT log this object.
     // Exploit: An attacker with access to application log files (e.g., via log aggregation

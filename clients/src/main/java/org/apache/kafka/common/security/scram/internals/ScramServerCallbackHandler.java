@@ -32,7 +32,7 @@ import javax.security.auth.callback.NameCallback;
 import javax.security.auth.callback.UnsupportedCallbackException;
 import javax.security.auth.login.AppConfigurationEntry;
 
-// SECURITY: (MEDIUM) Server-side credential lookup and delegation token handling.
+// SECURITY: SEC-SCRAM-054 (MEDIUM) Server-side credential lookup and delegation token handling.
 // Why: This callback handler dispatches between regular SCRAM credentials (from CredentialCache)
 // and delegation token credentials (from DelegationTokenCache). It is the primary integration
 // point between SCRAM authentication and the delegation token system.
@@ -88,14 +88,18 @@ public class ScramServerCallbackHandler implements AuthenticateCallbackHandler {
         for (Callback callback : callbacks) {
             if (callback instanceof NameCallback)
                 username = ((NameCallback) callback).getDefaultName();
-            // SECURITY: (MEDIUM) Delegation token credential path -- looks up SCRAM credential from
+            // SECURITY: SEC-SCRAM-055 (MEDIUM) Delegation token credential path -- looks up SCRAM credential from
+            // Why: Server callback handler resolves SCRAM credentials from
+            // the credential cache for authentication verification.
             // token cache using saslMechanism and username (tokenId). Also retrieves token owner and
             // expiry timestamp. Risk: If tokenCache.credential() returns a credential for a different
             // mechanism (mechanism mismatch), the HMAC verification could silently fail or succeed
             // incorrectly. The tokenExpiryTimestamp is passed back to ScramSaslServer's
             // getNegotiatedProperty() for the authenticator layer to enforce.
-            // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-            // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+            // Exploit: An attacker could exploit credential lookup callbacks
+            // to enumerate valid usernames via timing or error differences.
+            // Improvement: Add rate limiting on credential lookups to prevent
+            // brute-force enumeration of valid SCRAM usernames.
             else if (callback instanceof DelegationTokenCredentialCallback) {
                 DelegationTokenCredentialCallback tokenCallback = (DelegationTokenCredentialCallback) callback;
                 tokenCallback.scramCredential(tokenCache.credential(saslMechanism, username));
@@ -103,15 +107,22 @@ public class ScramServerCallbackHandler implements AuthenticateCallbackHandler {
                 TokenInformation tokenInfo = tokenCache.token(username);
                 if (tokenInfo != null)
                     tokenCallback.tokenExpiryTimestamp(tokenInfo.expiryTimestamp());
-            // SECURITY: (MEDIUM) Regular SCRAM credential path -- simple lookup from CredentialCache by username.
+            // SECURITY: SEC-SCRAM-056 (MEDIUM) Regular SCRAM credential
+            // path -- simple lookup from CredentialCache by username.
+            // Why: Server callback handler resolves SCRAM credentials from
+            // the credential cache for authentication verification.
             // Null credential result is handled by ScramSaslServer.evaluateResponse() which throws
             // SaslException("Authentication failed: Invalid user credentials") -- correct fail-closed.
-            // Exploit: Unauthorized access to the credential cache could expose authentication material.
-            // Improvement: Limit cache access to authenticated callers and consider cache entry encryption at rest.
+            // Exploit: An attacker could exploit credential lookup callbacks
+            // to enumerate valid usernames via timing or error differences.
+            // Improvement: Add rate limiting on credential lookups to prevent
+            // brute-force enumeration of valid SCRAM usernames.
             } else if (callback instanceof ScramCredentialCallback) {
                 ScramCredentialCallback sc = (ScramCredentialCallback) callback;
                 sc.scramCredential(credentialCache.get(username));
-            // SECURITY: (LOW) Unknown callback types are rejected with UnsupportedCallbackException.
+            // SECURITY: SEC-SCRAM-057 (LOW) Unknown callback types are rejected with UnsupportedCallbackException.
+            // Why: Server callback handler resolves SCRAM credentials from
+            // the credential cache for authentication verification.
             // This prevents unexpected callback injection from a modified SASL framework.
             // Exploit: Malicious extensions or callback values could inject unexpected behavior into the auth flow.
             // Improvement: Validate all extension keys and values against an allowlist before processing.

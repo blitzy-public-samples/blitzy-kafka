@@ -236,7 +236,7 @@ import javax.security.auth.spi.LoginModule;
  * @see SaslConfigs#SASL_LOGIN_REFRESH_MIN_PERIOD_SECONDS_DOC
  * @see SaslConfigs#SASL_LOGIN_REFRESH_BUFFER_SECONDS_DOC
  */
-// SECURITY: (MEDIUM) JAAS LoginModule for SASL/OAUTHBEARER — manages token lifecycle
+// SECURITY: SEC-OAUTH-030 (MEDIUM) JAAS LoginModule for SASL/OAUTHBEARER — manages token lifecycle
 // (login → commit → logout) and stores tokens in Subject's private credentials.
 // Why: The Subject's credential store is the in-memory token cache. Tokens persisted
 // here are accessible to any code with a reference to the Subject.
@@ -295,24 +295,32 @@ public class OAuthBearerLoginModule implements LoginModule {
     private SaslExtensions myCommittedExtensions = null;
     private LoginState loginState;
 
-    // SECURITY: (LOW) SASL client/server providers registered globally in JVM Security
+    // SECURITY: SEC-OAUTH-031 (LOW) SASL client/server providers registered globally in JVM Security
+    // Why: The OAUTHBEARER login module manages token credential
+    // lifecycle within the JAAS authentication framework.
     // registry via static initializer. This is a one-time, irreversible registration —
     // once registered, the OAUTHBEARER mechanism is available to all SASL contexts in
     // the JVM. No mechanism to unregister (by design — SASL providers are JVM-global).
-    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+    // Exploit: The LoginModule lifecycle could be manipulated to
+    // retain or duplicate token credentials across login sessions.
+    // Improvement: Add token validation on commit() to verify the
+    // Subject's credentials are consistent before finalizing login.
     static {
         OAuthBearerSaslClientProvider.initialize(); // not part of public API
         OAuthBearerSaslServerProvider.initialize(); // not part of public API
     }
 
-    // SECURITY: (MEDIUM) Validates that callbackHandler is AuthenticateCallbackHandler.
+    // SECURITY: SEC-OAUTH-032 (MEDIUM) Validates that callbackHandler is AuthenticateCallbackHandler.
+    // Why: The OAUTHBEARER login module manages token credential
+    // lifecycle within the JAAS authentication framework.
     // This type check prevents injection of a malicious CallbackHandler that doesn't
     // follow the Kafka authentication contract. However, the check is at runtime —
     // a misconfigured JAAS file could specify a handler that passes the type check
     // but behaves incorrectly.
-    // Exploit: A malicious client could send crafted packets to manipulate state transitions and bypass authentication.
-    // Improvement: Add state transition validation to reject unexpected state changes.
+    // Exploit: The LoginModule lifecycle could be manipulated to
+    // retain or duplicate token credentials across login sessions.
+    // Improvement: Add LoginModule state tracking to prevent
+    // double-commit or commit-after-abort scenarios.
     @Override
     public void initialize(Subject subject, CallbackHandler callbackHandler, Map<String, ?> sharedState,
             Map<String, ?> options) {
@@ -361,12 +369,16 @@ public class OAuthBearerLoginModule implements LoginModule {
         return true;
     }
 
-    // SECURITY: (HIGH) Token is retrieved via callbackHandler.handle() — the actual token
+    // SECURITY: SEC-OAUTH-033 (HIGH) Token is retrieved via callbackHandler.handle() — the actual token
+    // Why: The OAUTHBEARER login module manages token credential
+    // lifecycle within the JAAS authentication framework.
     // retrieval (HTTP call, file read, etc.) happens in the configured
     // AuthenticateCallbackHandler. Failures are logged but the specific failure reason
     // is not exposed beyond LoginException.
-    // Exploit: A malicious client could send crafted packets to manipulate state transitions and bypass authentication.
-    // Improvement: Add state transition validation to reject unexpected state changes.
+    // Exploit: The LoginModule lifecycle could be manipulated to
+    // retain or duplicate token credentials across login sessions.
+    // Improvement: Add LoginModule state tracking to prevent
+    // double-commit or commit-after-abort scenarios.
     private void identifyToken() throws LoginException {
         OAuthBearerTokenCallback tokenCallback = new OAuthBearerTokenCallback();
         try {
@@ -420,12 +432,16 @@ public class OAuthBearerLoginModule implements LoginModule {
             log.debug("Nothing here to log out");
             return false;
         }
-        // SECURITY: (MEDIUM) Token removed from Subject's private credentials using
+        // SECURITY: SEC-OAUTH-034 (MEDIUM) Token removed from Subject's private credentials using
+        // Why: The OAUTHBEARER login module manages token credential
+        // lifecycle within the JAAS authentication framework.
         // identity comparison (== not .equals()). This ensures only the specific token
         // instance logged in by THIS LoginModule is removed, preventing cross-context
         // token deletion when multiple tokens coexist on a shared Subject.
-        // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-        // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+        // Exploit: The LoginModule lifecycle could be manipulated to
+        // retain or duplicate token credentials across login sessions.
+        // Improvement: Add token validation on commit() to verify the
+        // Subject's credentials are consistent before finalizing login.
         if (myCommittedToken != null) {
             log.trace("Logging out my token; current committed token count = {}", committedTokenCount());
             for (Iterator<Object> iterator = subject.getPrivateCredentials().iterator(); iterator.hasNext(); ) {

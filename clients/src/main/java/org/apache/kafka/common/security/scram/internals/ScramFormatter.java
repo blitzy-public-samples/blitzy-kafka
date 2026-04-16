@@ -37,7 +37,7 @@ import javax.crypto.spec.SecretKeySpec;
 /**
  * Scram message salt and hash functions defined in <a href="https://tools.ietf.org/html/rfc5802">RFC 5802</a>.
  */
-// SECURITY: (CRITICAL) Central cryptographic utility for SCRAM authentication per RFC 5802.
+// SECURITY: SEC-SCRAM-024 (CRITICAL) Central cryptographic utility for SCRAM authentication per RFC 5802.
 // Why: Implements PBKDF2 key derivation (hi method), HMAC computation, hash functions, key
 // derivation chain (clientKey, storedKey, serverKey), proof/signature generation, and secure
 // random nonce/salt generation. This class is the cryptographic foundation of all SCRAM
@@ -85,13 +85,17 @@ public class ScramFormatter {
         this.random = new SecureRandom();
     }
 
-    // SECURITY: (HIGH) HMAC computation using JCA Mac instance (HmacSHA256 or HmacSHA512).
+    // SECURITY: SEC-SCRAM-025 (HIGH) HMAC computation using JCA Mac instance (HmacSHA256 or HmacSHA512).
+    // Why: SCRAM cryptographic operations are the foundation of
+    // challenge-response authentication security.
     // The Mac instance is reused across calls (instance field) -- this is NOT thread-safe.
     // Each ScramFormatter instance MUST be confined to a single thread.
     // The key parameter is raw byte[] -- if key material leaks via heap dump, the HMAC can be
     // recomputed by an attacker. No key zeroization is performed after use.
-    // Exploit: A caller retaining a reference could modify credential bytes in-place, corrupting shared state.
-    // Improvement: Return defensive copies of sensitive byte arrays via Arrays.copyOf().
+    // Exploit: Heap inspection could expose the Mac key material,
+    // enabling offline HMAC recomputation and credential forgery.
+    // Improvement: Zero out intermediate byte arrays (clientKey,
+    // storedKey) after use to minimize key material exposure.
     public byte[] hmac(byte[] key, byte[] bytes) throws InvalidKeyException {
         mac.init(new SecretKeySpec(key, mac.getAlgorithm()));
         return mac.doFinal(bytes);
@@ -112,7 +116,9 @@ public class ScramFormatter {
         return result;
     }
 
-    // SECURITY: (CRITICAL) PBKDF2 key derivation per RFC 5802 Section 5.1 (named "Hi" in the RFC).
+    // SECURITY: SEC-SCRAM-026 (CRITICAL) PBKDF2 key derivation per RFC 5802 Section 5.1 (named "Hi" in the RFC).
+    // Why: SCRAM cryptographic operations are the foundation of
+    // challenge-response authentication security.
     // Computes SaltedPassword = PBKDF2(password, salt, iterations) using the mechanism's MAC algo.
     // The salt is appended with INT(1) = [0,0,0,1] per RFC 2898 Section 5.2.
     // Minimum 4096 iterations per RFC 5802 -- enforced by caller (ScramMechanism.minIterations()),
@@ -176,12 +182,16 @@ public class ScramFormatter {
         return hmac(storedKey, authMessage);
     }
 
-    // SECURITY: (HIGH) ClientProof = ClientKey XOR ClientSignature. The XOR operation makes the proof
+    // SECURITY: SEC-SCRAM-027 (HIGH) ClientProof = ClientKey XOR ClientSignature. The XOR operation makes the proof
+    // Why: SCRAM cryptographic operations are the foundation of
+    // challenge-response authentication security.
     // one-time-use -- knowing the ClientProof and ClientSignature allows computing ClientKey,
     // but the server only stores StoredKey = H(ClientKey), not ClientKey itself.
     // This is the core security property of SCRAM: the server never learns the ClientKey.
-    // Exploit: Unauthorized access to the credential cache could expose authentication material.
-    // Improvement: Limit cache access to authenticated callers and consider cache entry encryption at rest.
+    // Exploit: If the iteration count is below 4096, leaked salted
+    // passwords can be brute-forced at significantly higher speeds.
+    // Improvement: Zero out intermediate cryptographic byte arrays
+    // after use to minimize key material exposure window.
     public byte[] clientProof(byte[] saltedPassword, ClientFirstMessage clientFirstMessage, ServerFirstMessage serverFirstMessage, ClientFinalMessage clientFinalMessage) throws InvalidKeyException {
         byte[] clientKey = clientKey(saltedPassword);
         byte[] storedKey = hash(clientKey);
@@ -195,11 +205,15 @@ public class ScramFormatter {
                 clientFinalMessage.clientFinalMessageWithoutProof()));
     }
 
-    // SECURITY: (HIGH) Reconstructs StoredKey from ClientSignature and ClientProof for server-side
+    // SECURITY: SEC-SCRAM-028 (HIGH) Reconstructs StoredKey from ClientSignature and ClientProof for server-side
+    // Why: SCRAM cryptographic operations are the foundation of
+    // challenge-response authentication security.
     // verification: StoredKey = H(ClientSignature XOR ClientProof) = H(ClientKey).
     // Used by ScramSaslServer.verifyClientProof() for constant-time comparison.
-    // Exploit: An attacker could use response timing differences to incrementally reconstruct the secret.
-    // Improvement: Ensure all cryptographic comparisons use constant-time algorithms like MessageDigest.isEqual().
+    // Exploit: If the iteration count is below 4096, leaked salted
+    // passwords can be brute-forced at significantly higher speeds.
+    // Improvement: Add unit tests asserting constant-time comparison
+    // to prevent accidental regression to Arrays.equals().
     public byte[] storedKey(byte[] clientSignature, byte[] clientProof) {
         return hash(xor(clientSignature, clientProof));
     }
@@ -213,7 +227,9 @@ public class ScramFormatter {
         return hmac(serverKey, authMessage);
     }
 
-    // SECURITY: (MEDIUM) Nonce generation using SecureRandom (line 49). The nonce is represented as a
+    // SECURITY: SEC-SCRAM-029 (MEDIUM) Nonce generation using SecureRandom (line 49). The nonce is represented as a
+    // Why: SCRAM cryptographic operations are the foundation of
+    // challenge-response authentication security.
     // BigInteger with 130 random bits converted to base-36 string (~25 characters).
     // 130 bits of entropy exceeds the 128-bit minimum for cryptographic nonce security.
     // Using SecureRandom (not java.util.Random) ensures cryptographic-quality randomness.
@@ -227,7 +243,9 @@ public class ScramFormatter {
         return new BigInteger(130, random).toString(Character.MAX_RADIX);
     }
 
-    // SECURITY: (MEDIUM) Salt generation using SecureRandom. The salt is a random string converted to
+    // SECURITY: SEC-SCRAM-030 (MEDIUM) Salt generation using SecureRandom. The salt is a random string converted to
+    // Why: SCRAM cryptographic operations are the foundation of
+    // challenge-response authentication security.
     // UTF-8 bytes (~25 bytes). Per NIST SP 800-132, salt should be at least 16 bytes (128 bits).
     // The generated salt exceeds this minimum.
     // Exploit: Predictable nonce or salt values would allow precomputation attacks against the challenge-response.
@@ -244,7 +262,9 @@ public class ScramFormatter {
         return str.getBytes(StandardCharsets.UTF_8);
     }
 
-    // SECURITY: (HIGH) Credential generation from plaintext password. The password is processed through
+    // SECURITY: SEC-SCRAM-031 (HIGH) Credential generation from plaintext password. The password is processed through
+    // Why: SCRAM cryptographic operations are the foundation of
+    // challenge-response authentication security.
     // normalize() then PBKDF2 (hi). The resulting ScramCredential contains only derived values
     // (salt, storedKey, serverKey, iterations) -- the original password is NOT stored.
     // Callers should zero the password char[]/byte[] after calling this method.

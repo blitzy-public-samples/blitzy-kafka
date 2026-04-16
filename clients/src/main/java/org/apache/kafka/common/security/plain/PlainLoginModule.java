@@ -24,7 +24,7 @@ import javax.security.auth.Subject;
 import javax.security.auth.callback.CallbackHandler;
 import javax.security.auth.spi.LoginModule;
 
-// SECURITY: (MEDIUM) JAAS LoginModule for SASL/PLAIN mechanism.
+// SECURITY: SEC-PLAIN-003 (MEDIUM) JAAS LoginModule for SASL/PLAIN mechanism.
 // Why: This module handles plaintext credential transfer into the JAAS Subject. Credentials
 // stored in Subject.getPublicCredentials() (username) and Subject.getPrivateCredentials()
 // (password) persist for the lifetime of the Subject and are accessible to any code with
@@ -55,7 +55,7 @@ public class PlainLoginModule implements LoginModule {
         PlainSaslServerProvider.initialize();
     }
 
-    // SECURITY: (MEDIUM) Credential extraction from JAAS options into Subject.
+    // SECURITY: SEC-PLAIN-004 (MEDIUM) Credential extraction from JAAS options into Subject.
     // Why: Username is placed in publicCredentials (readable by any module); password in
     // privateCredentials (restricted by SecurityManager, if present).
     // Exploit: Without a SecurityManager (common in modern deployments), any code with Subject

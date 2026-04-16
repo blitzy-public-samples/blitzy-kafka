@@ -21,7 +21,7 @@ import javax.security.auth.callback.Callback;
 /**
  * Callback used for SCRAM mechanisms.
  */
-// SECURITY: (LOW) JAAS Callback for transferring ScramCredential instances between
+// SECURITY: SEC-SCRAM-009 (LOW) JAAS Callback for transferring ScramCredential instances between
 // CallbackHandler implementations and SASL mechanism code during SCRAM authentication.
 // Why: This callback carries the server-side SCRAM credential (salt, storedKey, serverKey,
 // iterations) through the JAAS CallbackHandler pipeline. The credential contains derived
@@ -48,10 +48,14 @@ public class ScramCredentialCallback implements Callback {
     /**
      * Sets the SCRAM credential for this instance.
      */
-    // SECURITY: (MEDIUM) No validation on the credential being set -- a null or malformed credential
+    // SECURITY: SEC-SCRAM-010 (MEDIUM) No validation on the credential being set -- a null or malformed credential
+    // Why: SCRAM credentials contain derived key material that
+    // enables offline attacks if exposed.
     // would cause NullPointerException downstream in ScramSaslServer.evaluateResponse().
-    // Exploit: Unauthorized access to the credential cache could expose authentication material.
-    // Improvement: Limit cache access to authenticated callers and consider cache entry encryption at rest.
+    // Exploit: External mutation of the returned byte[] reference could
+    // corrupt the stored credential, causing authentication failures.
+    // Improvement: Add access control on credential callback operations
+    // and audit all credential lookup requests.
     public void scramCredential(ScramCredential scramCredential) {
         this.scramCredential = scramCredential;
     }

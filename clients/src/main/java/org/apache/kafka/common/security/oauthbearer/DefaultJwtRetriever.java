@@ -57,7 +57,7 @@ import static org.apache.kafka.common.config.SaslConfigs.SASL_OAUTHBEARER_TOKEN_
  * Rationale: Simple conditional logic handles the two known URL schemes without over-engineering.
  * This class exists as the default when no explicit retriever class is configured.
  */
-// SECURITY: (MEDIUM) Default retriever selection — routes to FileJwtRetriever or
+// SECURITY: SEC-OAUTH-015 (MEDIUM) Default retriever selection — routes to FileJwtRetriever or
 // ClientCredentialsJwtRetriever based on token endpoint URL scheme.
 // Why: The URL scheme determines the security properties of token retrieval. "file:"
 // reads from local filesystem (subject to file permission risks), while "http(s):"
@@ -84,15 +84,17 @@ public class DefaultJwtRetriever implements JwtRetriever {
         ConfigurationUtils cu = new ConfigurationUtils(configs, saslMechanism);
         URL tokenEndpointUrl = cu.validateUrl(SASL_OAUTHBEARER_TOKEN_ENDPOINT_URL);
 
-        // SECURITY: (MEDIUM) Case-insensitive protocol check using Locale.ROOT avoids
+        // SECURITY: SEC-OAUTH-016 (MEDIUM) Case-insensitive protocol check using Locale.ROOT avoids
+        // Why: The default retriever delegates to mechanism-specific
+        // retrievers that handle token material.
         // Turkish-I locale issue. However, only "file" is checked — "http" vs "https"
         // distinction is not enforced here, leaving it to HttpJwtRetriever.
         //
         // DECISION: "file:" protocol -> FileJwtRetriever, everything else -> ClientCredentialsJwtRetriever.
         // No support for other schemes (e.g., "classpath:", "s3:") — custom schemes require a custom
         // JwtRetriever implementation via SASL_OAUTHBEARER_JWT_RETRIEVER_CLASS config.
-        // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-        // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+        // Exploit: The delegation chain could be exploited if any underlying retriever is compromised or misconfigured.
+        // Improvement: Add retriever chain integrity verification and validate token freshness after each delegation...
         if (tokenEndpointUrl.getProtocol().toLowerCase(Locale.ROOT).equals("file"))
             delegate = new FileJwtRetriever();
         else

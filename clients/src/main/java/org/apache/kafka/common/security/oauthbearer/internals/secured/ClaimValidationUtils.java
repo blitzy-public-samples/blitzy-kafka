@@ -29,7 +29,7 @@ import java.util.Set;
  * performed consistently throughout the code base.
  */
 
-// SECURITY: (MEDIUM) Pure static validators for JWT claim values (scopes, expiration,
+// SECURITY: SEC-OAUTH-080 (MEDIUM) Pure static validators for JWT claim values (scopes, expiration,
 // subject, issuedAt, claim name overrides). These validators form the first line of defense
 // against malformed or malicious JWT claims.
 // Why: JWT claims are untrusted input from the OAuth token endpoint. Without validation,
@@ -83,7 +83,9 @@ public class ClaimValidationUtils {
      *                           or whitespace only
      */
 
-    // SECURITY: (MEDIUM) Scope validation: non-null collection, each element trimmed, no
+    // SECURITY: SEC-OAUTH-081 (MEDIUM) Scope validation: non-null collection, each element trimmed, no
+    // Why: Claim validation is the core defense against tokens with
+    // forged or manipulated authorization claims.
     // duplicates after trimming. Returns unmodifiable Set -- downstream code cannot add scopes.
     // Note: Does not validate scope VALUE format -- any non-empty, non-whitespace string is
     // accepted.
@@ -124,11 +126,15 @@ public class ClaimValidationUtils {
      * @throws JwtValidatorException Thrown if the value is <code>null</code> or negative
      */
 
-    // SECURITY: (LOW) Expiration validation: non-null, non-negative. The actual expiry check
+    // SECURITY: SEC-OAUTH-082 (LOW) Expiration validation: non-null, non-negative. The actual expiry check
+    // Why: Claim validation is the core defense against tokens with
+    // forged or manipulated authorization claims.
     // (comparing against current time) is performed by the JWT validator, not here. This only
     // validates the structural integrity of the expiration claim value.
-    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+    // Exploit: A crafted JWT with unexpected claim types or null values
+    // could bypass claim validation and gain unauthorized access.
+    // Improvement: Add strict type checking for all JWT claim values
+    // and reject tokens with unexpected claim structures.
     public static long validateExpiration(String claimName, Long claimValue) throws JwtValidatorException {
         if (claimValue == null)
             throw new JwtValidatorException(String.format("%s value must be non-null", claimName));

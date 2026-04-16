@@ -85,7 +85,9 @@ import static org.jose4j.jwa.AlgorithmConstraints.DISALLOW_NONE;
  * surface -- jose4j CVEs directly affect Kafka authentication.
  */
 
-// SECURITY: (CRITICAL) Broker-side JWT validator using jose4j for JWKS-based signature
+// SECURITY: SEC-OAUTH-001 (CRITICAL) Broker-side JWT validator using jose4j for JWKS-based signature
+// Why: Broker-side JWT validation is the gatekeeper for all
+// OAUTHBEARER-authenticated requests to the broker.
 // verification. Why: This is the trust anchor for OAUTHBEARER -- if signature verification
 // is bypassed, any forged JWT will be accepted, granting unauthorized access to all Kafka
 // resources. Exploit: JWKS cache poisoning -- if the JWKS endpoint is compromised or
@@ -133,12 +135,16 @@ public class BrokerJwtValidator implements JwtValidator {
         this.verificationKeyResolverOpt = Optional.of(verificationKeyResolver);
     }
 
-    // SECURITY: (HIGH) JwtConsumer configuration -- critical trust decisions made here.
+    // SECURITY: SEC-OAUTH-002 (HIGH) JwtConsumer configuration -- critical trust decisions made here.
+    // Why: Broker-side JWT validation is the gatekeeper for all
+    // OAUTHBEARER-authenticated requests to the broker.
     // Algorithm constraint DISALLOW_NONE prevents "alg":"none" attacks (CVE-2015-9235).
     // Required exp/iat claims prevent unbounded token lifetime. expectedAudience/Issuer
     // restrict token acceptance scope. Clock skew tolerance affects replay window.
-    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+    // Exploit: A token issued by a different authorization server with
+    // a matching key could bypass audience/issuer validation if unchecked.
+    // Improvement: Add strict clock skew limits and consider online
+    // token introspection for high-security deployments.
     @Override
     public void configure(Map<String, ?> configs, String saslMechanism, List<AppConfigurationEntry> jaasConfigEntries) {
         ConfigurationUtils cu = new ConfigurationUtils(configs, saslMechanism);
@@ -169,21 +175,29 @@ public class BrokerJwtValidator implements JwtValidator {
             jwtConsumerBuilder.setExpectedIssuer(expectedIssuer);
 
         this.jwtConsumer = jwtConsumerBuilder
-            // SECURITY: (CRITICAL) DISALLOW_NONE rejects JWTs with "alg":"none" header --
+            // SECURITY: SEC-OAUTH-003 (CRITICAL) DISALLOW_NONE rejects JWTs with "alg":"none" header --
+            // Why: Broker-side JWT validation is the gatekeeper for all
+            // OAUTHBEARER-authenticated requests to the broker.
             // without this, an attacker could strip the signature from a JWT, set alg=none,
             // and the token would pass verification as an "unsigned" JWT. This is a well-known
             // JWT bypass attack vector. See: RFC 7518 Section 3.6 and CVE-2015-9235.
-            // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-            // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+            // Exploit: A forged or manipulated JWT could bypass broker-side
+            // validation if any claim check is insufficient.
+            // Improvement: Add strict clock skew limits and consider online
+            // token introspection for high-security deployments.
             .setJwsAlgorithmConstraints(DISALLOW_NONE)
             .setRequireExpirationTime()
             .setRequireIssuedAt()
-            // SECURITY: (CRITICAL) Binds JWKS-sourced public keys to the JwtConsumer. The
+            // SECURITY: SEC-OAUTH-004 (CRITICAL) Binds JWKS-sourced public keys to the JwtConsumer. The
+            // Why: Broker-side JWT validation is the gatekeeper for all
+            // OAUTHBEARER-authenticated requests to the broker.
             // verificationKeyResolver is obtained from VerificationKeyResolverFactory which
             // manages JWKS endpoint connectivity, caching, and refresh. Key rotation windows
             // create a brief period where tokens signed with the new key may be rejected.
-            // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-            // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+            // Exploit: An attacker controlling the JWKS endpoint could serve a
+            // malicious key set, enabling forged JWT tokens to pass validation.
+            // Improvement: Add strict clock skew limits and consider online
+            // token introspection for high-security deployments.
             .setVerificationKeyResolver(verificationKeyResolver)
             .build();
         this.scopeClaimName = scopeClaimName;
@@ -199,7 +213,9 @@ public class BrokerJwtValidator implements JwtValidator {
      * @throws JwtValidatorException Thrown on errors performing validation of given token
      */
 
-    // SECURITY: (HIGH) Token validation entry point. SerializedJwt performs structural
+    // SECURITY: SEC-OAUTH-005 (HIGH) Token validation entry point. SerializedJwt performs structural
+    // Why: Broker-side JWT validation is the gatekeeper for all
+    // OAUTHBEARER-authenticated requests to the broker.
     // parsing (header.payload.signature). The jwtConsumer.process() call performs:
     // (1) Base64 decoding, (2) JSON deserialization, (3) signature verification against
     // JWKS keys, (4) expiration check with clock skew, (5) audience/issuer validation.
@@ -214,8 +230,8 @@ public class BrokerJwtValidator implements JwtValidator {
     // (6) Construct BasicOAuthBearerToken. Error path: InvalidJwtException wraps to
     // JwtValidatorException, MalformedClaimException wraps via getClaim().
     // Key branch: scopeRaw type dispatch -- String vs Collection vs default.
-    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+    // Exploit: A forged or manipulated JWT could bypass broker-side validation if any claim check is insufficient.
+    // Improvement: Add defense-in-depth JWT validation with token binding and strict audience/issuer verification.
     @SuppressWarnings("unchecked")
     public OAuthBearerToken validate(String accessToken) throws JwtValidatorException {
         SerializedJwt serializedJwt = new SerializedJwt(accessToken);
@@ -233,11 +249,15 @@ public class BrokerJwtValidator implements JwtValidator {
         Object scopeRaw = getClaim(() -> claims.getClaimValue(scopeClaimName), scopeClaimName);
         Collection<String> scopeRawCollection;
 
-        // SECURITY: (MEDIUM) Scope claim can be String or Collection -- OAuth providers differ.
+        // SECURITY: SEC-OAUTH-006 (MEDIUM) Scope claim can be String or Collection -- OAuth providers differ.
+        // Why: Broker-side JWT validation is the gatekeeper for all
+        // OAUTHBEARER-authenticated requests to the broker.
         // Unexpected types (e.g., nested objects) fall through to emptySet, which restricts
         // access rather than granting it (fail-closed). This is correct security behavior.
-        // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-        // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+        // Exploit: A token with insufficient scopes could bypass scope
+        // validation if the required scope set is misconfigured.
+        // Improvement: Add strict clock skew limits and consider online
+        // token introspection for high-security deployments.
         if (scopeRaw instanceof String)
             scopeRawCollection = Collections.singletonList((String) scopeRaw);
         else if (scopeRaw instanceof Collection)

@@ -29,7 +29,7 @@ import org.jose4j.keys.resolvers.VerificationKeyResolver;
  * define a <code>close</code> method, we provide a means to do that here.
  */
 
-// SECURITY: (MEDIUM) Combined lifecycle contract for OAUTHBEARER key resolvers.
+// SECURITY: SEC-OAUTH-086 (MEDIUM) Combined lifecycle contract for OAUTHBEARER key resolvers.
 // Why: Implementations manage cryptographic key material and potentially long-lived HTTP
 // connections. Improper lifecycle management (missing close()) can leak threads and connections.
 // Exploit: If close() is not called, RefreshingHttpsJwks's ScheduledExecutorService continues

@@ -59,7 +59,7 @@ import static org.apache.kafka.common.config.SaslConfigs.SASL_OAUTHBEARER_TOKEN_
  * ({@link OAuthBearerLoginCallbackHandler#CLIENT_ID_CONFIG}/{@link OAuthBearerLoginCallbackHandler#CLIENT_SECRET_CONFIG})
  * to a publicized token endpoint URL ({@link SaslConfigs#SASL_OAUTHBEARER_TOKEN_ENDPOINT_URL}).
  */
-// SECURITY: (HIGH) HTTPS token retrieval from OAuth provider via HTTP POST.
+// SECURITY: SEC-OAUTH-091 (HIGH) HTTPS token retrieval from OAuth provider via HTTP POST.
 // Why: This class sends client credentials (via HttpRequestFormatter) to the token endpoint
 // and receives bearer tokens. The connection handling, SSL setup, and response parsing are
 // all security-critical. Credentials travel in the HTTP request body/headers.
@@ -96,7 +96,9 @@ public class HttpJwtRetriever implements JwtRetriever {
 
     private static final Set<Integer> UNRETRYABLE_HTTP_CODES;
 
-    // SECURITY: (MEDIUM) HTTP status codes treated as non-retryable. 401 (Unauthorized) and
+    // SECURITY: SEC-OAUTH-092 (MEDIUM) HTTP status codes treated as non-retryable. 401 (Unauthorized) and
+    // Why: HTTP token retrieval transmits credentials and receives
+    // tokens over the network, requiring transport security.
     // 403 (Forbidden) are included -- these indicate credential issues that won't resolve by
     // retrying. Missing from this list: 429 (Too Many Requests) which could indicate rate
     // limiting. Currently, 429 would be retried, which is correct behavior for rate limiting.
@@ -133,13 +135,17 @@ public class HttpJwtRetriever implements JwtRetriever {
 
     private final HttpRequestFormatter requestFormatter;
 
-    // SECURITY: (HIGH) SSLSocketFactory for HTTPS connections. If null, the JVM's default
+    // SECURITY: SEC-OAUTH-093 (HIGH) SSLSocketFactory for HTTPS connections. If null, the JVM's default
+    // Why: HTTP token retrieval transmits credentials and receives
+    // tokens over the network, requiring transport security.
     // SSL configuration is used. Created by JaasOptionsUtils from JAAS SSL configuration.
     // The factory determines which TLS protocol versions, cipher suites, and trust stores
     // are used for the token endpoint connection. A misconfigured factory (e.g., trust-all)
     // would allow MITM attacks on the token endpoint.
-    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+    // Exploit: A MITM on the token endpoint connection could intercept
+    // or replace the JWT response, injecting a forged token.
+    // Improvement: Enforce TLS certificate pinning on token endpoint
+    // connections to prevent MITM-based token interception.
     private SSLSocketFactory sslSocketFactory;
 
     private URL tokenEndpointUrl;
@@ -158,12 +164,15 @@ public class HttpJwtRetriever implements JwtRetriever {
 
     @Override
     public void configure(Map<String, ?> configs, String saslMechanism, List<AppConfigurationEntry> jaasConfigEntries) {
-        // SECURITY: (MEDIUM) Configuration extraction -- tokenEndpointUrl validated via
+        // SECURITY: SEC-OAUTH-094 (MEDIUM) Configuration extraction -- tokenEndpointUrl validated via
+        // Why: HTTP token retrieval transmits credentials and receives
+        // tokens over the network, requiring transport security.
         // ConfigurationUtils.validateUrl() which checks URL format and protocol allowlist
         // (http/https/file only). SSLSocketFactory only created when protocol is HTTPS.
         // If protocol is HTTP, credentials are sent in cleartext -- no warning is logged.
         // Improvement: Log a WARN when token endpoint uses HTTP (not HTTPS) protocol.
-        // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+        // Exploit: A MITM on the token endpoint connection could intercept
+        // or replace the JWT response, injecting a forged token.
         ConfigurationUtils cu = new ConfigurationUtils(configs, saslMechanism);
         JaasOptionsUtils jou = new JaasOptionsUtils(saslMechanism, jaasConfigEntries);
 
@@ -303,13 +312,17 @@ public class HttpJwtRetriever implements JwtRetriever {
     // null/empty responseBody check.
     // Exit paths: return responseBody, throw IOException, throw UnretryableException.
     //
-    // SECURITY: (MEDIUM) Response body handling. The response body is NOT logged (may
+    // SECURITY: SEC-OAUTH-095 (MEDIUM) Response body handling. The response body is NOT logged (may
+    // Why: HTTP token retrieval transmits credentials and receives
+    // tokens over the network, requiring transport security.
     // contain tokens). Error response body IS logged (per RFC 6749 Section 5.2, error
     // responses don't contain sensitive data). The response body is held in memory as a
     // String. For very large responses, this could cause OOM -- consider limiting
     // response body size.
-    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+    // Exploit: A MITM on the token endpoint connection could intercept
+    // or replace the JWT response, injecting a forged token.
+    // Improvement: Enforce TLS certificate pinning on token endpoint
+    // connections to prevent MITM-based token interception.
     static String handleOutput(final HttpURLConnection con) throws IOException {
         int responseCode = con.getResponseCode();
         log.debug("handleOutput - responseCode: {}", responseCode);
@@ -354,12 +367,16 @@ public class HttpJwtRetriever implements JwtRetriever {
             log.warn("handleOutput - error response code: {}, error response body: {}", responseCode,
                 formatErrorMessage(errorResponseBody));
 
-            // SECURITY: (MEDIUM) UNRETRYABLE_HTTP_CODES check -- for known non-transient
+            // SECURITY: SEC-OAUTH-096 (MEDIUM) UNRETRYABLE_HTTP_CODES check -- for known non-transient
+            // Why: HTTP token retrieval transmits credentials and receives
+            // tokens over the network, requiring transport security.
             // errors, throws UnretryableException to stop retry loop immediately. This
             // prevents credential brute-forcing against the token endpoint -- a 401 (bad
             // credentials) won't be retried.
-            // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-            // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+            // Exploit: A MITM on the token endpoint connection could intercept
+            // or replace the JWT response, injecting a forged token.
+            // Improvement: Enforce TLS certificate pinning on token endpoint
+            // connections to prevent MITM-based token interception.
             if (UNRETRYABLE_HTTP_CODES.contains(responseCode)) {
                 // We know that this is a non-transient error, so let's not keep retrying the
                 // request unnecessarily.

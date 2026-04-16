@@ -27,7 +27,7 @@ import java.util.Optional;
 /**
  * Authentication for Channel
  */
-// SECURITY: (HIGH) Core authentication contract for all Kafka connections. Implementations
+// SECURITY: SEC-NET-001 (HIGH) Core authentication contract for all Kafka connections. Implementations
 // of this interface are the security gatekeepers — they determine whether a connection is
 // authorized to communicate.
 // Implementations: SaslServerAuthenticator, SaslClientAuthenticator (security/authenticator/),
@@ -46,7 +46,7 @@ import java.util.Optional;
 // all implementations.
 // Contract: authenticate() is idempotent until complete() returns true. principal() is valid
 // only after complete() returns true. close() must release all resources including JAAS subjects.
-// Exploit: A malicious client could send crafted packets to manipulate state transitions and bypass authentication.
+// Exploit: An attacker could exploit the authenticator interface contract to bypass authentication during connection...
 public interface Authenticator extends Closeable {
     /**
      * Implements any authentication mechanism. Use transportLayer to read or write tokens.
@@ -57,13 +57,17 @@ public interface Authenticator extends Closeable {
      *      other security configuration errors
      * @throws IOException if read/write fails due to an I/O error
      */
-    // SECURITY: (HIGH) This method drives the authentication state machine. For SASL mechanisms, this
+    // SECURITY: SEC-NET-002 (HIGH) This method drives the authentication state machine. For SASL mechanisms, this
+    // Why: The authenticator interface defines the authentication
+    // contract for all Kafka network connections.
     // involves reading/writing SASL tokens from/to the TransportLayer. The method may be called
     // multiple times (non-blocking) until complete() returns true.
     // The AuthenticationException thrown on failure is non-retriable — clients should not retry
     // with the same credentials.
-    // Exploit: A malicious client could send crafted packets to manipulate state transitions and bypass authentication.
-    // Improvement: Add state transition validation to reject unexpected state changes.
+    // Exploit: An attacker could exploit the authenticator interface
+    // contract to bypass authentication during connection setup.
+    // Improvement: Add authentication state lifecycle checks to
+    // prevent operations on closed or expired authenticators.
     void authenticate() throws AuthenticationException, IOException;
 
     /**
@@ -110,7 +114,9 @@ public interface Authenticator extends Closeable {
      * @throws IOException
      *             if read/write fails due to an I/O error
      */
-    // SECURITY: (MEDIUM) Re-authentication entry point. The ReauthenticationContext carries the
+    // SECURITY: SEC-NET-003 (MEDIUM) Re-authentication entry point. The ReauthenticationContext carries the
+    // Why: The authenticator interface defines the authentication
+    // contract for all Kafka network connections.
     // previous authenticator and any in-flight NetworkReceive. Re-authentication must complete
     // atomically from the connection's perspective — no application data should be processed
     // between the start and completion of re-authentication.
@@ -134,7 +140,9 @@ public interface Authenticator extends Closeable {
      * 
      * @return the session expiration time, if any, otherwise null
      */
-    // SECURITY: (MEDIUM) serverSessionExpirationTimeNanos() and clientSessionReauthenticationTimeNanos()
+    // SECURITY: SEC-NET-004 (MEDIUM) serverSessionExpirationTimeNanos() and clientSessionReauthenticationTimeNanos()
+    // Why: The authenticator interface defines the authentication
+    // contract for all Kafka network connections.
     // control credential rotation enforcement. If a session expires and re-authentication fails,
     // the connection must be terminated to prevent use of stale credentials.
     // Exploit: An attacker could exhaust server resources by sending oversized or excessive requests.

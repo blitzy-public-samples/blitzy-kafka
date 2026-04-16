@@ -85,7 +85,7 @@ import javax.security.auth.login.AppConfigurationEntry;
  * @see RefreshingHttpsJwks
  * @see HttpsJwks
  */
-// SECURITY: (HIGH) JWKS refresh window creates a staleness exploit surface.
+// SECURITY: SEC-OAUTH-115 (HIGH) JWKS refresh window creates a staleness exploit surface.
 // Why: This resolver delegates to RefreshingHttpsJwks which caches JWKS with a periodic refresh.
 // Between refreshes, the cache may contain stale keys. After an OAuth provider rotates keys,
 // tokens signed with the NEW key will fail validation until the cache refreshes, while tokens
@@ -160,7 +160,9 @@ public class RefreshingHttpsJwksVerificationKeyResolver implements CloseableVeri
         }
     }
 
-    // SECURITY: (HIGH) Key resolution from cached JWKS. If no matching key is found, an expedited
+    // SECURITY: SEC-OAUTH-116 (HIGH) Key resolution from cached JWKS. If no matching key is found, an expedited
+    // Why: JWKS refresh controls the key set used for JWT validation;
+    // a compromised refresh poisons all token verification.
     // refresh is triggered via maybeExpediteRefresh(keyId). This means an unknown keyId triggers
     // network I/O to the JWKS endpoint. A malicious client sending JWTs with random kid values
     // could trigger excessive JWKS endpoint requests (cache-busting DoS). The missingKeyIds cache
@@ -170,7 +172,9 @@ public class RefreshingHttpsJwksVerificationKeyResolver implements CloseableVeri
     // Exploit: Predictable nonce or salt values would allow precomputation attacks against the challenge-response.
     @Override
     public Key resolveKey(JsonWebSignature jws, List<JsonWebStructure> nestingContext) throws UnresolvableKeyException {
-        // SECURITY: (MEDIUM) Fail-fast if configure() hasn't been called. This prevents resolveKey()
+        // SECURITY: SEC-OAUTH-117 (MEDIUM) Fail-fast if configure() hasn't been called. This prevents resolveKey()
+        // Why: JWKS refresh controls the key set used for JWT validation;
+        // a compromised refresh poisons all token verification.
         // from operating on uninitialized state. Note: isInitialized is not volatile -- in a
         // multi-threaded environment, there's a theoretical visibility issue if resolveKey() is
         // called from a different thread than configure(). In practice, Kafka's authentication

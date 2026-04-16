@@ -38,7 +38,9 @@ import java.util.function.Supplier;
 // Alternative: Require at least SASL_PLAINTEXT for all connections — rejected because
 // Kafka supports development/testing use cases where encryption overhead is undesirable.
 //
-// SECURITY: (CRITICAL) PLAINTEXT protocol provides NO encryption and NO authentication.
+// SECURITY: SEC-NET-011 (CRITICAL) PLAINTEXT protocol provides NO encryption and NO authentication.
+// Why: Plaintext connections provide no security guarantees,
+// creating risk in any non-isolated network environment.
 // All data (including credentials if SASL_PLAINTEXT mechanism configs are inadvertently
 // used) is transmitted in cleartext. The principal is always KafkaPrincipal.ANONYMOUS.
 // Risk: Any network observer (tcpdump, Wireshark, network tap) can read all Kafka
@@ -53,7 +55,7 @@ import java.util.function.Supplier;
 // Contract: Must return a fully constructed KafkaChannel from buildChannel().
 // Impact: If this builder's behavior changes, all PLAINTEXT listeners across broker and
 // client connections are affected.
-// Exploit: An attacker could exploit weak cipher suites or certificate validation gaps for MITM attacks.
+// Exploit: PLAINTEXT protocol has no encryption -- any network observer can read all Kafka messages including sensit...
 public class PlaintextChannelBuilder implements ChannelBuilder {
     private final ListenerName listenerName;
     private Map<String, ?> configs;
@@ -132,7 +134,9 @@ public class PlaintextChannelBuilder implements ChannelBuilder {
         @Override
         public void authenticate() {}
 
-        // SECURITY: (MEDIUM) The principal is constructed from client IP address only,
+        // SECURITY: SEC-NET-012 (MEDIUM) The principal is constructed from client IP address only,
+        // Why: Plaintext connections provide no security guarantees,
+        // creating risk in any non-isolated network environment.
         // with no cryptographic identity verification. Any client can connect and is
         // assigned the principal built by KafkaPrincipalBuilder (default: ANONYMOUS).
         // Risk: An attacker can impersonate any client since there is no identity
@@ -140,7 +144,8 @@ public class PlaintextChannelBuilder implements ChannelBuilder {
         // IP-based principals, which are trivially spoofable on shared networks.
         // Improvement: Use SASL_PLAINTEXT or SASL_SSL to bind principals to
         // authenticated identities rather than unauthenticated IP addresses.
-        // Exploit: A malicious client could send crafted packets to manipulate state transitions and bypass
+        // Exploit: Without authentication, any network client can connect
+        // and impersonate authorized clients via IP spoofing.
         // authentication.
         @Override
         public KafkaPrincipal principal() {

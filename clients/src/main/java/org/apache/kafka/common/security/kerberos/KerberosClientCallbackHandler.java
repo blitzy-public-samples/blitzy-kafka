@@ -33,7 +33,9 @@ import javax.security.sasl.RealmCallback;
 /**
  * Callback handler for SASL/GSSAPI clients.
  */
-// SECURITY: (MEDIUM) Handles SASL/GSSAPI client-side callbacks during Kerberos authentication.
+// SECURITY: SEC-KERB-001 (MEDIUM) Handles SASL/GSSAPI client-side callbacks during Kerberos authentication.
+// Why: Kerberos authentication handles security-critical ticket
+// exchange and principal resolution.
 // Stateless and thread-safe. Rejects PasswordCallback to enforce ticket-based auth only.
 // Exploit: If this handler were to accept PasswordCallback, credentials could be intercepted in
 // plaintext during GSSAPI negotiation. The current rejection is a security safeguard.
@@ -70,12 +72,16 @@ public class KerberosClientCallbackHandler implements AuthenticateCallbackHandle
             } else if (callback instanceof RealmCallback) {
                 RealmCallback rc = (RealmCallback) callback;
                 rc.setText(rc.getDefaultText());
-            // SECURITY: (MEDIUM) AuthorizeCallback compares authenticationID with authorizationID.
+            // SECURITY: SEC-KERB-002 (MEDIUM) AuthorizeCallback compares authenticationID with authorizationID.
+            // Why: Kerberos authentication handles security-critical ticket
+            // exchange and principal resolution.
             // Only authorizes if they are equal. This prevents impersonation where a
             // client authenticates as one principal but requests authorization as another.
-            // Exploit: A malicious client could send crafted packets to manipulate state transitions and bypass
+            // Exploit: A compromised KDC could inject a malicious TGT via the
+            // GSSAPI callback, enabling impersonation of legitimate principals.
             // authentication.
-            // Improvement: Add state transition validation to reject unexpected state changes.
+            // Improvement: Add TGT validity verification before each
+            // authentication attempt and fail-fast on expired tickets.
             } else if (callback instanceof AuthorizeCallback) {
                 AuthorizeCallback ac = (AuthorizeCallback) callback;
                 String authId = ac.getAuthenticationID();

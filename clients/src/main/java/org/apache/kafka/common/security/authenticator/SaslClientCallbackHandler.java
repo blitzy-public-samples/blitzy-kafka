@@ -44,7 +44,9 @@ import javax.security.sasl.RealmCallback;
  *
  * For adding custom SASL extensions, a {@link SaslExtensions} may be added to the subject's public credentials
  *
- * @implSpec SECURITY: (MEDIUM) Client-side SASL callback handler receives and dispatches
+ * @implSpec SECURITY: SEC-SASL-028 (MEDIUM) Client-side SASL callback handler receives and dispatches
+ * Why: Callback handler processes credential requests during
+ * SASL authentication, handling sensitive auth material.
  * credential callbacks from the JAAS/SASL framework. This handler extracts plaintext
  * credentials (username from public credentials, password from private credentials) from
  * the current JAAS Subject and passes them to the SASL mechanism.
@@ -79,7 +81,9 @@ public class SaslClientCallbackHandler implements AuthenticateCallbackHandler {
     // matches the Java SASL API reference guide (linked in class Javadoc).
     @Override
     public void handle(Callback[] callbacks) throws UnsupportedCallbackException {
-        // SECURITY: (MEDIUM) Uses SecurityManagerCompatibility.get().current() to obtain
+        // SECURITY: SEC-SASL-029 (MEDIUM) Uses SecurityManagerCompatibility.get().current() to obtain
+        // Why: Callback handler processes credential requests during
+        // SASL authentication, handling sensitive auth material.
         // the Subject from the current execution context. This replaces the deprecated
         // Subject.getSubject(AccessController.getContext()). If no Subject is available
         // (subject == null), NameCallback falls back to getDefaultName() and PasswordCallback
@@ -95,7 +99,9 @@ public class SaslClientCallbackHandler implements AuthenticateCallbackHandler {
                 } else
                     nc.setName(nc.getDefaultName());
             } else if (callback instanceof PasswordCallback) {
-                // SECURITY: (HIGH) Extracts plaintext password from Subject's private
+                // SECURITY: SEC-SASL-030 (HIGH) Extracts plaintext password from Subject's private
+                // Why: Callback handler processes credential requests during
+                // SASL authentication, handling sensitive auth material.
                 // credentials. The password is converted to char[] from String, but the
                 // source String remains in the Subject's credential set and in the JVM
                 // string pool.
@@ -116,7 +122,9 @@ public class SaslClientCallbackHandler implements AuthenticateCallbackHandler {
                 RealmCallback rc = (RealmCallback) callback;
                 rc.setText(rc.getDefaultText());
             } else if (callback instanceof AuthorizeCallback) {
-                // SECURITY: (MEDIUM) Authorization check compares authenticationID ==
+                // SECURITY: SEC-SASL-031 (MEDIUM) Authorization check compares authenticationID ==
+                // Why: Callback handler processes credential requests during
+                // SASL authentication, handling sensitive auth material.
                 // authorizationID. This prevents a client from requesting authorization
                 // as a different identity than it authenticated as.
                 // Exploit: If setAuthorized(true) were called unconditionally, any
@@ -135,13 +143,17 @@ public class SaslClientCallbackHandler implements AuthenticateCallbackHandler {
                 // mechanism is SCRAM, extensions are delivered via ScramExtensionsCallback;
                 // for non-GSSAPI mechanisms, SaslExtensionsCallback is used. This ordering
                 // prevents double-delivery of extension data.
-                // SECURITY: (LOW) SCRAM extensions and SASL extensions are extracted from
+                // SECURITY: SEC-SASL-032 (LOW) SCRAM extensions and SASL extensions are extracted from
+                // Why: Callback handler processes credential requests during
+                // SASL authentication, handling sensitive auth material.
                 // Subject's public credentials. Extensions are key-value pairs passed
                 // during SASL exchange. GSSAPI is explicitly excluded from SaslExtensions
                 // because GSSAPI uses a binary token format that doesn't support extension
                 // key-value pairs.
-                // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-                // Improvement: Implement token binding or short-lived tokens with strict audience and issuer
+                // Exploit: A compromised callback handler could intercept and log
+                // SASL credentials (username/password) during the callback exchange.
+                // Improvement: Sanitize and validate all callback values before
+                // passing them to the SASL mechanism layer.
                 // validation.
                 if (ScramMechanism.isScram(mechanism) && subject != null && !subject.getPublicCredentials(Map.class).isEmpty()) {
                     @SuppressWarnings("unchecked")

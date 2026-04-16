@@ -37,7 +37,9 @@ import javax.security.sasl.RealmCallback;
  * <a href="https://docs.oracle.com/javase/8/docs/technotes/guides/security/sasl/sasl-refguide.html">Java SASL API</a>
  * for the list of SASL callback handlers required for each SASL mechanism.
  *
- * @implSpec SECURITY: (MEDIUM) Server-side SASL callback handler that dispatches
+ * @implSpec SECURITY: SEC-SASL-045 (MEDIUM) Server-side SASL callback handler that dispatches
+ * Why: Server callback handler resolves credentials for incoming
+ * authentication requests from untrusted clients.
  * credential verification callbacks from the SASL framework. This default handler
  * supports only RealmCallback and AuthorizeCallback (for GSSAPI). Mechanism-specific
  * handlers (ScramServerCallbackHandler, OAuthBearerValidatorCallbackHandler) handle
@@ -72,12 +74,16 @@ public class SaslServerCallbackHandler implements AuthenticateCallbackHandler {
     // mechanism-specific handlers (registered per mechanism in ChannelBuilders) handle
     // NameCallback, PasswordCallback, etc. This default handler is only used when no
     // mechanism-specific handler is configured, which should only happen for GSSAPI.
-    // SECURITY: (LOW) Strict callback type checking — throws UnsupportedCallbackException
+    // SECURITY: SEC-SASL-046 (LOW) Strict callback type checking — throws UnsupportedCallbackException
+    // Why: Server callback handler resolves credentials for incoming
+    // authentication requests from untrusted clients.
     // for any unrecognized callback. This prevents silent acceptance of callbacks that
     // this handler doesn't know how to process, which could mask authentication issues
     // or allow unexpected credential flows.
-    // Exploit: Unauthorized access to the credential cache could expose authentication material.
-    // Improvement: Limit cache access to authenticated callers and consider cache entry encryption at rest.
+    // Exploit: An attacker could use a compromised broker component to
+    // extract credential data from the server callback handler's lookups.
+    // Improvement: Add access auditing for server callback credential
+    // lookups and rate-limit per-client authentication attempts.
     @Override
     public void handle(Callback[] callbacks) throws UnsupportedCallbackException {
         for (Callback callback : callbacks) {
@@ -95,7 +101,7 @@ public class SaslServerCallbackHandler implements AuthenticateCallbackHandler {
         rc.setText(rc.getDefaultText());
     }
 
-    // SECURITY: (MEDIUM) Kerberos authorization: sets authorized=true unconditionally.
+    // SECURITY: SEC-SASL-047 (MEDIUM) Kerberos authorization: sets authorized=true unconditionally.
     // Why: In GSSAPI, the authenticated identity (from Kerberos ticket) is inherently
     // authorized — there is no separate authorization step at the SASL level. The
     // actual authorization happens later via ACL checks (StandardAuthorizer).
@@ -108,7 +114,7 @@ public class SaslServerCallbackHandler implements AuthenticateCallbackHandler {
     // authorizing as another) is not supported. Alternative: use authorizationID if
     // different from authenticationID. Rationale: Kafka does not support Kerberos
     // delegation/proxy authentication at the SASL level.
-    // Improvement: Add state transition validation to reject unexpected state changes.
+    // Improvement: Add callback sequence validation to detect out-of-order or unexpected callback invocations.
     private void handleAuthorizeCallback(AuthorizeCallback ac) {
         String authenticationID = ac.getAuthenticationID();
         String authorizationID = ac.getAuthorizationID();

@@ -18,7 +18,7 @@ package org.apache.kafka.common.security.auth;
 
 import java.net.InetAddress;
 
-// SECURITY: (LOW) PlaintextAuthenticationContext represents connections with NO authentication
+// SECURITY: SEC-AUTH-005 (LOW) PlaintextAuthenticationContext represents connections with NO authentication
 // and NO encryption. Used for PLAINTEXT listeners and for pre-SASL phase of SASL_PLAINTEXT.
 // Why: No identity verification occurs — any client can connect and the principal defaults to
 // KafkaPrincipal.ANONYMOUS unless SASL authentication follows (for SASL_PLAINTEXT).

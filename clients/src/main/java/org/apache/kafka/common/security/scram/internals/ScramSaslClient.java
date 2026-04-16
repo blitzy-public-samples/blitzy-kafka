@@ -51,7 +51,7 @@ import javax.security.sasl.SaslException;
  * @see <a href="https://tools.ietf.org/html/rfc5802">RFC 5802</a>
  *
  */
-// SECURITY: (HIGH) Client-side SCRAM SASL implementation per RFC 5802.
+// SECURITY: SEC-SCRAM-041 (HIGH) Client-side SCRAM SASL implementation per RFC 5802.
 // Why: Computes client proof (ClientKey XOR ClientSignature) and verifies server signature.
 // Handles the client's password in memory during key derivation (saltedPassword field).
 // Nonce generation uses SecureRandom via ScramFormatter.secureRandomString().
@@ -154,7 +154,9 @@ public class ScramSaslClient implements SaslClient {
 
                 case RECEIVE_SERVER_FIRST_MESSAGE:
                     this.serverFirstMessage = new ServerFirstMessage(challenge);
-                    // SECURITY: (HIGH) Verifies server nonce starts with client nonce per RFC 5802
+                    // SECURITY: SEC-SCRAM-042 (HIGH) Verifies server nonce starts with client nonce per RFC 5802
+                    // Why: The SCRAM client computes authentication proofs using
+                    // cryptographic operations sensitive to implementation flaws.
                     // Section 5. Prevents server nonce substitution attacks where a MITM
                     // replaces the server's nonce.
                     // Exploit: Predictable nonce or salt values would allow precomputation attacks against the
@@ -163,7 +165,9 @@ public class ScramSaslClient implements SaslClient {
                     // platform.
                     if (!serverFirstMessage.nonce().startsWith(clientNonce))
                         throw new SaslException("Invalid server nonce: does not start with client nonce");
-                    // SECURITY: (HIGH) Enforces minimum iteration count from the mechanism
+                    // SECURITY: SEC-SCRAM-043 (HIGH) Enforces minimum iteration count from the mechanism
+                    // Why: The SCRAM client computes authentication proofs using
+                    // cryptographic operations sensitive to implementation flaws.
                     // definition (4096 for both SHA-256 and SHA-512). Prevents a compromised
                     // server from requesting trivially low iterations, which would weaken the
                     // key derivation and make the salted password easier to brute-force.
@@ -235,7 +239,9 @@ public class ScramSaslClient implements SaslClient {
         this.state = state;
     }
 
-    // SECURITY: (HIGH) Derives SaltedPassword from user's password using PBKDF2
+    // SECURITY: SEC-SCRAM-044 (HIGH) Derives SaltedPassword from user's password using PBKDF2
+    // Why: The SCRAM client computes authentication proofs using
+    // cryptographic operations sensitive to implementation flaws.
     // (ScramFormatter.hi). The saltedPassword is stored in an instance field and persists
     // until GC.
     // Risk: Heap dump or memory scanner could extract the salted password, which, combined
@@ -260,12 +266,16 @@ public class ScramSaslClient implements SaslClient {
         }
     }
 
-    // SECURITY: (HIGH) Server signature verification using constant-time MessageDigest.isEqual().
+    // SECURITY: SEC-SCRAM-045 (HIGH) Server signature verification using constant-time MessageDigest.isEqual().
+    // Why: The SCRAM client computes authentication proofs using
+    // cryptographic operations sensitive to implementation flaws.
     // This prevents a malicious server from detecting partial signature match via timing
     // analysis. The verification ensures mutual authentication -- the server proves it
     // knows the ServerKey.
-    // Exploit: An attacker could use response timing differences to incrementally reconstruct the secret.
-    // Improvement: Ensure all cryptographic comparisons use constant-time algorithms like MessageDigest.isEqual().
+    // Exploit: A malicious server could manipulate the SCRAM server-first
+    // message (nonce, salt, iterations) to weaken the client's proof.
+    // Improvement: Add explicit constant-time assertion for all SCRAM
+    // proof comparisons with regression test coverage.
     private void handleServerFinalMessage(byte[] signature) throws SaslException {
         try {
             byte[] serverKey = formatter.serverKey(saltedPassword);

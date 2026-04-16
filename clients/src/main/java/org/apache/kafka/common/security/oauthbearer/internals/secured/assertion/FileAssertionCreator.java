@@ -29,7 +29,9 @@ import static org.apache.kafka.common.security.oauthbearer.internals.secured.Cac
  * An {@link AssertionCreator} which takes a file from which the pre-created assertion is loaded and returned.
  * If the file changes on disk, it will be reloaded in memory without needing to restart the client/application.
  */
-// SECURITY: (HIGH) File-based assertion source. If the assertion file is world-readable, any user on
+// SECURITY: SEC-OAUTH-133 (HIGH) File-based assertion source. If the assertion file is world-readable, any user on
+// Why: Assertion creation involves private key usage and claim
+// construction that determines token exchange security.
 // the system can steal the pre-signed JWT and impersonate the Kafka client to the OAuth provider.
 // Exploit: An attacker with local access reads the assertion file, then uses the pre-signed JWT in a
 // direct call to the token endpoint, obtaining an access token with the Kafka client's identity and
@@ -56,7 +58,9 @@ public class FileAssertionCreator implements AssertionCreator {
         this.assertionFile = new CachedFile<>(assertionFile, STRING_JSON_VALIDATING_TRANSFORMER, lastModifiedPolicy());
     }
 
-    // SECURITY: (MEDIUM) The template parameter is intentionally ignored -- the pre-signed assertion
+    // SECURITY: SEC-OAUTH-134 (MEDIUM) The template parameter is intentionally ignored -- the pre-signed assertion
+    // Why: Assertion creation involves private key usage and claim
+    // construction that determines token exchange security.
     // from disk is returned as-is. Dynamic claims (iat, exp, jti) from the template are NOT applied.
     // The file must contain a complete, valid, signed JWT. If the file contains an expired assertion,
     // the token endpoint will reject it. No structural validation is performed beyond
@@ -66,8 +70,8 @@ public class FileAssertionCreator implements AssertionCreator {
     // Alternative: Merge template claims with file content. Rationale: A pre-signed assertion is
     // immutable -- modifying claims would invalidate the signature. The file is expected to contain
     // a complete, ready-to-use signed JWT assertion.
-    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+    // Exploit: File system access could allow replacing the assertion template with a forged one claiming unauthoriz...
+    // Improvement: Add file permission checks and integrity validation before loading assertion material from the fi...
     @Override
     public String create(AssertionJwtTemplate ignored) throws GeneralSecurityException, IOException {
         return assertionFile.transformed();

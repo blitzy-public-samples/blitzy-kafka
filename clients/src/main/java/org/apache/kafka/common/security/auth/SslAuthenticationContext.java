@@ -20,7 +20,7 @@ import java.net.InetAddress;
 
 import javax.net.ssl.SSLSession;
 
-// SECURITY: (LOW) SslAuthenticationContext carries the javax.net.ssl.SSLSession for
+// SECURITY: SEC-AUTH-011 (LOW) SslAuthenticationContext carries the javax.net.ssl.SSLSession for
 // SSL-authenticated connections. The SSLSession provides the peer certificate chain
 // via getPeerCertificates(), enabling certificate-based principal extraction.
 // Why: The SSLSession is the primary source of client identity for SSL listeners. If

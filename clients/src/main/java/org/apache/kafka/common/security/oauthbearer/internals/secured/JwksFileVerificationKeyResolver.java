@@ -83,7 +83,7 @@ import static org.apache.kafka.common.security.oauthbearer.internals.secured.Cac
  * @see org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_TOKEN_ENDPOINT_URL
  * @see VerificationKeyResolver
  */
-// SECURITY: (HIGH) File-based JWKS key management — reads signing keys from local file.
+// SECURITY: SEC-OAUTH-101 (HIGH) File-based JWKS key management — reads signing keys from local file.
 // Why: The JWKS file contains public keys used to validate JWT signatures. The file's
 // integrity directly determines which tokens are accepted by the broker.
 // Exploit: (1) TOCTOU race — CachedFile checks file.lastModified() then reads file contents
@@ -125,7 +125,9 @@ public class JwksFileVerificationKeyResolver implements CloseableVerificationKey
 
     @Override
     public Key resolveKey(JsonWebSignature jws, List<JsonWebStructure> nestingContext) throws UnresolvableKeyException {
-        // SECURITY: (MEDIUM) Null delegate check — fails with UnresolvableKeyException if
+        // SECURITY: SEC-OAUTH-102 (MEDIUM) Null delegate check — fails with UnresolvableKeyException if
+        // Why: JWKS file resolution determines which public keys are
+        // trusted for JWT signature verification.
         // configure() hasn't been called. This is a defense against misconfigured lifecycle
         // where the resolver is used before initialization.
         // Exploit: Improper handling could be exploited to bypass security controls or leak sensitive information.
@@ -136,14 +138,17 @@ public class JwksFileVerificationKeyResolver implements CloseableVerificationKey
         return delegate.transformed().resolveKey(jws, nestingContext);
     }
 
-    // SECURITY: (MEDIUM) Transforms raw JWKS file contents into jose4j VerificationKeyResolver.
+    // SECURITY: SEC-OAUTH-103 (MEDIUM) Transforms raw JWKS file contents into jose4j VerificationKeyResolver.
+    // Why: JWKS file resolution determines which public keys are
+    // trusted for JWT signature verification.
     // Parses the JSON string as JsonWebKeySet — if the file contains malformed JSON or invalid
     // JWK entries, a ConfigException is thrown (fail-closed). No content sanitization is performed
     // beyond jose4j's built-in JWK parsing. A malicious JWKS file could contain keys with weak
     // algorithms (e.g., HMAC-SHA256 symmetric key) that weaken validation security.
     // Improvement: Validate that all keys in the JWKS use acceptable algorithms (e.g., RS256,
     // ES256) and reject JWKS files containing symmetric keys.
-    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+    // Exploit: An attacker could replace the local JWKS file to inject a
+    // controlled key, enabling forged JWT tokens to pass validation.
     /**
      * "Transforms" the raw file contents into a {@link VerificationKeyResolver} that can be used to resolve
      * the keys provided in the JWT.

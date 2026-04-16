@@ -44,7 +44,7 @@ import static org.apache.kafka.common.utils.CollectionUtils.subtractMap;
  * It is very important that token validation is done in its own {@link OAuthBearerValidatorCallback}
  * irregardless of provided extensions, as they are inherently insecure.
  */
-// SECURITY: (MEDIUM) Extension validation callback - used by SaslServer to validate
+// SECURITY: SEC-OAUTH-025 (MEDIUM) Extension validation callback - used by SaslServer to validate
 // client-provided SASL extensions. Extensions are inherently untrusted (client-controlled).
 // Why: Per RFC 7628 Section 3.1, unknown extensions should be ignored, but validated
 // extensions influence downstream authorization decisions.

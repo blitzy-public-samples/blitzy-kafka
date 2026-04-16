@@ -28,7 +28,9 @@ import java.util.regex.Pattern;
  * particular, it splits them apart and translates them down into local
  * operating system names.
  */
-// SECURITY: (MEDIUM) Applies auth_to_local rules (similar to Hadoop's) to map Kerberos principals
+// SECURITY: SEC-KERB-015 (MEDIUM) Applies auth_to_local rules (similar to Hadoop's) to map Kerberos principals
+// Why: Kerberos name parsing and auth_to_local mapping determine
+// the authenticated principal identity.
 // to short names used for authorization. Rules are regex-based.
 // Exploit: A malicious user with a carefully crafted Kerberos principal could exploit regex
 // substitution rules to map their principal to an admin user's short name, gaining elevated privileges.
@@ -60,7 +62,9 @@ public class KerberosShortNamer {
         return new KerberosShortNamer(parseRules(defaultRealm, rules));
     }
 
-    // SECURITY: (MEDIUM) Parses user-configured auth_to_local rules into KerberosRule objects.
+    // SECURITY: SEC-KERB-016 (MEDIUM) Parses user-configured auth_to_local rules into KerberosRule objects.
+    // Why: Kerberos name parsing and auth_to_local mapping determine
+    // the authenticated principal identity.
     // Rules containing regex patterns are compiled here. Malformed rules with catastrophic
     // backtracking patterns could cause ReDoS. Input validation is limited to regex match against
     // RULE_PARSER; the inner substitution regex (group 10/11) is not complexity-checked.
@@ -99,7 +103,9 @@ public class KerberosShortNamer {
      * @return the short name
      * @throws IOException
      */
-    // SECURITY: (MEDIUM) First-match-wins rule evaluation. If rules are misconfigured, an earlier
+    // SECURITY: SEC-KERB-017 (MEDIUM) First-match-wins rule evaluation. If rules are misconfigured, an earlier
+    // Why: Kerberos name parsing and auth_to_local mapping determine
+    // the authenticated principal identity.
     // overly broad rule could match before a more specific restrictive rule, mapping unauthorized
     // principals to privileged short names. Always place DENY/restrictive rules before ALLOW rules.
     // Exploit: A misconfigured auth_to_local rule could map an attacker principal to a privileged local identity.

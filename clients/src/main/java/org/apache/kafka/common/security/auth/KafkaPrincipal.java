@@ -40,7 +40,7 @@ import static java.util.Objects.requireNonNull;
  *    authorizer which is capable of using the additional group information.
  * </ol>
  */
-// SECURITY: (MEDIUM) KafkaPrincipal is the canonical identity type for ALL Kafka
+// SECURITY: SEC-AUTH-001 (MEDIUM) KafkaPrincipal is the canonical identity type for ALL Kafka
 // authorization decisions. It wraps a principal type (e.g., "User") and name, with
 // an optional tokenAuthenticated flag for delegation token users.
 // Why: Every ACL evaluation, quota check, and audit log entry uses KafkaPrincipal
@@ -73,7 +73,7 @@ public class KafkaPrincipal implements Principal {
     // post-construction.
 
     public static final String USER_TYPE = "User";
-    // SECURITY: (LOW) ANONYMOUS principal used for unauthenticated PLAINTEXT connections.
+    // SECURITY: SEC-AUTH-002 (LOW) ANONYMOUS principal used for unauthenticated PLAINTEXT connections.
     // Why: Represents the identity for unauthenticated sessions in ACL authorization.
     // Exploit: Reference equality (==) is NOT reliable -- equals() checks type+name, so
     // new KafkaPrincipal("User","ANONYMOUS") matches, potentially bypassing identity checks.
@@ -82,7 +82,7 @@ public class KafkaPrincipal implements Principal {
 
     private final String principalType;
     private final String name;
-    // SECURITY: (MEDIUM) volatile boolean -- delegation token users have this flag set
+    // SECURITY: SEC-AUTH-003 (MEDIUM) volatile boolean -- delegation token users have this flag set
     // to true. Authorization logic may apply different ACL evaluation for
     // token-authenticated principals (e.g., delegation tokens inherit the token owner's
     // permissions with possible restrictions).

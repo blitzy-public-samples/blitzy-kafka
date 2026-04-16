@@ -22,7 +22,7 @@ import org.apache.kafka.common.security.oauthbearer.internals.OAuthBearerSaslSer
 import java.security.Provider;
 import java.security.Security;
 
-// SECURITY: (LOW) Global JVM-wide SASL provider registration for OAUTHBEARER server factory.
+// SECURITY: SEC-OAUTH-067 (LOW) Global JVM-wide SASL provider registration for OAUTHBEARER server factory.
 // Why: Security.addProvider() registers the OAUTHBEARER SaslServerFactory globally in the JVM's
 // security provider list. Once registered, any SASL server context can use OAUTHBEARER.
 // Exploit: In a shared JVM environment, a malicious component could register a replacement
@@ -49,10 +49,14 @@ public final class OAuthBearerSaslServerProvider extends Provider {
                 OAuthBearerSaslServerFactory.class.getName());
     }
 
-    // SECURITY: (LOW) Same idempotency concern as OAuthBearerSaslClientProvider — multiple
+    // SECURITY: SEC-OAUTH-068 (LOW) Same idempotency concern as OAuthBearerSaslClientProvider — multiple
+    // Why: The SASL server validates bearer tokens received from
+    // clients during OAUTHBEARER authentication.
     // calls add duplicate providers. The SASL framework uses the first matching provider.
-    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+    // Exploit: A replayed bearer token could be accepted if the server
+    // lacks token binding or one-time-use validation.
+    // Improvement: Add provider integrity verification to prevent
+    // unauthorized SASL server factory replacement.
     public static void initialize() {
         Security.addProvider(new OAuthBearerSaslServerProvider());
     }

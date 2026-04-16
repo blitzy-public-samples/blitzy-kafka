@@ -27,7 +27,7 @@ import java.util.regex.Pattern;
 
 import javax.security.sasl.SaslException;
 
-// SECURITY: (MEDIUM) Parses and constructs the SASL OAUTHBEARER client-first message
+// SECURITY: SEC-OAUTH-042 (MEDIUM) Parses and constructs the SASL OAUTHBEARER client-first message
 // per RFC 7628. The message embeds the raw bearer token in the "auth=Bearer <token>" field.
 // Why: This class handles untrusted input (byte[] from the network on the server side)
 // and constructs cleartext token-bearing messages (on the client side). Malformed input
@@ -77,7 +77,9 @@ public class OAuthBearerClientInitialResponse {
     private final String authorizationId;
     private final SaslExtensions saslExtensions;
 
-    // SECURITY: (MEDIUM) Extension validation regex patterns per RFC 7628 Section 3.1.
+    // SECURITY: SEC-OAUTH-043 (MEDIUM) Extension validation regex patterns per RFC 7628 Section 3.1.
+    // Why: The initial SASL response contains the bearer token and
+    // extensions that must be parsed securely.
     // KEY: [A-Za-z]+ -- letters only, preventing injection via special characters in keys.
     // VALUE: [\x21-\x7E \t\r\n]+ -- printable ASCII plus whitespace. Note: \r\n
     // are included per the RFC but could enable header injection in downstream HTTP
@@ -87,7 +89,9 @@ public class OAuthBearerClientInitialResponse {
     public static final Pattern EXTENSION_KEY_PATTERN = Pattern.compile(KEY);
     public static final Pattern EXTENSION_VALUE_PATTERN = Pattern.compile(VALUE);
 
-    // SECURITY: (MEDIUM) Parses untrusted client input. CLIENT_INITIAL_RESPONSE_PATTERN
+    // SECURITY: SEC-OAUTH-044 (MEDIUM) Parses untrusted client input. CLIENT_INITIAL_RESPONSE_PATTERN
+    // Why: The initial SASL response contains the bearer token and
+    // extensions that must be parsed securely.
     // regex validates the overall structure, AUTH_PATTERN validates the "Bearer <token>"
     // format. If the regex doesn't match, SaslException is thrown (fail-closed). The token
     // value is extracted via named capture group "token" which restricts to [-_~+/.a-zA-Z0-9=].
@@ -98,8 +102,8 @@ public class OAuthBearerClientInitialResponse {
     // full specification. Alternative: Single builder pattern. Rationale: Three constructors
     // cover the two primary use cases cleanly (server parsing, client construction) without
     // the overhead of a builder for this simple data carrier.
-    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+    // Exploit: A malformed initial SASL response could exploit parsing to inject unauthorized authentication paramet...
+    // Improvement: Add strict format validation for the initial SASL response fields before processing.
     public OAuthBearerClientInitialResponse(byte[] response) throws SaslException {
         String responseMsg = new String(response, StandardCharsets.UTF_8);
         Matcher matcher = CLIENT_INITIAL_RESPONSE_PATTERN.matcher(responseMsg);
@@ -174,11 +178,15 @@ public class OAuthBearerClientInitialResponse {
         return saslExtensions;
     }
 
-    // SECURITY: (LOW) Constructs the wire-format message. The token value is embedded
+    // SECURITY: SEC-OAUTH-045 (LOW) Constructs the wire-format message. The token value is embedded
+    // Why: The initial SASL response contains the bearer token and
+    // extensions that must be parsed securely.
     // directly -- no encoding or escaping is applied beyond what was validated at
     // construction time. The SEPARATOR (U+0001) is used as a field delimiter.
-    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+    // Exploit: A malformed initial client response could exploit SASL
+    // parsing to inject unauthorized authentication parameters.
+    // Improvement: Add defense-in-depth OAuth token validation with
+    // token binding and strict claim verification.
     public byte[] toBytes() {
         String authzid = authorizationId.isEmpty() ? "" : "a=" + authorizationId;
         String extensions = extensionsMessage();
@@ -222,12 +230,16 @@ public class OAuthBearerClientInitialResponse {
      * @see <a href="https://tools.ietf.org/html/rfc7628#section-3.1">RFC 7628,
      *  Section 3.1</a>
      */
-    // SECURITY: (MEDIUM) Validates all extensions against patterns and checks for reserved
+    // SECURITY: SEC-OAUTH-046 (MEDIUM) Validates all extensions against patterns and checks for reserved
+    // Why: The initial SASL response contains the bearer token and
+    // extensions that must be parsed securely.
     // key "auth". This prevents a client from injecting a second "auth" key to override
     // the legitimate token. The iteration over all entries ensures no key or value escapes
     // validation. Extension validation is called from both constructors.
-    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+    // Exploit: Injecting control characters in SASL extensions could
+    // manipulate the authentication exchange or bypass parsing.
+    // Improvement: Add defense-in-depth OAuth token validation with
+    // token binding and strict claim verification.
     public static void validateExtensions(SaslExtensions extensions) throws SaslException {
         if (extensions == null)
             return;

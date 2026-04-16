@@ -51,7 +51,9 @@ import static java.util.Arrays.asList;
  * Centralized, reference-counted lifecycle manager for {@link Login} and
  * {@link AuthenticateCallbackHandler} instances.
  *
- * @implSpec SECURITY: (HIGH) Reference-counted login lifecycle management.
+ * @implSpec SECURITY: SEC-SASL-015 (HIGH) Reference-counted login lifecycle management.
+ * Why: Login manager controls JAAS login session lifecycle and
+ * credential refresh for all authentication mechanisms.
  * Caches Login instances (with authenticated JAAS Subjects) in static maps.
  * Exploit: A double-release would decrement refCount below zero; a subsequent
  * acquire/release could close the Login while another holder still uses it --
@@ -67,7 +69,9 @@ public class LoginManager {
     // Rationale: Static JAAS configs identified by context name; dynamic configs by Password
     // value, enabling hot-reload when config changes. Risk: static instances persist until
     // JVM exit unless explicitly cleared via closeAll().
-    // SECURITY: (HIGH) Caches hold Login instances with authenticated JAAS Subjects.
+    // SECURITY: SEC-SASL-016 (HIGH) Caches hold Login instances with authenticated JAAS Subjects.
+    // Why: Login manager controls JAAS login session lifecycle and
+    // credential refresh for all authentication mechanisms.
     // Exploit: If Password.hashCode/equals leaks timing info (DYNAMIC_INSTANCES keyed by
     // Password), side-channel attacks could reveal config values. Password.equals() uses
     // constant-time comparison. Improvement: Consider non-sensitive hash as cache key.
@@ -82,7 +86,9 @@ public class LoginManager {
     private final AuthenticateCallbackHandler loginCallbackHandler;
     private int refCount;
 
-    // SECURITY: (MEDIUM) Constructor performs login immediately via reflection-created
+    // SECURITY: SEC-SASL-017 (MEDIUM) Constructor performs login immediately via reflection-created
+    // Why: Login manager controls JAAS login session lifecycle and
+    // credential refresh for all authentication mechanisms.
     // Login/CallbackHandler instances (Utils.newInstance). If login fails, closeResources()
     // cleans up partial state. Exploit: Any class on the classpath matching the Login or
     // AuthenticateCallbackHandler type could be instantiated via reflection.
@@ -192,7 +198,7 @@ public class LoginManager {
     /**
      * Decrease the reference count for this instance and release resources if it reaches 0.
      */
-    // SECURITY: (HIGH) Reference-counted lifecycle with synchronized(LoginManager.class).
+    // SECURITY: SEC-SASL-018 (HIGH) Reference-counted lifecycle with synchronized(LoginManager.class).
     // Why: Last release (refCount==1) closes Login and removes from cache atomically.
     // Exploit: Without synchronization, a thread could find a cached instance between
     // the cache removal and login.close(), obtaining a closing/closed Login.
@@ -215,7 +221,9 @@ public class LoginManager {
         }
     }
 
-    // SECURITY: (MEDIUM) toString() avoids Subject.toString() which exposes private
+    // SECURITY: SEC-SASL-019 (MEDIUM) toString() avoids Subject.toString() which exposes private
+    // Why: Login manager controls JAAS login session lifecycle and
+    // credential refresh for all authentication mechanisms.
     // credentials. Exploit: If Subject.toString() were used, passwords/tokens would
     // appear in log files accessible to operators. Improvement: Consider redaction util.
     @Override

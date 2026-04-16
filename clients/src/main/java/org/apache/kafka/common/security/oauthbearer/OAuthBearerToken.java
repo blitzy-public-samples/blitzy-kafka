@@ -39,7 +39,7 @@ import java.util.Set;
  *      <a href="https://tools.ietf.org/html/rfc6750#section-2.1">RFC 6750
  *      Section 2.1</a>
  */
-// SECURITY: (MEDIUM) Token interface exposing the raw b64token value via value().
+// SECURITY: SEC-OAUTH-035 (MEDIUM) Token interface exposing the raw b64token value via value().
 // Why: The value() method returns the complete bearer token string — anyone with a
 // reference to an OAuthBearerToken instance can extract and reuse the raw token.
 // Exploit: If OAuthBearerToken instances are logged, serialized, or exposed via JMX,

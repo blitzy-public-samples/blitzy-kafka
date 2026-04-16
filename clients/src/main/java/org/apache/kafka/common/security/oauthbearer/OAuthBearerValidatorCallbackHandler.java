@@ -102,7 +102,9 @@ import static org.apache.kafka.common.security.oauthbearer.internals.secured.Con
  * retrieval, enabling independent evolution of each concern.
  */
 
-// SECURITY: (CRITICAL) Broker-side JWT validation entry point — validates
+// SECURITY: SEC-OAUTH-037 (CRITICAL) Broker-side JWT validation entry point — validates
+// Why: The validator callback handler performs server-side token
+// validation for all OAUTHBEARER connections.
 // token signature, claims, expiry for every OAUTHBEARER authentication
 // request. Why: This handler receives raw JWT tokens from untrusted clients
 // and delegates to JwtValidator for cryptographic verification. Failure
@@ -138,7 +140,9 @@ public class OAuthBearerValidatorCallbackHandler implements AuthenticateCallback
 
     private JwtValidator jwtValidator;
 
-    // SECURITY: (HIGH) JwtValidator is instantiated via reflection using the
+    // SECURITY: SEC-OAUTH-038 (HIGH) JwtValidator is instantiated via reflection using the
+    // Why: The validator callback handler performs server-side token
+    // validation for all OAUTHBEARER connections.
     // configured class name. The class must implement JwtValidator and be
     // on the classpath. Malicious configuration could point to an
     // attacker-controlled class if config write access is compromised.
@@ -149,8 +153,8 @@ public class OAuthBearerValidatorCallbackHandler implements AuthenticateCallback
     // claim validation or opaque token introspection). Alternative:
     // Hard-code BrokerJwtValidator. Rationale: Pluggability supports
     // diverse OAuth provider requirements without code changes.
-    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
-    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
+    // Exploit: A crafted token with manipulated claims could bypass the callback handler's validation if claim check...
+    // Improvement: Add strict clock skew limits and consider online token introspection for high-security deployments.
     @Override
     public void configure(Map<String, ?> configs, String saslMechanism, List<AppConfigurationEntry> jaasConfigEntries) {
         jwtValidator = getConfiguredInstance(
@@ -182,7 +186,9 @@ public class OAuthBearerValidatorCallbackHandler implements AuthenticateCallback
         this.jwtValidator.configure(configs, saslMechanism, jaasConfigEntries);
     }
 
-    // SECURITY: (LOW) Uses Utils.closeQuietly to suppress close() exceptions,
+    // SECURITY: SEC-OAUTH-039 (LOW) Uses Utils.closeQuietly to suppress close() exceptions,
+    // Why: The validator callback handler performs server-side token
+    // validation for all OAUTHBEARER connections.
     // preventing resource cleanup failures from leaking internal state
     // through exception messages.
     // Exploit: An attacker could exhaust server resources by sending oversized or excessive requests.
@@ -208,7 +214,9 @@ public class OAuthBearerValidatorCallbackHandler implements AuthenticateCallback
         }
     }
 
-    // SECURITY: (CRITICAL) Token validation path — delegates to
+    // SECURITY: SEC-OAUTH-040 (CRITICAL) Token validation path — delegates to
+    // Why: The validator callback handler performs server-side token
+    // validation for all OAUTHBEARER connections.
     // JwtValidator.validate(). On validation failure, returns generic
     // "invalid_token" error without exposing the specific failure reason
     // to the client (defense against information leakage). The exception
@@ -233,7 +241,9 @@ public class OAuthBearerValidatorCallbackHandler implements AuthenticateCallback
         }
     }
 
-    // SECURITY: (MEDIUM) Marks all client-provided SASL extensions as
+    // SECURITY: SEC-OAUTH-041 (MEDIUM) Marks all client-provided SASL extensions as
+    // Why: The validator callback handler performs server-side token
+    // validation for all OAUTHBEARER connections.
     // valid without checking their content. Per RFC 7628, unknown
     // extensions should be ignored. Why: Extensions are inherently
     // untrusted — they are sent by the client and can contain arbitrary
