@@ -23,6 +23,12 @@ import java.nio.ByteBuffer;
 /**
  * A send backed by an array of byte buffers
  */
+// DECISION: ByteBufferSend implements Send for one or more ByteBuffers, using
+// GatheringByteChannel.write(ByteBuffer[]) for efficient scatter/gather I/O.
+// The pending flag tracks whether the TransportLayer has buffered writes that haven't
+// been flushed to the network socket yet (relevant for SSL where SSLEngine may buffer data).
+// Alternative: Single-buffer Send — rejected because Kafka protocol responses often consist
+// of a header buffer + payload buffer, and scatter/gather avoids copying them together.
 public class ByteBufferSend implements Send {
 
     private final long size;
@@ -76,6 +82,10 @@ public class ByteBufferSend implements Send {
             ')';
     }
 
+    // DECISION: Factory method that prepends a 4-byte big-endian length prefix to a ByteBuffer.
+    // This matches Kafka's wire protocol framing convention (length-prefixed messages).
+    // The size prefix includes only the payload size, not itself, matching the NetworkReceive
+    // expectation that the 4-byte size header encodes the remaining payload length.
     public static ByteBufferSend sizePrefixed(ByteBuffer buffer) {
         ByteBuffer sizeBuffer = ByteBuffer.allocate(4);
         sizeBuffer.putInt(0, buffer.remaining());
