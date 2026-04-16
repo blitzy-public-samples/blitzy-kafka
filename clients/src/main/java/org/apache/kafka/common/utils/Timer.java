@@ -47,10 +47,28 @@ package org.apache.kafka.common.utils;
  *     }
  * </pre>
  */
+// DECISION: Timer wraps a Time instance with monotonic deadline tracking rather than using raw
+// System.currentTimeMillis() everywhere. Alternative: Pass (deadline, Time) pair to each method.
+// Rationale: Timer encapsulates deadline math and monotonicity guarantees — prevents callers from
+// accidentally using non-monotonic wall-clock time for timeout decisions. Also avoids integer
+// overflow bugs when computing deadlines (uses Math.min with Long.MAX_VALUE cap).
+//
+// CROSS-CUTTING: Consumed by virtually all blocking Kafka client operations:
+// KafkaConsumer.poll(), KafkaProducer.send(), KafkaAdminClient operations,
+// NetworkClient.poll(), ConsumerCoordinator.poll(), and Streams TaskManager.
+// Contract: Callers must call update() between blocking operations to advance the timer.
+// Depends on: Time interface (clients/src/main/java/org/apache/kafka/common/utils/Time.java)
 public class Timer {
+    // DECISION: Caches currentTimeMs to allow callers to control when system calls occur.
+    // Alternative: Query time on every access. Rationale: In tight poll loops (e.g.,
+    // NetworkClient.poll), repeated System.currentTimeMillis() calls add measurable overhead —
+    // caching with explicit update() calls gives callers control over syscall frequency.
     private final Time time;
     private long startMs;
     private long currentTimeMs;
+    // DECISION: Deadline stored as absolute millisecond timestamp with Long.MAX_VALUE as
+    // "no timeout". Alternative: Store remaining duration. Rationale: Absolute deadline avoids
+    // recalculation drift and is directly comparable to currentTimeMs for expiration checks.
     private long deadlineMs;
     private long timeoutMs;
 
@@ -107,6 +125,10 @@ public class Timer {
      *
      * @param timeoutMs The new timeout in milliseconds
      */
+    // DECISION: Uses currentTimeMs + timeoutMs with Long.MAX_VALUE cap to prevent overflow.
+    // Alternative: Math.addExact() with ArithmeticException. Rationale: Capping at Long.MAX_VALUE
+    // is a safer behavior than throwing — a timeout of Long.MAX_VALUE effectively means "wait
+    // forever" which is the intended semantic for very large timeouts.
     public void reset(long timeoutMs) {
         if (timeoutMs < 0)
             throw new IllegalArgumentException("Invalid negative timeout " + timeoutMs);
@@ -163,6 +185,8 @@ public class Timer {
      *
      * @return The cached remaining time in milliseconds until timer expiration
      */
+    // DECISION: Returns max(deadline - current, 0) to guarantee non-negative remaining time.
+    // Monotonicity: Once remainingMs() returns 0, it stays 0 until reset() is called.
     public long remainingMs() {
         return Math.max(0, deadlineMs - currentTimeMs);
     }
