@@ -59,12 +59,51 @@ import static org.apache.kafka.common.config.SaslConfigs.SASL_OAUTHBEARER_TOKEN_
  * ({@link OAuthBearerLoginCallbackHandler#CLIENT_ID_CONFIG}/{@link OAuthBearerLoginCallbackHandler#CLIENT_SECRET_CONFIG})
  * to a publicized token endpoint URL ({@link SaslConfigs#SASL_OAUTHBEARER_TOKEN_ENDPOINT_URL}).
  */
+// SECURITY: (HIGH) HTTPS token retrieval from OAuth provider via HTTP POST.
+// Why: This class sends client credentials (via HttpRequestFormatter) to the token endpoint
+// and receives bearer tokens. The connection handling, SSL setup, and response parsing are
+// all security-critical. Credentials travel in the HTTP request body/headers.
+// Exploit: (1) MITM attack -- if TLS certificate validation is insufficient or SSLSocketFactory
+// is misconfigured, an attacker could intercept credentials and tokens. (2) HTTP redirect --
+// HttpURLConnection follows redirects by default (up to 20 hops); a DNS hijack could redirect
+// to a malicious endpoint that captures credentials. (3) Response injection -- a compromised
+// token endpoint could return a crafted JWT with elevated claims.
+// Improvement: Consider disabling automatic redirect following
+// (con.setInstanceFollowRedirects(false)) or limiting redirect depth. Add certificate pinning
+// option for high-security deployments.
+//
+// DECISION: Uses java.net.HttpURLConnection for HTTP requests rather than
+// java.net.http.HttpClient (Java 11+) or Apache HttpClient. Alternatives:
+// (1) HttpClient -- modern, async-capable, (2) Apache HttpClient -- connection pooling,
+// retry built-in. Rationale: HttpURLConnection is available in all Java versions Kafka
+// supports, has zero external dependencies, and the synchronous blocking model is acceptable
+// since token retrieval runs in the Login thread (not the Kafka network thread).
+// Risk: No connection pooling -- each retrieve() opens a new TCP/TLS connection.
+//
+// CROSS-CUTTING: Depends on ConfigurationUtils (URL/config validation), JaasOptionsUtils
+// (SSL config extraction), Retry/Retryable/UnretryableException (retry framework),
+// HttpRequestFormatter (request formatting interface -- implemented by
+// ClientCredentialsRequestFormatter and JwtBearerRequestFormatter),
+// JwtResponseParser (JSON response parsing for token extraction).
+// Used by: ClientCredentialsJwtRetriever (client_credentials flow) and
+// JwtBearerJwtRetriever (jwt-bearer flow) which provide HttpRequestFormatter instances.
+// OAuthBearerLoginCallbackHandler creates this during configure().
+// Contract: configure() then retrieve(). Not reusable across multiple configs.
+// Impact: Changes to retry logic affect all OAuth token retrieval timing and reliability.
 public class HttpJwtRetriever implements JwtRetriever {
 
     private static final Logger log = LoggerFactory.getLogger(HttpJwtRetriever.class);
 
     private static final Set<Integer> UNRETRYABLE_HTTP_CODES;
 
+    // SECURITY: (MEDIUM) HTTP status codes treated as non-retryable. 401 (Unauthorized) and
+    // 403 (Forbidden) are included -- these indicate credential issues that won't resolve by
+    // retrying. Missing from this list: 429 (Too Many Requests) which could indicate rate
+    // limiting. Currently, 429 would be retried, which is correct behavior for rate limiting.
+    // DECISION: Explicit set rather than range check (e.g., 4xx). Rationale: Some 4xx codes
+    // like 408 (Request Timeout) and 429 (Too Many Requests) are transient and should be
+    // retried. An exhaustive set is safer than a range because new HTTP status codes may be
+    // added that are retryable. Risk: Unknown 4xx codes default to retryable, wasting retries.
     static {
         // This does not have to be an exhaustive list. There are other HTTP codes that
         // are defined in different RFCs (e.g. https://datatracker.ietf.org/doc/html/rfc6585)
@@ -92,6 +131,11 @@ public class HttpJwtRetriever implements JwtRetriever {
 
     private final HttpRequestFormatter requestFormatter;
 
+    // SECURITY: (HIGH) SSLSocketFactory for HTTPS connections. If null, the JVM's default
+    // SSL configuration is used. Created by JaasOptionsUtils from JAAS SSL configuration.
+    // The factory determines which TLS protocol versions, cipher suites, and trust stores
+    // are used for the token endpoint connection. A misconfigured factory (e.g., trust-all)
+    // would allow MITM attacks on the token endpoint.
     private SSLSocketFactory sslSocketFactory;
 
     private URL tokenEndpointUrl;
@@ -110,6 +154,11 @@ public class HttpJwtRetriever implements JwtRetriever {
 
     @Override
     public void configure(Map<String, ?> configs, String saslMechanism, List<AppConfigurationEntry> jaasConfigEntries) {
+        // SECURITY: (MEDIUM) Configuration extraction -- tokenEndpointUrl validated via
+        // ConfigurationUtils.validateUrl() which checks URL format and protocol allowlist
+        // (http/https/file only). SSLSocketFactory only created when protocol is HTTPS.
+        // If protocol is HTTP, credentials are sent in cleartext -- no warning is logged.
+        // Improvement: Log a WARN when token endpoint uses HTTP (not HTTPS) protocol.
         ConfigurationUtils cu = new ConfigurationUtils(configs, saslMechanism);
         JaasOptionsUtils jou = new JaasOptionsUtils(saslMechanism, jaasConfigEntries);
 
@@ -140,6 +189,12 @@ public class HttpJwtRetriever implements JwtRetriever {
      */
     public String retrieve() throws JwtRetrieverException {
         String requestBody = requestFormatter.formatBody();
+        // DECISION: Retry wraps the entire HTTP exchange (connect + POST + read) rather
+        // than retrying individual phases. Alternative: Retry only the connection phase,
+        // fail fast on response errors. Rationale: Network issues can occur at any phase
+        // (DNS, TCP, TLS, HTTP). The Retry class handles backoff timing;
+        // UnretryableException (from UNRETRYABLE_HTTP_CODES) short-circuits for
+        // known non-transient errors.
         Retry<String> retry = new Retry<>(loginRetryBackoffMs, loginRetryBackoffMaxMs);
         Map<String, String> headers = requestFormatter.formatHeaders();
 
@@ -184,6 +239,14 @@ public class HttpJwtRetriever implements JwtRetriever {
         return handleOutput(con);
     }
 
+    // COMPLEXITY: 41 lines -- HTTP request setup and transmission.
+    // Structure: (1) Set request method POST, (2) Set Accept header,
+    // (3) Apply custom headers from HttpRequestFormatter, (4) Set Cache-Control,
+    // (5) Set Content-Length and enable output if body present,
+    // (6) Disable caches, (7) Apply connect/read timeouts if configured,
+    // (8) Connect, (9) Write request body via stream copy.
+    // Key branches: null headers check, null requestBody check, null timeout checks.
+    // Exit paths: normal return, IOException on connect/write failure.
     private static void handleInput(HttpURLConnection con,
         Map<String, String> headers,
         String requestBody,
@@ -226,6 +289,20 @@ public class HttpJwtRetriever implements JwtRetriever {
         }
     }
 
+    // COMPLEXITY: 56 lines -- HTTP response reading and error classification.
+    // Structure: (1) Read response code, (2) Try to read response body from InputStream,
+    // (3) On failure, try to read error stream, (4) Branch on response code: 200/201 ->
+    // validate non-empty body and return; other codes -> check UNRETRYABLE_HTTP_CODES ->
+    // throw UnretryableException or IOException.
+    // Key branches: responseCode 200/201 vs other, UNRETRYABLE vs retryable error codes,
+    // null/empty responseBody check.
+    // Exit paths: return responseBody, throw IOException, throw UnretryableException.
+    //
+    // SECURITY: (MEDIUM) Response body handling. The response body is NOT logged (may
+    // contain tokens). Error response body IS logged (per RFC 6749 Section 5.2, error
+    // responses don't contain sensitive data). The response body is held in memory as a
+    // String. For very large responses, this could cause OOM -- consider limiting
+    // response body size.
     static String handleOutput(final HttpURLConnection con) throws IOException {
         int responseCode = con.getResponseCode();
         log.debug("handleOutput - responseCode: {}", responseCode);
@@ -270,6 +347,10 @@ public class HttpJwtRetriever implements JwtRetriever {
             log.warn("handleOutput - error response code: {}, error response body: {}", responseCode,
                 formatErrorMessage(errorResponseBody));
 
+            // SECURITY: (MEDIUM) UNRETRYABLE_HTTP_CODES check -- for known non-transient
+            // errors, throws UnretryableException to stop retry loop immediately. This
+            // prevents credential brute-forcing against the token endpoint -- a 401 (bad
+            // credentials) won't be retried.
             if (UNRETRYABLE_HTTP_CODES.contains(responseCode)) {
                 // We know that this is a non-transient error, so let's not keep retrying the
                 // request unnecessarily.
@@ -284,6 +365,9 @@ public class HttpJwtRetriever implements JwtRetriever {
         }
     }
 
+    // DECISION: 4KB buffer for stream copy. Alternative: Larger buffer (64KB) for fewer
+    // syscalls. Rationale: Token endpoint responses are typically small (< 4KB for a JWT),
+    // so buffer size has minimal impact. 4KB matches the typical TCP MSS and OS page size.
     static void copy(InputStream is, OutputStream os) throws IOException {
         byte[] buf = new byte[4096];
         int b;
