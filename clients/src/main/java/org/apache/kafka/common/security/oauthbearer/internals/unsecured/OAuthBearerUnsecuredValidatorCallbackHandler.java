@@ -79,6 +79,25 @@ import javax.security.auth.login.AppConfigurationEntry;
  * It is worth noting that this class is not suitable for production use due to the use of unsecured JWT tokens and
  * validation of every given extension.
  */
+// SECURITY: (CRITICAL) DEVELOPMENT ONLY -- NO PRODUCTION USE.
+// This unsecured implementation accepts tokens without signature verification.
+// A bad actor can forge any token with arbitrary claims (scope, subject, expiry).
+// Using this in production allows complete authentication bypass.
+// Improvement: Add a runtime check that logs CRITICAL-level warning when
+// unsecured OAUTHBEARER is used in non-test contexts. Consider adding a
+// system property or config flag to explicitly enable unsecured mode.
+//
+// CROSS-CUTTING: Depends on OAuthBearerUnsecuredJws (token parsing, same package),
+// OAuthBearerValidationUtils (claim validation, same package),
+// OAuthBearerValidationResult (validation result type, same package),
+// OAuthBearerScopeUtils (scope parsing, same package),
+// OAuthBearerLoginModule.OAUTHBEARER_MECHANISM (mechanism name constant).
+// Used by: authenticator/SaslServerAuthenticator via SASL callback handler SPI.
+// This is the default server-side validator when no custom
+// sasl.server.callback.handler.class is configured for OAUTHBEARER.
+// Contract: configure() -> handle() lifecycle. Single-threaded per SASL exchange.
+// Impact: Replacing this handler with a secured implementation (e.g.,
+// OAuthBearerValidatorCallbackHandler using JWKS) is the REQUIRED step for production.
 public class OAuthBearerUnsecuredValidatorCallbackHandler implements AuthenticateCallbackHandler {
     private static final Logger log = LoggerFactory.getLogger(OAuthBearerUnsecuredValidatorCallbackHandler.class);
     private static final String OPTION_PREFIX = "unsecuredValidator";
@@ -121,6 +140,9 @@ public class OAuthBearerUnsecuredValidatorCallbackHandler implements Authenticat
         this.moduleOptions = Collections
                 .unmodifiableMap((Map<String, String>) jaasConfigEntries.get(0).getOptions());
         configured = true;
+        // SECURITY: (MEDIUM) Configuration captured from JAAS options without sanitization.
+        // moduleOptions may contain attacker-controlled values if the JAAS config file is
+        // writable. No validation is performed on option values until handle() is called.
     }
 
     @Override
@@ -138,6 +160,12 @@ public class OAuthBearerUnsecuredValidatorCallbackHandler implements Authenticat
                     validationCallback.error(failureScope != null ? "insufficient_scope" : "invalid_token",
                             failureScope, failureReason.failureOpenIdConfig());
                 }
+            // SECURITY: (MEDIUM) All extensions are accepted unconditionally:
+            // extensionsCallback.valid(extensionName) for every extension. In a production
+            // validator, extensions should be validated against an allowlist.
+            // Exploit: A malicious client can inject arbitrary SASL extensions that
+            // downstream code (custom authorizers, audit loggers) may process unsafely.
+            // Improvement: At minimum, log accepted extensions at DEBUG level for audit.
             } else if (callback instanceof OAuthBearerExtensionsValidatorCallback) {
                 OAuthBearerExtensionsValidatorCallback extensionsCallback = (OAuthBearerExtensionsValidatorCallback) callback;
                 extensionsCallback.inputExtensions().map().forEach((extensionName, v) -> extensionsCallback.valid(extensionName));
@@ -151,6 +179,17 @@ public class OAuthBearerUnsecuredValidatorCallbackHandler implements Authenticat
         // empty
     }
 
+    // SECURITY: (CRITICAL) Validates unsecured tokens -- constructs OAuthBearerUnsecuredJws
+    // and runs claim checks. Since tokens have NO cryptographic signature, validation only
+    // checks structural validity (3-part JWS format, alg=none, non-empty signature segment)
+    // and claim semantics (expiry, not-before, scope, principal existence). None of these
+    // checks require cryptographic verification.
+    // Exploit: An attacker can forge a token by: (1) Base64URL-encoding {"alg":"none"} as
+    // header, (2) Base64URL-encoding any claims payload (e.g., {"sub":"admin",
+    // "exp":999999999999,"scope":"cluster-admin"}), (3) concatenating header.payload.
+    // (empty signature). This passes all validations because no signature is checked.
+    // Improvement: Log principal name and token claims at WARN level when unsecured
+    // validation is used, to create an audit trail. Reject tokens in production entirely.
     private void handleCallback(OAuthBearerValidatorCallback callback) {
         String tokenValue = callback.tokenValue();
         if (tokenValue == null)
@@ -162,6 +201,13 @@ public class OAuthBearerUnsecuredValidatorCallbackHandler implements Authenticat
         OAuthBearerUnsecuredJws unsecuredJwt = new OAuthBearerUnsecuredJws(tokenValue, principalClaimName,
                 scopeClaimName);
         long now = time.milliseconds();
+        // DECISION: Validation checks are ordered: (1) principal claim existence,
+        // (2) issued-at time, (3) expiration time, (4) time consistency (iat < exp),
+        // (5) scope membership. Alternative: Validate all claims and collect all
+        // failures before throwing. Rationale: Fail-fast approach -- first validation
+        // failure throws immediately via throwExceptionIfFailed(). This is simpler but
+        // means the client receives only the first error, not all errors. For
+        // development/test use, fast failure is acceptable.
         OAuthBearerValidationUtils
                 .validateClaimForExistenceAndType(unsecuredJwt, true, principalClaimName, String.class)
                 .throwExceptionIfFailed();
@@ -176,6 +222,10 @@ public class OAuthBearerUnsecuredValidatorCallbackHandler implements Authenticat
         callback.token(unsecuredJwt);
     }
 
+    // DECISION: Default principal claim is "sub" and scope claim is "scope", matching
+    // standard JWT/OIDC conventions. Alternatives: Custom claim names only (no defaults).
+    // Rationale: Using "sub" and "scope" as defaults reduces configuration burden for
+    // standard-compliant tokens. Custom overrides are available via JAAS options.
     private String principalClaimName() {
         String principalClaimNameValue = option(PRINCIPAL_CLAIM_NAME_OPTION);
         return Utils.isBlank(principalClaimNameValue) ? "sub" : principalClaimNameValue.trim();
@@ -191,6 +241,10 @@ public class OAuthBearerUnsecuredValidatorCallbackHandler implements Authenticat
         return Utils.isBlank(requiredSpaceDelimitedScope) ? Collections.emptyList() : OAuthBearerScopeUtils.parseScope(requiredSpaceDelimitedScope.trim());
     }
 
+    // DECISION: Default clock skew is 0 ms (strict temporal validation). Alternative:
+    // Default to a small tolerance (e.g., 5000 ms) to handle clock drift between token
+    // issuer and Kafka broker. Rationale: Zero tolerance is the safest default for a
+    // development/test validator -- it surfaces timing issues early during development.
     private int allowableClockSkewMs() {
         String allowableClockSkewMsValue = option(ALLOWABLE_CLOCK_SKEW_MILLIS_OPTION);
         int allowableClockSkewMs;
