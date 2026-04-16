@@ -28,11 +28,30 @@ import java.util.Objects;
  */
 public class TokenInformation {
 
+    // SECURITY (HIGH): Token metadata includes principal identity and temporal bounds.
+    // Both maxTimestamp (absolute lifetime) and expiryTimestamp (renewable window) MUST
+    // be validated during authentication. If only expiryTimestamp is checked, a repeatedly-
+    // renewed token could remain valid indefinitely past its intended maximum lifetime.
+    // Improvement: Add a convenience isExpired(long currentTimeMs) method checking both
+    // timestamps to prevent caller errors in expiry enforcement.
+    //
+    // DECISION: Separate maxTimestamp (absolute, immutable) from expiryTimestamp (renewable,
+    // mutable) per KIP-48 delegation token design. maxTimestamp provides a hard upper bound
+    // that cannot be extended by renewals, ensuring tokens have a finite lifetime regardless
+    // of renewal frequency. This dual-timestamp design prevents indefinite token persistence.
+    //
+    // CROSS-CUTTING: Consumed by metadata/DelegationTokenData for KRaft metadata serialization,
+    // DelegationTokenCache (internals) for in-memory token lookup, and core/DelegationTokenManager
+    // for broker-side token lifecycle enforcement.
+
     private final KafkaPrincipal owner;
     private final KafkaPrincipal tokenRequester;
     private final Collection<KafkaPrincipal> renewers;
     private final long issueTimestamp;
     private final long maxTimestamp;
+    // SECURITY: Mutable field -- not final. Updates via setExpiryTimestamp() are unsynchronized.
+    // In a multi-threaded broker context, concurrent reads and renewal-writes to this field
+    // could produce stale expiry checks. Callers must provide external synchronization.
     private long expiryTimestamp;
     private final String tokenId;
 
@@ -95,6 +114,11 @@ public class TokenInformation {
         return expiryTimestamp;
     }
 
+    // SECURITY (MEDIUM): Unsynchronized mutation of expiry timestamp.
+    // Exploit: If a token renewal (setExpiryTimestamp) races with an authentication check
+    // (expiryTimestamp()), the auth check may see a stale value, allowing use of an
+    // effectively-expired token. Improvement: Consider volatile or AtomicLong for
+    // thread-safe reads without full synchronization.
     public void setExpiryTimestamp(long expiryTimestamp) {
         this.expiryTimestamp = expiryTimestamp;
     }
@@ -107,6 +131,12 @@ public class TokenInformation {
         return maxTimestamp;
     }
 
+    // SECURITY (MEDIUM): Authorization check -- determines if a principal can operate on this token.
+    // Owner, requester, and renewers all have management rights. KafkaPrincipal.equals() uses
+    // type+name comparison; ensure principal type is validated upstream to prevent type confusion.
+    // DECISION: Token requester (who created the token on behalf of the owner) is granted
+    // the same management rights as the owner -- this supports delegation use cases where
+    // a service creates tokens for end-users.
     public boolean ownerOrRenewer(KafkaPrincipal principal) {
         return owner.equals(principal) || tokenRequester.equals(principal) || renewers.contains(principal);
     }
@@ -124,6 +154,12 @@ public class TokenInformation {
             '}';
     }
 
+    // DECISION: equals() intentionally omits expiryTimestamp because the same logical token
+    // at different renewal stages should be considered equal. However, hashCode() includes
+    // expiryTimestamp -- this asymmetry can cause issues in hashed collections where a token
+    // whose expiry was updated may hash to a different bucket but still be "equal" to its
+    // previous state. Callers using TokenInformation in HashSets/HashMaps must be aware
+    // that mutating expiryTimestamp after insertion may cause lookup failures.
     @Override
     public boolean equals(Object o) {
         if (this == o) {
