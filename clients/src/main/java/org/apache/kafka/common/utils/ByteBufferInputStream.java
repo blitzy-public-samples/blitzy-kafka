@@ -23,6 +23,11 @@ import java.nio.ByteBuffer;
 /**
  * A byte buffer backed input inputStream
  */
+// DECISION: Zero-copy InputStream adapter over ByteBuffer. Alternative: Copy buffer to byte[]
+// and wrap with ByteArrayInputStream. Rationale: Avoids memory allocation and copy for
+// deserialization paths where the source ByteBuffer is already available (e.g., network receive
+// buffers). The ByteBuffer position is advanced as bytes are read, making this a destructive
+// read (not rewindable via InputStream.reset()).
 public final class ByteBufferInputStream extends InputStream {
     private final ByteBuffer buffer;
 
