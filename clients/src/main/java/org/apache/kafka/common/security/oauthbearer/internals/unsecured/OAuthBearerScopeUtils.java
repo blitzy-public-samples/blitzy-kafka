@@ -27,8 +27,31 @@ import java.util.regex.Pattern;
  * <a href="https://tools.ietf.org/html/rfc6749#section-3.3">Access Token
  * Scopes</a>
  */
+// DECISION: RFC 6749 Section 3.3 compliant scope parsing as a static utility class.
+// Uses single-space split (String.split(" ")) rather than regex split (\\s+).
+// Alternative: Regex-based whitespace split to handle tabs, multiple spaces.
+// Rationale: RFC 6749 Section 3.3 explicitly defines scope as "one or more scope values
+// separated by spaces" (SP = %x20). Using literal " " split is spec-compliant. Regex
+// whitespace split would be more lenient but would accept non-compliant scope strings.
+// Individual scope items are validated against INDIVIDUAL_SCOPE_ITEM_PATTERN regex.
+//
+// CROSS-CUTTING: Consumed by OAuthBearerValidationUtils.validateScope() (indirectly — the
+// requiredScope list passed to validateScope is often produced by parseScope()),
+// OAuthBearerUnsecuredValidatorCallbackHandler.requiredScope() (parses the
+// unsecuredValidatorRequiredScope JAAS option via parseScope()),
+// OAuthBearerUnsecuredLoginCallbackHandler (scope claim handling during token construction).
+// Depends on: OAuthBearerConfigException (thrown for invalid scope items).
+// Contract: parseScope() returns an unmodifiable list of validated scope items.
+// isValidScopeItem() is a pure predicate. Both are thread-safe (stateless).
+// Impact: Changes to the INDIVIDUAL_SCOPE_ITEM_PATTERN affect which scope values are
+// accepted across all OAUTHBEARER authentication paths in the unsecured package.
 public class OAuthBearerScopeUtils {
     private static final Pattern INDIVIDUAL_SCOPE_ITEM_PATTERN = Pattern.compile("[\\x23-\\x5B\\x5D-\\x7E\\x21]+");
+    // DECISION: Pattern [\\x23-\\x5B\\x5D-\\x7E\\x21]+ covers NQCHAR + NQSCHAR per RFC 6749.
+    // The range excludes \\x22 (double-quote) and \\x5C (backslash) from the printable ASCII
+    // set, as these are special characters that could cause parsing issues in scope values.
+    // Alternative: Use a more permissive pattern. Rationale: Strict RFC compliance prevents
+    // scope values that could be misinterpreted by downstream consumers or injection targets.
 
     /**
      * Return true if the given value meets the definition of a valid scope item as
@@ -66,6 +89,10 @@ public class OAuthBearerScopeUtils {
                 retval.add(individualScopeItem);
             }
         }
+        // DECISION: Returns Collections.unmodifiableList() to prevent callers from modifying the
+        // parsed scope list. Alternative: Return mutable ArrayList. Rationale: Scope values are
+        // treated as immutable configuration data. Wrapping in unmodifiable view prevents accidental
+        // mutation by callers, consistent with OAuthBearerUnsecuredJws immutability convention.
         return Collections.unmodifiableList(retval);
     }
 
