@@ -42,6 +42,16 @@ import java.util.stream.Collectors;
  * A convenient base class for configurations to extend.
  * <p>
  * This class holds both the original configuration that was provided as well as the parsed
+ *
+ * @implNote CROSS-CUTTING: AbstractConfig is the foundational configuration base class consumed by EVERY
+ * Kafka module: ProducerConfig, ConsumerConfig, AdminClientConfig (clients/), StreamsConfig (streams/),
+ * WorkerConfig/ConnectorConfig (connect/), KafkaConfig (core/), and all coordinator/controller configs.
+ * Any change to parsing, validation, or provider resolution logic impacts the entire Kafka ecosystem.
+ *
+ * DECISION: Mutable parsed values map (this.values) with immutable originals (this.originals). Alternative:
+ * Fully immutable with builder. Rationale: The two-phase construction (preProcess &rarr; resolve &rarr; parse &rarr;
+ * postProcess &rarr; re-parse) requires mutable intermediate state. Final state is effectively immutable after
+ * construction. The ConcurrentHashMap-backed 'used' set enables thread-safe unused-config detection.
  */
 public class AbstractConfig {
 
@@ -62,6 +72,9 @@ public class AbstractConfig {
 
     private final ConfigDef definition;
 
+    // DECISION: System property for constraining auto-discovered ConfigProviders. Alternative: Config-based
+    // allowlist. Rationale: System property provides JVM-level security control — prevents untrusted
+    // classpath providers from being automatically instantiated. Null (unset) = allow all providers.
     public static final String AUTOMATIC_CONFIG_PROVIDERS_PROPERTY = "org.apache.kafka.automatic.config.providers";
 
     public static final String CONFIG_PROVIDERS_CONFIG = "config.providers";
@@ -113,6 +126,11 @@ public class AbstractConfig {
      */
     @SuppressWarnings({"this-escape"})
     public AbstractConfig(ConfigDef definition, Map<?, ?> originals, Map<String, ?> configProviderProps, boolean doLog) {
+        // DECISION: Constructor performs a 5-step pipeline: (1) preProcessParsedConfig hook for subclass
+        // validation, (2) resolveConfigVariables for ${provider:path:key} substitution, (3) parse via
+        // ConfigDef, (4) postProcessParsedConfig for secondary defaults, (5) re-parse to validate updates.
+        // Alternative: Single-pass construction. Rationale: Two-parse approach enables subclasses (e.g.,
+        // StreamsConfig) to inject computed defaults that depend on other config values.
         Map<String, Object> originalMap = preProcessParsedConfig(Collections.unmodifiableMap(Utils.castToStringObjectMap(originals)));
         this.originals = resolveConfigVariables(configProviderProps, originalMap);
         this.values = definition.parse(this.originals);
@@ -157,6 +175,8 @@ public class AbstractConfig {
      * @return a map of updates that should be applied to the configuration (will be validated to prevent bad updates)
      */
     protected Map<String, Object> preProcessParsedConfig(Map<String, Object> parsedValues) {
+        // DECISION: Protected hook for subclass validation before default values are applied.
+        // Called with unmodifiable map to prevent direct mutation — subclasses return updates map.
         return parsedValues;
     }
 
@@ -168,6 +188,9 @@ public class AbstractConfig {
      * @return a map of updates that should be applied to the configuration (will be validated to prevent bad updates)
      */
     protected Map<String, Object> postProcessParsedConfig(Map<String, Object> parsedValues) {
+        // DECISION: Protected hook for "secondary defaults" — values that depend on other parsed configs.
+        // Example: StreamsConfig sets default.key.serde based on other serde configs. Returns updates
+        // map that is merged and re-validated against ConfigDef to prevent invalid secondary defaults.
         return Collections.emptyMap();
     }
 
@@ -310,6 +333,11 @@ public class AbstractConfig {
      * </p>
      */
     public Map<String, Object> valuesWithPrefixOverride(String prefix) {
+        // DECISION: Supports two prefix forms for per-listener per-mechanism config override:
+        // (1) listener.name.{name}.some.prop → key "some.prop"
+        // (2) listener.name.{name}.{mechanism}.some.prop → key "{mechanism}.some.prop"
+        // This enables per-mechanism SASL configs (e.g., different sasl.jaas.config per mechanism
+        // on the same listener). Falls through to secondary prefix stripping if primary lookup fails.
         Map<String, Object> result = new RecordingMap<>(values(), prefix, true);
         for (Map.Entry<String, ?> entry : originals.entrySet()) {
             if (entry.getKey().startsWith(prefix) && entry.getKey().length() > prefix.length()) {
@@ -369,6 +397,9 @@ public class AbstractConfig {
     }
 
     private void logAll() {
+        // DECISION: Logs all parsed config values (sorted by key) at INFO level. Password values are
+        // automatically masked because Password.toString() returns "[hidden]". TreeMap sorting ensures
+        // deterministic log output for easier diff-based debugging across config changes.
         StringBuilder b = new StringBuilder();
         b.append(getClass().getSimpleName());
         b.append(" values: ");
@@ -395,6 +426,13 @@ public class AbstractConfig {
     }
 
     private <T> T getConfiguredInstance(Object klass, Class<T> t, Map<String, Object> configPairs) {
+        // DECISION: Reflective instantiation via Utils.newInstance() with Configurable.configure() lifecycle.
+        // Alternative: Dependency injection framework. Rationale: Kafka's plugin model uses classpath-based
+        // discovery — reflection is the only mechanism that works across all deployment models (standalone,
+        // embedded, containerized). AutoCloseable cleanup on failure prevents resource leaks from partially
+        // constructed plugins.
+        // CROSS-CUTTING: Used to instantiate Serializer, Deserializer, Partitioner, Interceptor,
+        // MetricsReporter, Authorizer, and ConfigProvider instances across all Kafka modules.
         if (klass == null)
             return null;
         Object o;
@@ -486,6 +524,12 @@ public class AbstractConfig {
      * @return The list of configured instances
      */
     public <T> List<T> getConfiguredInstances(List<String> classNames, Class<T> t, Map<String, Object> configOverrides) {
+        // COMPLEXITY: 20 lines — Iterates classNames, instantiates each via getConfiguredInstance,
+        // collects into list. On failure: closes all previously constructed AutoCloseable instances
+        // before re-throwing. Key path: normal instantiation loop; failure cleanup loop.
+        // DECISION: All-or-nothing semantics — if any instance fails, all previous instances are closed.
+        // Alternative: Partial list return. Rationale: Partial plugin lists lead to inconsistent behavior
+        // (e.g., some interceptors active, others not) — fail-fast is safer.
         List<T> objects = new ArrayList<>();
         if (classNames == null)
             return objects;
@@ -533,6 +577,14 @@ public class AbstractConfig {
      * @return map of resolved config variable.
      */
     private Map<String, ?> resolveConfigVariables(Map<String, ?> configProviderProps, Map<String, Object> originals) {
+        // COMPLEXITY: 31 lines — Config variable resolution pipeline:
+        // Structure: (1) Extract string-valued configs as potential variables, (2) Determine provider
+        // source (configProviderProps if provided, else originals with system property filter),
+        // (3) Instantiate providers, (4) Transform variables via ConfigTransformer, (5) Close providers.
+        // DECISION: Providers are instantiated fresh per AbstractConfig construction and closed after use.
+        // Alternative: Shared provider lifecycle. Rationale: Fresh instantiation ensures providers see
+        // current config state; closing prevents resource leaks. Connect framework manages its own
+        // provider lifecycle separately for subscription-based refresh.
         Map<String, String> providerConfigString;
         Map<String, ?> configProperties;
         Predicate<String> classNameFilter;
@@ -603,6 +655,14 @@ public class AbstractConfig {
             Map<String, ?> providerConfigProperties,
             Predicate<String> classNameFilter
     ) {
+        // COMPLEXITY: 42 lines — Two-phase provider instantiation:
+        // Phase 1 (lines 606-625): Parse config.providers comma-separated list, resolve each provider's
+        //   class name from config.providers.{name}.class, validate against classNameFilter (system
+        //   property allowlist). Throws ConfigException if a provider class is not in the allowlist.
+        // Phase 2 (lines 627-641): For each validated provider, instantiate via Utils.newInstance(),
+        //   extract per-provider params (config.providers.{name}.param.*), call provider.configure().
+        // Key paths: Empty providers → early return; class not found → log + throw; filter rejected → throw.
+        // Exit: Returns Map<String, ConfigProvider> keyed by provider alias name.
         final String configProviders = indirectConfigs.get(CONFIG_PROVIDERS_CONFIG);
 
         if (configProviders == null || configProviders.isEmpty()) {
@@ -664,6 +724,11 @@ public class AbstractConfig {
      * Marks keys retrieved via `get` as used. This is needed because `Configurable.configure` takes a `Map` instead
      * of an `AbstractConfig` and we can't change that without breaking public API like `Partitioner`.
      */
+    // DECISION: RecordingMap wraps a delegate map to track which keys are accessed, enabling
+    // unused-config detection via unused(). ConcurrentHashMap.newKeySet() for 'used' set ensures
+    // thread-safe tracking when configs are accessed from multiple threads (e.g., producer I/O thread
+    // and application thread). Alternative: AtomicBoolean per key. Rationale: Set-based tracking is
+    // simpler and O(1) for both add and contains.
     private class RecordingMap<V> extends HashMap<String, V> {
 
         private final String prefix;
