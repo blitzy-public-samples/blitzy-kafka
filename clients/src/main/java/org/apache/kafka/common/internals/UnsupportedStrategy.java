@@ -26,6 +26,16 @@ import javax.security.auth.Subject;
  * This is a fallback strategy to use if no other strategies are available.
  * <p>This is used to improve control flow and provide detailed error messages in unusual situations.
  */
+// CROSS-CUTTING: Last-resort fallback in the SecurityManagerCompatibility strategy chain.
+// Only activated when BOTH LegacyStrategy and ModernStrategy fail to load — expected only
+// in unusual test environments or stripped JRE distributions, not in production deployments.
+//
+// DECISION: Diagnostic fallback strategy that preserves both root causes (Legacy failure +
+// Modern failure) as suppressed exceptions on UnsupportedOperationException. Alternative:
+// Throw immediately during CompositeStrategy construction. Rationale: Deferred failure
+// provides better diagnostics — the exception includes both failure reasons and is only
+// thrown when the functionality is actually needed, not at startup. This helps in test
+// environments where SecurityManager features may not be required.
 class UnsupportedStrategy implements SecurityManagerCompatibility {
 
     private final Throwable e1;
@@ -36,6 +46,10 @@ class UnsupportedStrategy implements SecurityManagerCompatibility {
         this.e2 = e2;
     }
 
+    // DECISION: Uses addSuppressed() (Java 7+) to attach both root causes to a single exception.
+    // Alternative: Nested cause chain. Rationale: Suppressed exceptions appear in stack traces
+    // and logging frameworks, making it easier to diagnose which specific loading failure occurred
+    // for both LegacyStrategy and ModernStrategy.
     private UnsupportedOperationException createException(String message) {
         UnsupportedOperationException e = new UnsupportedOperationException(message);
         e.addSuppressed(e1);
