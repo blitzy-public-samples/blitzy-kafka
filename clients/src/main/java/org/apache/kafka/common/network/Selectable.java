@@ -28,11 +28,29 @@ import java.util.Map;
 /**
  * An interface for asynchronous, multi-channel network I/O
  */
+// DECISION: Façade interface abstracting the NIO event loop for clients. Defines the contract
+// for non-blocking network I/O: connect, send, poll, and retrieve results (completedSends,
+// completedReceives, connected, disconnected). The poll()-then-check-results pattern enables
+// a single-threaded event loop without callbacks.
+// Alternative: Callback-based API (onSendComplete, onReceiveComplete) — rejected to maintain
+// the simple single-threaded sequential processing model that avoids concurrency complexity
+// in NetworkClient and other consumers.
+//
+// CROSS-CUTTING: Primary interface consumed by NetworkClient (clients/) for all client-side
+// network I/O. The Selector class is the production implementation; test implementations
+// (MockSelector) exist for unit testing. Any change to this interface affects NetworkClient,
+// SocketServer, and all tests using MockSelector.
+// Contract: poll() must be called in a loop. Result lists (completedSends, completedReceives,
+// connected, disconnected) are reset at the start of each poll() — callers must process
+// results between consecutive poll() calls.
 public interface Selectable {
 
     /**
      * See {@link #connect(String, InetSocketAddress, int, int) connect()}
      */
+    // DECISION: Sentinel value (-1) indicates that the OS default socket buffer size should be
+    // used rather than explicitly configuring SO_RCVBUF/SO_SNDBUF. This allows Kafka to work
+    // with system-level tuning (e.g., sysctl net.core.rmem_default) without overriding it.
     int USE_DEFAULT_BUFFER_SIZE = -1;
 
     /**
