@@ -30,8 +30,19 @@ import java.util.concurrent.ConcurrentMap;
  * write operations (i.e. computeIfAbsent) constitute 10%, the get performance of CopyOnWriteMap is lower compared to
  * ConcurrentHashMap. However, when iterating over entrySet and values, CopyOnWriteMap performs better than ConcurrentHashMap.
  */
+// DECISION: Volatile reference to immutable HashMap snapshot with synchronized copy-on-write
+// mutations. Alternative: ConcurrentHashMap. Rationale: Per JMH benchmarks (referenced in
+// Javadoc), CopyOnWriteMap has better iteration performance over entrySet/values than
+// ConcurrentHashMap, which matters for metrics/JMX iteration. The tradeoff is higher write
+// cost (full copy on each mutation), acceptable because Kafka's usage pattern is overwhelmingly
+// read-heavy (metrics reads >> metric registrations). Thread-safety: volatile read provides
+// happens-before guarantee; synchronized write prevents lost updates.
+// CROSS-CUTTING: Used by common/metrics/Metrics for the metric registry (read-heavy, write-rare),
+// and by metadata/TopicBasedRemoteLogMetadataManagerConfig for topic configuration tracking.
 public class CopyOnWriteMap<K, V> implements ConcurrentMap<K, V> {
 
+    // DECISION: Volatile ensures readers see the latest snapshot without synchronization.
+    // The map reference is replaced atomically — readers never see a partially-mutated map.
     private volatile Map<K, V> map;
 
     public CopyOnWriteMap() {
@@ -87,6 +98,9 @@ public class CopyOnWriteMap<K, V> implements ConcurrentMap<K, V> {
         this.map = Collections.emptyMap();
     }
 
+    // DECISION: Write methods are synchronized to serialize mutations. The pattern is:
+    // (1) copy existing map, (2) mutate copy, (3) assign new unmodifiable map to volatile field.
+    // This ensures readers always see a consistent, complete snapshot.
     @Override
     public synchronized V put(K k, V v) {
         Map<K, V> copy = new HashMap<>(this.map);
