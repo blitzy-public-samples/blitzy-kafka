@@ -31,6 +31,14 @@ import javax.security.auth.Subject;
  * <p>This class is expected to be instantiable in JRE >= 18. At the time of writing, these methods do not have
  * a sunset date, and are expected to be available past the removal of the SecurityManager.
  */
+// DECISION: Reflective access to JRE 18+ Subject.current() and Subject.callAs() methods.
+// These methods replace the deprecated Subject.getSubject()/Subject.doAs() from LegacyStrategy.
+// Reflection is used (same rationale as LegacyStrategy) to avoid compile-time dependency on
+// APIs that don't exist in JRE <18.
+// CROSS-CUTTING: Implements SecurityManagerCompatibility for JRE >=18 using Subject.current()
+// and Subject.callAs() (replacement APIs per JEP 411). Consumed indirectly via
+// CompositeStrategy by all SASL/Kerberos authentication paths. This is the long-term strategy
+// that will outlive LegacyStrategy after SecurityManager removal.
 @SuppressWarnings("unchecked")
 class ModernStrategy implements SecurityManagerCompatibility {
 
@@ -39,6 +47,8 @@ class ModernStrategy implements SecurityManagerCompatibility {
 
     // Visible for testing
     ModernStrategy(ReflectiveStrategy.Loader loader) throws NoSuchMethodException, ClassNotFoundException {
+        // DECISION: Only two methods need resolution (current, callAs) vs four in LegacyStrategy.
+        // The modern API is simpler — no AccessControlContext indirection needed.
         Class<?> subject = loader.loadClass(Subject.class.getName());
         current = subject.getDeclaredMethod("current");
         // Note that the Subject class isn't deprecated or removed, so reference it as an argument type.
@@ -49,6 +59,10 @@ class ModernStrategy implements SecurityManagerCompatibility {
     @Override
     public <T> T doPrivileged(PrivilegedAction<T> action) {
         // This is intentionally a pass-through
+        // DECISION: In the modern JRE model, AccessController is removed and all code runs with full
+        // privileges. Pass-through preserves the same calling convention without behavioral change.
+        // Alternative: Throw UnsupportedOperationException. Rationale: Callers expect doPrivileged()
+        // to execute the action and return its result — pass-through is the correct semantic.
         return action.run();
     }
 
