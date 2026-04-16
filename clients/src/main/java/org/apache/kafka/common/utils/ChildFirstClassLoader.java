@@ -31,6 +31,14 @@ import java.util.NoSuchElementException;
  * A class loader that looks for classes and resources in a specified class path first, before delegating to its parent
  * class loader.
  */
+// DECISION: Child-first (parent-last) class loading to enable plugin isolation. Standard Java
+// classloaders use parent-first delegation -- this class reverses that order so plugins can
+// bundle their own dependency versions without conflicting with Kafka's runtime classpath.
+// Alternative: OSGi, Java module system, or flat classpath. Rationale: Child-first is the
+// simplest isolation mechanism compatible with Kafka Connect's plugin model (KIP-146).
+//
+// CROSS-CUTTING: Used by Connect runtime (connect/runtime/isolation/) for connector/task plugin
+// isolation. Also used by tools module for CLI plugin loading.
 public class ChildFirstClassLoader extends URLClassLoader {
     static {
         ClassLoader.registerAsParallelCapable();
@@ -53,6 +61,10 @@ public class ChildFirstClassLoader extends URLClassLoader {
             File file = new File(path);
 
             try {
+                // DECISION: Expands wildcard (*) classpath entries to include all JARs in
+                // the directory. Mimics java.lang.ClassLoader wildcard behavior. Alternative:
+                // Require explicit JAR listing. Rationale: Connect plugins are distributed as
+                // directories of JARs -- wildcard expansion simplifies plugin configuration.
                 if (path.endsWith("/*")) {
                     File parent = new File(new File(file.getCanonicalPath()).getParent());
                     if (parent.isDirectory()) {
@@ -76,6 +88,11 @@ public class ChildFirstClassLoader extends URLClassLoader {
         return urls.toArray(new URL[0]);
     }
 
+    // SECURITY: Child-first loading means plugins can shadow core Kafka classes.
+    // Risk: A malicious plugin could replace security-critical classes (e.g.,
+    // Authenticator) with compromised versions. Mitigation: Connect's plugin scanning
+    // validates plugin types before loading. Improvement: Consider allowlisting core
+    // packages that must always come from parent classloader.
     @Override
     protected Class<?> loadClass(String name, boolean resolve) throws ClassNotFoundException {
         synchronized (getClassLoadingLock(name)) {
