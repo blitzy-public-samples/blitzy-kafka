@@ -83,6 +83,26 @@ import static org.apache.kafka.common.security.oauthbearer.internals.secured.Cac
  * @see org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_TOKEN_ENDPOINT_URL
  * @see VerificationKeyResolver
  */
+// SECURITY: (HIGH) File-based JWKS key management — reads signing keys from local file.
+// Why: The JWKS file contains public keys used to validate JWT signatures. The file's
+// integrity directly determines which tokens are accepted by the broker.
+// Exploit: (1) TOCTOU race — CachedFile checks file.lastModified() then reads file contents
+// in separate operations. An attacker with write access could replace the file between the
+// stat and read calls, injecting a malicious key set. (2) File permission weakness — if the
+// JWKS file is world-writable, any local user can replace the signing keys, enabling token
+// forgery for any principal. (3) Symlink attack — if the JWKS path is a symlink, an attacker
+// could redirect it to a different file containing attacker-controlled keys.
+// Improvement: Verify file permissions (reject world-writable files), resolve symlinks
+// before reading, and consider computing a checksum of the JWKS content for integrity.
+//
+// CROSS-CUTTING: Depends on CachedFile (file caching with refresh policy),
+// ConfigurationUtils (URL/file validation), jose4j JsonWebKeySet/JwksVerificationKeyResolver.
+// Used by: VerificationKeyResolverFactory.create() when the JWKS endpoint URL uses file://
+// protocol. This enables local JWKS deployment without HTTP dependency.
+// Contract: configure() must be called before resolveKey(). No close() needed (no threads).
+// Impact: Key material changes in the JWKS file affect JWT validation for all OAUTHBEARER
+// authentication on the broker. File staleness (lastModified unchanged) means key rotations
+// are invisible until the file metadata updates.
 public class JwksFileVerificationKeyResolver implements CloseableVerificationKeyResolver {
 
     private static final Logger log = LoggerFactory.getLogger(JwksFileVerificationKeyResolver.class);
@@ -93,17 +113,34 @@ public class JwksFileVerificationKeyResolver implements CloseableVerificationKey
     public void configure(Map<String, ?> configs, String saslMechanism, List<AppConfigurationEntry> jaasConfigEntries) {
         ConfigurationUtils cu = new ConfigurationUtils(configs, saslMechanism);
         File file = cu.validateFileUrl(SASL_OAUTHBEARER_JWKS_ENDPOINT_URL);
+        // DECISION: Uses CachedFile with lastModifiedPolicy for automatic reload on file change.
+        // Alternatives: (1) Static load — read once at configure(), no reload. (2) Polling with
+        // WatchService — event-based file monitoring. Rationale: lastModifiedPolicy provides a
+        // lightweight check (stat() call) on each resolveKey() invocation. The CachedFile only
+        // re-reads and re-parses if lastModified timestamp changed, avoiding unnecessary I/O.
+        // Risk: lastModified granularity is OS-dependent (typically 1s on ext4, 100ms on NTFS).
+        // Rapid file replacements within the same timestamp may not trigger a reload.
         delegate = new CachedFile<>(file, new VerificationKeyResolverTransformer(), lastModifiedPolicy());
     }
 
     @Override
     public Key resolveKey(JsonWebSignature jws, List<JsonWebStructure> nestingContext) throws UnresolvableKeyException {
+        // SECURITY: (MEDIUM) Null delegate check — fails with UnresolvableKeyException if
+        // configure() hasn't been called. This is a defense against misconfigured lifecycle
+        // where the resolver is used before initialization.
         if (delegate == null)
             throw new UnresolvableKeyException("VerificationKeyResolver delegate is null; please call configure() first");
 
         return delegate.transformed().resolveKey(jws, nestingContext);
     }
 
+    // SECURITY: (MEDIUM) Transforms raw JWKS file contents into jose4j VerificationKeyResolver.
+    // Parses the JSON string as JsonWebKeySet — if the file contains malformed JSON or invalid
+    // JWK entries, a ConfigException is thrown (fail-closed). No content sanitization is performed
+    // beyond jose4j's built-in JWK parsing. A malicious JWKS file could contain keys with weak
+    // algorithms (e.g., HMAC-SHA256 symmetric key) that weaken validation security.
+    // Improvement: Validate that all keys in the JWKS use acceptable algorithms (e.g., RS256,
+    // ES256) and reject JWKS files containing symmetric keys.
     /**
      * "Transforms" the raw file contents into a {@link VerificationKeyResolver} that can be used to resolve
      * the keys provided in the JWT.
@@ -122,6 +159,10 @@ public class JwksFileVerificationKeyResolver implements CloseableVerificationKey
                 throw new ConfigException(SASL_OAUTHBEARER_JWKS_ENDPOINT_URL, file.getPath(), e.getMessage());
             }
 
+            // DECISION: Uses jose4j JwksVerificationKeyResolver (with full key list) rather
+            // than manual kid-based lookup. Rationale: JwksVerificationKeyResolver handles
+            // algorithm matching, key selection by kid, and fallback behavior (e.g.,
+            // single-key JWKS without kid).
             return new JwksVerificationKeyResolver(jwks.getJsonWebKeys());
         }
     }
