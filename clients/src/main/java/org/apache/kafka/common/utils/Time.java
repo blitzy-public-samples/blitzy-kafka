@@ -28,18 +28,34 @@ import java.util.function.Supplier;
  *
  * Implementations of this class should be thread-safe.
  */
+// DECISION: Time abstraction for testability. Alternative: Call System.currentTimeMillis()
+// and System.nanoTime() directly. Rationale: Direct system calls make deterministic testing
+// impossible — MockTime allows tests to control clock progression, deadlines, and timeouts
+// without real-time delays. This is critical for testing timeout-sensitive paths in consumer
+// poll loops, producer batching, and coordinator heartbeats.
+// CROSS-CUTTING: Foundational abstraction consumed by virtually every Kafka component:
+// KafkaProducer, KafkaConsumer, KafkaAdminClient, NetworkClient, Selector, all coordinator
+// implementations, StreamThread, Worker, and broker server classes. MockTime (in test scope)
+// is the primary test implementation. SystemTime is the sole production implementation.
 public interface Time {
 
+    // DECISION: Eager singleton via SystemTime.getSystemTime() rather than lazy initialization.
+    // Rationale: Time.SYSTEM is accessed on every client/broker instantiation — eager init avoids
+    // synchronization overhead. The package-private SystemTime prevents direct construction.
     Time SYSTEM = SystemTime.getSystemTime();
 
     /**
      * Returns the current time in milliseconds.
      */
+    // DECISION: Wall-clock time for timestamps written to records and logs. Not monotonic — subject
+    // to NTP adjustments. Use nanoseconds() for measuring elapsed time intervals.
     long milliseconds();
 
     /**
      * Returns the value returned by `nanoseconds` converted into milliseconds.
      */
+    // DECISION: Converts nanoseconds() to millis. Useful when a monotonic clock is needed but the
+    // API contract requires millisecond granularity (e.g., JMX metrics reporting).
     default long hiResClockMs() {
         return TimeUnit.NANOSECONDS.toMillis(nanoseconds());
     }
@@ -55,6 +71,8 @@ public interface Time {
      * this method in an instance of a Java virtual machine; other
      * virtual machine instances are likely to use a different origin.
      */
+    // DECISION: Monotonic high-resolution timer for elapsed time measurement. Used by Timer, backoff
+    // calculations, and waitForFuture deadline tracking. Unlike milliseconds(), immune to clock drift.
     long nanoseconds();
 
     /**
@@ -73,11 +91,16 @@ public interface Time {
      *
      * @throws org.apache.kafka.common.errors.TimeoutException if the timeout expires before the condition is satisfied
      */
+    // DECISION: Deadline-based wait abstraction. Alternative: Raw Object.wait(timeout). Rationale:
+    // Object.wait(timeout) relies on wall-clock time which can drift. This method uses the Time
+    // abstraction's deadline, enabling MockTime to advance and unblock waiters deterministically.
     void waitObject(Object obj, Supplier<Boolean> condition, long deadlineMs) throws InterruptedException;
 
     /**
      * Get a timer which is bound to this time instance and expires after the given timeout
      */
+    // DECISION: Factory methods binding Timer to this Time instance. Ensures Timer uses the same
+    // clock source (real or mock) as the caller, preventing clock skew in tests.
     default Timer timer(long timeoutMs) {
         return new Timer(this, timeoutMs);
     }
@@ -97,6 +120,10 @@ public interface Time {
      * @return              The result of the future.
      * @param <T>           The type of the future.
      */
+    // DECISION: Retry loop on TimeoutException rather than single-shot Future.get(). Rationale:
+    // Some Future implementations may throw spurious TimeoutException if the deadline calculation
+    // has nanosecond precision rounding. The retry loop re-checks the deadline with a fresh
+    // nanoseconds() call, avoiding false timeouts from clock granularity.
     default <T> T waitForFuture(
         Future<T> future,
         long deadlineNs
