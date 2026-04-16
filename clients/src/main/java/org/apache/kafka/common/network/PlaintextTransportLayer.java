@@ -29,6 +29,18 @@ import java.nio.channels.SelectionKey;
 import java.nio.channels.SocketChannel;
 import java.security.Principal;
 
+// DECISION: Minimal no-op transport layer for PLAINTEXT connections. All read/write
+// operations delegate directly to the underlying SocketChannel without any encryption
+// or transformation. ready() always returns true (no handshake needed), handshake()
+// is a no-op. This is the simplest TransportLayer implementation and serves as the
+// baseline against which SslTransportLayer adds TLS encryption overhead.
+// Alternative: A single TransportLayer with an "encryption enabled" flag -- rejected
+// for separation of concerns and to avoid conditional logic in the hot I/O path.
+//
+// CROSS-CUTTING: Implements TransportLayer consumed by KafkaChannel. Created by
+// PlaintextChannelBuilder. The zero-copy transferFrom() path is used by
+// Selector/SocketServer for efficient data transfer in the broker. If TransportLayer
+// interface changes, this implementation must be updated.
 public class PlaintextTransportLayer implements TransportLayer {
     private final SelectionKey key;
     private final SocketChannel socketChannel;
@@ -174,6 +186,10 @@ public class PlaintextTransportLayer implements TransportLayer {
         return false;
     }
 
+    // DECISION: Plaintext connections always use ANONYMOUS principal because there
+    // is no authentication mechanism. peerPrincipal() always returns
+    // KafkaPrincipal.ANONYMOUS. Authenticated principals are only available when
+    // SSL or SASL transport layers provide verified identity from the handshake.
     /**
      * Returns ANONYMOUS as Principal.
      */
@@ -209,6 +225,12 @@ public class PlaintextTransportLayer implements TransportLayer {
         return false;
     }
 
+    // DECISION: Uses FileChannel.transferTo() for zero-copy sends. This leverages
+    // the OS kernel's sendfile() syscall (on Linux) to transfer data directly from
+    // the page cache to the network socket, bypassing JVM heap entirely. This is
+    // only possible for plaintext connections -- SslTransportLayer cannot use
+    // zero-copy because data must pass through SSLEngine for encryption. This is a
+    // critical performance optimization for produce/fetch of large records.
     @Override
     public long transferFrom(FileChannel fileChannel, long position, long count) throws IOException {
         return fileChannel.transferTo(position, count, socketChannel);
