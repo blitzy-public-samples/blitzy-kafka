@@ -22,6 +22,28 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 
+// DECISION: Stateless static helpers returning OAuthBearerValidationResult rather than
+// throwing exceptions. Alternative: Exception-based validation where each check throws
+// on failure. Rationale: Result-based validation enables callers to collect multiple
+// validation failures before deciding how to respond. Each method returns newSuccess()
+// or newFailure() with a descriptive message, letting the caller decide whether to
+// throwExceptionIfFailed() or aggregate. This pattern is particularly useful in the
+// unsecured validator callback handler which chains 5 checks sequentially.
+//
+// CROSS-CUTTING: Consumed by OAuthBearerUnsecuredValidatorCallbackHandler (same package)
+// as the validation engine for unsecured token verification. Each validation method
+// corresponds to one step in the validator's handleCallback() chain:
+//   1. validateClaimForExistenceAndType -> principal claim check
+//   2. validateIssuedAt -> iat temporal check
+//   3. validateExpirationTime -> exp temporal check
+//   4. validateTimeConsistency -> iat < exp consistency
+//   5. validateScope -> required scope membership
+// Depends on: OAuthBearerUnsecuredJws (token type for claim access),
+// OAuthBearerValidationResult (return type), OAuthBearerIllegalTokenException (caught
+// when claim extraction fails), OAuthBearerConfigException (thrown for negative clock skew),
+// OAuthBearerToken (scope access in validateScope).
+// Contract: All methods are pure functions -- no side effects, no state mutation. Thread-safe.
+// Impact: Adding or reordering validation checks here affects all unsecured token validation.
 public class OAuthBearerValidationUtils {
     /**
      * Validate the given claim for existence and type. It can be required to exist
@@ -39,6 +61,11 @@ public class OAuthBearerValidationUtils {
      *            allowed to be if it exists
      * @return the result of the validation
      */
+    // DECISION: Generic claim validation supporting multiple allowed types via varargs.
+    // Alternative: Separate methods per type (validateStringClaim, validateNumberClaim).
+    // Rationale: Single method with varargs reduces API surface while supporting the common
+    // pattern of "claim can be String or List" (e.g., scope claim). The allowedTypes varargs
+    // uses Class.isAssignableFrom() for type checking, supporting subtype matching.
     public static OAuthBearerValidationResult validateClaimForExistenceAndType(OAuthBearerUnsecuredJws jwt,
             boolean required, String claimName, Class<?>... allowedTypes) {
         Object rawClaim = Objects.requireNonNull(jwt).rawClaim(Objects.requireNonNull(claimName));
@@ -85,6 +112,12 @@ public class OAuthBearerValidationUtils {
         if (!exists)
             return doesNotExistResult(required, "iat");
         double doubleValue = value.doubleValue();
+        // DECISION: Temporal comparison uses millisecond precision: (1000 * doubleValue) compared
+        // against (whenCheckTimeMs + allowableClockSkewMs). Alternative: Convert everything to
+        // seconds for consistency with JWT spec. Rationale: Kafka internally tracks time in
+        // milliseconds. Converting to millis early enables direct comparison with Time.milliseconds().
+        // Clock skew is additive for issued-at (future-tolerance) and subtractive for expiration
+        // (past-tolerance), providing symmetric tolerance around the check time.
         return 1000 * doubleValue > whenCheckTimeMs + confirmNonNegative(allowableClockSkewMs)
                 ? OAuthBearerValidationResult.newFailure(String.format(
                         "The Issued At value (%f seconds) was after the indicated time (%d ms) plus allowable clock skew (%d ms)",
@@ -120,6 +153,10 @@ public class OAuthBearerValidationUtils {
         boolean exists = value != null;
         if (!exists)
             return doesNotExistResult(true, "exp");
+        // DECISION: Expiration time is ALWAYS required (hardcoded `true` in doesNotExistResult call).
+        // Alternative: Make requiredness configurable like validateIssuedAt. Rationale: A token
+        // without an expiration time would be valid forever -- this is unacceptable even for
+        // development/testing. Failing when exp is missing is a security-conscious default.
         double doubleValue = value.doubleValue();
         return whenCheckTimeMs - confirmNonNegative(allowableClockSkewMs) >= 1000 * doubleValue
                 ? OAuthBearerValidationResult.newFailure(String.format(
@@ -140,6 +177,10 @@ public class OAuthBearerValidationUtils {
      *            the mandatory JWT to which the validation will be applied
      * @return the result of the validation
      */
+    // DECISION: Only validates exp > iat (strict greater-than). Alternative: exp >= iat
+    // (allow zero-duration tokens). Rationale: A token where exp equals iat has zero validity
+    // window and would immediately fail expiration checks anyway. The strict inequality
+    // catches configuration errors (e.g., both set to the same timestamp) early.
     public static OAuthBearerValidationResult validateTimeConsistency(OAuthBearerUnsecuredJws jwt) {
         Number issuedAt;
         Number expirationTime;
@@ -168,6 +209,12 @@ public class OAuthBearerValidationUtils {
      *            will be validated
      * @return the result of the validation
      */
+    // DECISION: Scope validation checks that ALL required scope elements exist in the token's
+    // scope set. Alternative: "any-of" matching (token has at least one required scope).
+    // Rationale: "all-of" matching follows the principle of least privilege -- the token must
+    // have every required scope. The failure message includes both the missing scope and the
+    // full required scope list for diagnostics. failureScope is set to requiredScope.toString()
+    // enabling the SASL server to return "insufficient_scope" with the required scopes.
     public static OAuthBearerValidationResult validateScope(OAuthBearerToken token, List<String> requiredScope) {
         final Set<String> tokenScope = token.scope();
         if (requiredScope == null || requiredScope.isEmpty())
