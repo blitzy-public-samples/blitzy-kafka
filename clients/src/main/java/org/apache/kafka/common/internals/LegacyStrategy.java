@@ -32,6 +32,15 @@ import javax.security.auth.Subject;
  * but the operation is not permitted to be invoked.
  * <p>This class is expected to be instantiable in JRE >=8 until the removal finally takes place.
  */
+// CROSS-CUTTING: Implements SecurityManagerCompatibility for JRE <=17 using deprecated
+// AccessController.doPrivileged() and Subject.doAs(). Consumed indirectly by all SASL/Kerberos
+// authentication code paths via CompositeStrategy. Per KIP-1006, this strategy will become
+// unreachable after the JDK removes AccessController entirely.
+// DECISION: Reflective access to deprecated AccessController/Subject.doAs APIs rather than
+// direct method calls. Alternative: Direct compile-time references. Rationale: Direct
+// references would produce deprecation warnings (JRE 17) or compilation errors (JRE 24+ after
+// removal). Reflection allows the same compiled bytecode to work across JRE versions —
+// NoSuchMethodException at construction time triggers fallback to ModernStrategy.
 @SuppressWarnings("unchecked")
 class LegacyStrategy implements SecurityManagerCompatibility {
 
@@ -42,6 +51,10 @@ class LegacyStrategy implements SecurityManagerCompatibility {
 
     // Visible for testing
     LegacyStrategy(ReflectiveStrategy.Loader loader) throws ClassNotFoundException, NoSuchMethodException {
+        // DECISION: All four Method references (doPrivileged, getContext, getSubject, doAs) are
+        // resolved eagerly at construction. If any resolution fails, the entire LegacyStrategy is
+        // rejected and CompositeStrategy falls back. Alternative: Lazy resolution per method.
+        // Rationale: Fail-fast avoids partial strategy state where some methods work and others don't.
         Class<?> accessController = loader.loadClass("java.security.AccessController");
         doPrivileged = accessController.getDeclaredMethod("doPrivileged", PrivilegedAction.class);
         getContext = accessController.getDeclaredMethod("getContext");
@@ -50,6 +63,9 @@ class LegacyStrategy implements SecurityManagerCompatibility {
         getSubject = subject.getDeclaredMethod("getSubject", accessControlContext);
         // Note that the Subject class isn't deprecated or removed, so reference it as an argument type.
         // This allows for mocking out the method implementation while still accepting Subject instances as arguments.
+        // DECISION: Uses Subject.class.getName() for loadClass() to get the mock-compatible version,
+        // but Subject.class directly as argument type for doAs(). This split enables tests to mock
+        // the method implementation while preserving type-safe Subject parameter passing at runtime.
         doAs = subject.getDeclaredMethod("doAs", Subject.class, PrivilegedExceptionAction.class);
     }
 
@@ -85,6 +101,10 @@ class LegacyStrategy implements SecurityManagerCompatibility {
         return (T) ReflectiveStrategy.invokeChecked(doAs, PrivilegedActionException.class, null, subject, action);
     }
 
+    // DECISION: Adapts Callable→PrivilegedExceptionAction via method reference (callable::call)
+    // to bridge the modern Callable-based API to the legacy PrivilegedExceptionAction-based API.
+    // PrivilegedActionException is unwrapped to CompletionException to match the
+    // SecurityManagerCompatibility contract.
     @Override
     public <T> T callAs(Subject subject, Callable<T> callable) throws CompletionException {
         try {
