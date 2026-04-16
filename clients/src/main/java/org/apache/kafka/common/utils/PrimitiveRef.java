@@ -21,6 +21,11 @@ package org.apache.kafka.common.utils;
  *
  * This is cheaper than using Atomic references.
  */
+// DECISION: Mutable wrapper for primitive types (int, long) to enable mutation inside lambdas
+// and inner classes. Alternative: AtomicInteger/AtomicLong or single-element arrays (int[1]).
+// Rationale: AtomicInteger/AtomicLong add unnecessary volatile/CAS overhead for single-threaded
+// contexts; int[1] arrays are error-prone and allocate an Object header + padding. PrimitiveRef
+// is explicit about intent (mutable reference) and avoids autoboxing.
 public class PrimitiveRef {
     public static IntRef ofInt(int value) {
         return new IntRef(value);
