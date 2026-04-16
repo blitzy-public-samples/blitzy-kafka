@@ -48,7 +48,21 @@ import javax.security.sasl.SaslServer;
  * the name.
  *
  * NOTE: This is an internal class and can change without notice.
+ *
+ * @implSpec SECURITY: (HIGH) Principal spoofing risk in SSL/SASL context extraction.
+ * This class constructs KafkaPrincipal from auth contexts (SSL DN, SASL ID, ANONYMOUS).
+ * Exploit: (1) SSL: Crafted certificate DN mapping to admin via SslPrincipalMapper rules.
+ * (2) SASL/GSSAPI: Permissive KerberosShortNamer rules map distinct principals to same
+ * name. (3) Plaintext: Returns ANONYMOUS unconditionally with no authentication.
+ * Improvement: Add audit logging on ANONYMOUS fallback; validate mapper rules cannot
+ * produce privileged principal names by default.
  */
+// CROSS-CUTTING: Depends on auth/KafkaPrincipal, auth/KafkaPrincipalBuilder (interface),
+// kerberos/KerberosName + KerberosShortNamer (GSSAPI), ssl/SslPrincipalMapper (X.500 DN).
+// Instantiated by network/ChannelBuilders.createPrincipalBuilder(), consumed by
+// SaslServerAuthenticator.principal(). Contract: build() returns non-null KafkaPrincipal.
+// Impact: Principal mapping changes affect all downstream authorization decisions in
+// StandardAuthorizer and AclCache (metadata/authorizer/).
 public class DefaultKafkaPrincipalBuilder implements KafkaPrincipalBuilder {
     private final KerberosShortNamer kerberosShortNamer;
     private final SslPrincipalMapper sslPrincipalMapper;
@@ -59,11 +73,23 @@ public class DefaultKafkaPrincipalBuilder implements KafkaPrincipalBuilder {
      * @param kerberosShortNamer Kerberos name rewrite rules or null if none have been configured
      * @param sslPrincipalMapper SSL Principal mapper or null if none have been configured
      */
+    // DECISION: kerberosShortNamer and sslPrincipalMapper may be null ("not configured").
+    // Alternative: Use identity-function implementations. Rationale: Null is simpler;
+    // null checks are deferred to usage sites in build().
     public DefaultKafkaPrincipalBuilder(KerberosShortNamer kerberosShortNamer, SslPrincipalMapper sslPrincipalMapper) {
         this.kerberosShortNamer = kerberosShortNamer;
         this.sslPrincipalMapper = sslPrincipalMapper;
     }
 
+    // SECURITY: (HIGH) Principal resolution: Plaintext -> ANONYMOUS, SSL -> peer cert DN
+    // (mapped), SASL/GSSAPI -> Kerberos short name, SASL/other -> raw authorizationID.
+    // SSL falls back to ANONYMOUS if peer cert is unverified (mutual TLS not enforced here).
+    // A broker without ssl.client.auth=required grants ANONYMOUS to SSL clients.
+    //
+    // DECISION: Uses instanceof chain rather than polymorphic dispatch on AuthenticationContext.
+    // Alternatives: (1) Visitor pattern, (2) Map<Class, Function>. Rationale: Auth context
+    // types are a closed set (3 types); instanceof is simpler. IllegalArgumentException
+    // on unknown types forces explicit handling of future context additions.
     @Override
     public KafkaPrincipal build(AuthenticationContext context) {
         if (context instanceof PlaintextAuthenticationContext) {
@@ -86,6 +112,10 @@ public class DefaultKafkaPrincipalBuilder implements KafkaPrincipalBuilder {
         }
     }
 
+    // SECURITY: (MEDIUM) Kerberos principal name is parsed and transformed via
+    // auth_to_local rules (KerberosShortNamer). Misconfigured regex rules could map
+    // all principals to one short name, breaking identity isolation.
+    // Improvement: Log the full Kerberos principal alongside the short name for audit.
     private KafkaPrincipal applyKerberosShortNamer(String authorizationId) {
         KerberosName kerberosName = KerberosName.parse(authorizationId);
         try {
@@ -97,6 +127,11 @@ public class DefaultKafkaPrincipalBuilder implements KafkaPrincipalBuilder {
         }
     }
 
+    // SECURITY: (MEDIUM) SSL principal mapping applies regex rules to X.500 DNs.
+    // Non-X500 principals bypass the mapper and use principal.getName() directly.
+    // Exploit: A custom TrustManager producing a non-X500Principal with a crafted
+    // getName() value could inject an arbitrary identity string.
+    // Improvement: Consider validating principal names against an allowlist.
     private KafkaPrincipal applySslPrincipalMapper(Principal principal) {
         try {
             if (!(principal instanceof X500Principal) || principal == KafkaPrincipal.ANONYMOUS) {
@@ -110,6 +145,10 @@ public class DefaultKafkaPrincipalBuilder implements KafkaPrincipalBuilder {
         }
     }
 
+    // DECISION: Serializes with HIGHEST_SUPPORTED_VERSION for forward compatibility.
+    // Alternative: Fixed version. Chosen approach auto-includes new schema fields.
+    // SECURITY: (MEDIUM) Version-prefixed format; deserialize validates version bounds
+    // to reject principals from unknown schema versions with different security semantics.
     @Override
     public byte[] serialize(KafkaPrincipal principal) {
         DefaultPrincipalData data = new DefaultPrincipalData()
@@ -119,6 +158,9 @@ public class DefaultKafkaPrincipalBuilder implements KafkaPrincipalBuilder {
         return MessageUtil.toVersionPrefixedBytes(DefaultPrincipalData.HIGHEST_SUPPORTED_VERSION, data);
     }
 
+    // SECURITY: (MEDIUM) Version check prevents deserialization of principals from
+    // unknown schema versions. Improvement: Consider adding integrity verification
+    // (e.g., checksum) to detect byte-level tampering in serialized principal data.
     @Override
     public KafkaPrincipal deserialize(byte[] bytes) {
         ByteBuffer buffer = ByteBuffer.wrap(bytes);
