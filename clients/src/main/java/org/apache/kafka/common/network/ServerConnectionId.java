@@ -31,6 +31,18 @@ import java.util.regex.Pattern;
  */
 public class ServerConnectionId {
 
+    // DECISION: Server-side connection identifier encoding local host:port, remote host:port,
+    // processor ID, and an incrementing index into a single string. The index field prevents
+    // connection ID reuse when remote ports are recycled by the OS — without it, a new connection
+    // from the same remote host:port would collide with a recently-closed connection's ID.
+    // Format: "localHost:localPort-remoteHost:remotePort-processorId-index"
+    // Alternative: UUID-based connection IDs — rejected because the structured format enables
+    // debugging and metrics correlation (identifying which processor handles which connection).
+
+    // DECISION: The regex supports both IPv4 and IPv6 addresses. IPv6 addresses are NOT enclosed
+    // in square brackets in the connection ID format — this is intentional to avoid escaping
+    // complexity. The regex uses a permissive character class [0-9a-zA-Z\\-%._:] that matches
+    // both IPv4 dotted notation and IPv6 colon-separated hex groups.
     // The regex for parsing the host:port string, where host can be an IPv4 address or an IPv6 address.
     //  Note: The IPv6 address should not be enclosed in square brackets.
     private static final Pattern HOST_PORT_PARSE_EXP = Pattern.compile("([0-9a-zA-Z\\-%._:]*):([0-9]+)");
