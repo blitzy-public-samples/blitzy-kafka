@@ -32,12 +32,26 @@ import javax.management.ObjectName;
  */
 public class Sanitizer {
 
+    // DECISION: Two sanitization strategies: URL-encoding (sanitize/desanitize) for config values
+    // used in JMX ObjectNames, and JMX quoting (jmxSanitize) for MBean name components. Alternative:
+    // Single escaping strategy. Rationale: JMX ObjectName has strict character rules -- URL encoding
+    // handles arbitrary Unicode strings, while JMX quoting handles the subset of special chars
+    // (comma, equals, colon, quote, asterisk, question mark) that are meaningful in ObjectName syntax.
+
+    // CROSS-CUTTING: Used by common/metrics/JmxReporter and common/metrics/Metrics for safe JMX
+    // MBean registration. Also used by Kafka Streams for state store metric naming.
+
     /**
      * Even though only a small number of characters are disallowed in JMX, quote any
      * string containing special characters to be safe. All characters in strings sanitized
      * using {@link #sanitize(String)} are safe for JMX and hence included here.
      */
     private static final Pattern MBEAN_PATTERN = Pattern.compile("[\\w-%\\. \t]*");
+
+    // SECURITY: Sanitization prevents JMX injection where user-controlled config values (e.g., topic
+    // names, client IDs) could manipulate MBean ObjectNames. Risk: Without sanitization, a topic named
+    // "test,type=attack" could inject additional JMX properties. Mitigation: URL-encoding ensures all
+    // special characters are escaped. Improvement: Consider validation at topic creation time.
 
     /**
      * Sanitize `name` for safe use as JMX metric name.
