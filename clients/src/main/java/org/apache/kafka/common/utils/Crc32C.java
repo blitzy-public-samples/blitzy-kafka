@@ -26,6 +26,16 @@ import java.util.zip.Checksum;
  *
  * NOTE: This class is intended for INTERNAL usage only within Kafka.
  */
+// DECISION: CRC32C (Castagnoli) rather than CRC32 (ISO 3309) for record batch checksums.
+// Alternative: CRC32, xxHash, MurmurHash. Rationale: CRC32C has hardware acceleration on
+// modern x86 CPUs via SSE 4.2 instruction set (intrinsified by HotSpot JIT), making it
+// 5-10x faster than software CRC32. This is performance-critical — every record batch
+// produced and consumed computes a CRC32C checksum. Kafka switched from CRC32 to CRC32C
+// in record format v2 (KIP-98).
+//
+// CROSS-CUTTING: Used by common/record/DefaultRecord and DefaultRecordBatch for record
+// integrity verification. Every produce and fetch path computes CRC32C — this is one of
+// the hottest code paths in Kafka.
 public final class Crc32C {
 
     private Crc32C() {}
@@ -39,6 +49,9 @@ public final class Crc32C {
      * @return The CRC32C
      */
     public static long compute(byte[] bytes, int offset, int size) {
+        // DECISION: Delegates to JDK's built-in CRC32C (Java 9+). Previously Kafka bundled
+        // its own CRC32C implementation for Java 8 compatibility. Since Kafka now requires
+        // Java 11+, the JDK implementation (which is hardware-accelerated) is preferred.
         Checksum crc = new CRC32C();
         crc.update(bytes, offset, size);
         return crc.getValue();
