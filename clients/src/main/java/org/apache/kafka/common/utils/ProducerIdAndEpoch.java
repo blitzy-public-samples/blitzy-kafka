@@ -18,7 +18,18 @@ package org.apache.kafka.common.utils;
 
 import org.apache.kafka.common.record.RecordBatch;
 
+// DECISION: Immutable value type binding producerId (long) and epoch (short) together.
+// Alternative: Separate fields in TransactionManager. Rationale: These two values are always
+// used together in idempotent/transactional producer paths — bundling them ensures they are
+// atomically updated and prevents accidental use of a stale epoch with a new producerId.
+//
+// CROSS-CUTTING: Used by producer/internals/TransactionManager and producer/internals/Sender
+// for idempotent produce sequencing. Also referenced by server-side ProducerStateManager for
+// duplicate detection and zombie fencing.
 public class ProducerIdAndEpoch {
+    // DECISION: Sentinel value (NO_PRODUCER_ID=-1, NO_PRODUCER_EPOCH=0) represents "not yet
+    // assigned". Used before InitProducerIdRequest response arrives. -1 is safe because valid
+    // producer IDs are non-negative.
     public static final ProducerIdAndEpoch NONE = new ProducerIdAndEpoch(RecordBatch.NO_PRODUCER_ID, RecordBatch.NO_PRODUCER_EPOCH);
 
     public final long producerId;
