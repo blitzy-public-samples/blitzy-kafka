@@ -38,6 +38,24 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.function.Supplier;
 
+// SECURITY: (MEDIUM) SslChannelBuilder constructs SSL/TLS channels using SslFactory
+// for SSLEngine configuration. Implements ListenerReconfigurable to support dynamic
+// SSL certificate rotation without broker restart. The SslFactory is replaced atomically
+// during reconfiguration.
+// Risk: During dynamic reconfiguration, there is a brief window where new connections
+// may use the old or new certificate depending on timing. SslFactory's createSslEngine()
+// is not synchronized -- new connections created during reconfigure() may use either the
+// old or new factory depending on the JVM's memory model visibility guarantees.
+// Improvement: Consider using a volatile or AtomicReference for the SslFactory field to
+// ensure immediate visibility of the new factory across threads.
+//
+// CROSS-CUTTING: Depends on security/ssl/SslFactory for SSLEngine creation and
+// configuration. SslFactory in turn depends on the JDK's JSSE provider for TLS
+// implementation. Changes to SslFactory's createSslEngine() or
+// SslTransportLayer.create() affect all SSL connections.
+// Contract: SslFactory must be configured before buildChannel() is called.
+// Impact: If SslFactory changes its SSLEngine initialization (e.g., different cipher
+// suites), all connections created by this builder are affected.
 public class SslChannelBuilder implements ChannelBuilder, ListenerReconfigurable {
     private final ListenerName listenerName;
     private final boolean isInterBrokerListener;
@@ -83,6 +101,13 @@ public class SslChannelBuilder implements ChannelBuilder, ListenerReconfigurable
         sslFactory.validateReconfiguration(configs);
     }
 
+    // DECISION: Implements ListenerReconfigurable for dynamic SSL certificate rotation.
+    // When new SSL configuration is applied, a new SslFactory is created and validated
+    // before replacing the old one. This avoids broker restarts for certificate rotation.
+    // Alternative: Require broker restart for cert changes -- rejected for operational
+    // agility. The isInterBrokerListener flag is used to determine if this builder is
+    // for inter-broker communication, which may have different reconfiguration
+    // requirements.
     @Override
     public void reconfigure(Map<String, ?> configs) {
         sslFactory.reconfigure(configs);
@@ -93,6 +118,12 @@ public class SslChannelBuilder implements ChannelBuilder, ListenerReconfigurable
         return listenerName;
     }
 
+    // DECISION: Each connection gets its own SSLEngine and SslTransportLayer. SSLEngine
+    // instances are not reusable across connections -- they maintain per-connection TLS
+    // state (session keys, sequence numbers). The SslFactory is shared across all
+    // connections for the same listener. The SslAuthenticator (created by SslFactory)
+    // performs certificate validation and principal extraction. The sslPrincipalMapper
+    // translates X.509 DNs to Kafka principal names.
     @Override
     public KafkaChannel buildChannel(String id, SelectionKey key, int maxReceiveSize,
                                      MemoryPool memoryPool, ChannelMetadataRegistry metadataRegistry) throws KafkaException {
