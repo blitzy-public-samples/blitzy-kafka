@@ -27,6 +27,25 @@ import java.util.Optional;
 /**
  * Authentication for Channel
  */
+// SECURITY: (HIGH) Core authentication contract for all Kafka connections. Implementations
+// of this interface are the security gatekeepers — they determine whether a connection is
+// authorized to communicate.
+// Implementations: SaslServerAuthenticator, SaslClientAuthenticator (security/authenticator/),
+// PlaintextChannelBuilder.DefaultAuthenticator (no-op for PLAINTEXT).
+// Why: This interface defines the authentication lifecycle: authenticate() → complete() →
+// principal(). If any implementation incorrectly reports complete() = true before authentication
+// is finished, unauthenticated data processing occurs.
+// Risk: A faulty Authenticator that returns complete()=true prematurely allows unauthenticated
+// clients to send/receive Kafka protocol messages, bypassing all ACL controls.
+// Improvement: Consider adding a method that returns the authentication mechanism used, enabling
+// audit logging of which mechanism authenticated each connection.
+//
+// CROSS-CUTTING: Interface consumed by KafkaChannel (this package). Implementations in
+// security/authenticator/ depend on security/kerberos/, security/oauthbearer/, security/scram/,
+// security/plain/, and security/ssl/ packages. Changes to this interface require updates to
+// all implementations.
+// Contract: authenticate() is idempotent until complete() returns true. principal() is valid
+// only after complete() returns true. close() must release all resources including JAAS subjects.
 public interface Authenticator extends Closeable {
     /**
      * Implements any authentication mechanism. Use transportLayer to read or write tokens.
@@ -37,6 +56,11 @@ public interface Authenticator extends Closeable {
      *      other security configuration errors
      * @throws IOException if read/write fails due to an I/O error
      */
+    // SECURITY: This method drives the authentication state machine. For SASL mechanisms, this
+    // involves reading/writing SASL tokens from/to the TransportLayer. The method may be called
+    // multiple times (non-blocking) until complete() returns true.
+    // The AuthenticationException thrown on failure is non-retriable — clients should not retry
+    // with the same credentials.
     void authenticate() throws AuthenticationException, IOException;
 
     /**
@@ -83,6 +107,12 @@ public interface Authenticator extends Closeable {
      * @throws IOException
      *             if read/write fails due to an I/O error
      */
+    // SECURITY: (MEDIUM) Re-authentication entry point. The ReauthenticationContext carries the
+    // previous authenticator and any in-flight NetworkReceive. Re-authentication must complete
+    // atomically from the connection's perspective — no application data should be processed
+    // between the start and completion of re-authentication.
+    // Risk: If re-authentication partially completes and the connection continues processing
+    // requests, the principal may be stale (old credentials) or undefined (mid-auth).
     default void reauthenticate(ReauthenticationContext reauthenticationContext) throws IOException {
         // empty
     }
@@ -99,6 +129,9 @@ public interface Authenticator extends Closeable {
      * 
      * @return the session expiration time, if any, otherwise null
      */
+    // SECURITY: serverSessionExpirationTimeNanos() and clientSessionReauthenticationTimeNanos()
+    // control credential rotation enforcement. If a session expires and re-authentication fails,
+    // the connection must be terminated to prevent use of stale credentials.
     default Long serverSessionExpirationTimeNanos() {
         return null;
     }
