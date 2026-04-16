@@ -23,6 +23,18 @@ import java.nio.channels.ScatteringByteChannel;
 /**
  * This interface models the in-progress reading of data from a channel to a source identified by an integer id
  */
+// DECISION: Minimal interface for incoming network data. Defines readFrom(ScatteringByteChannel)
+// and complete()/requiredMemoryAmountKnown()/memoryAllocated()/source() for progressive read
+// tracking. The readFrom() contract supports incremental reads — callers invoke it repeatedly
+// until complete() returns true, matching NIO non-blocking semantics where read() returns
+// partial data when the socket buffer is not yet full.
+// Alternative: Buffered blocking read — rejected for the same single-threaded non-blocking
+// event loop reasons as Send.
+//
+// CROSS-CUTTING: Core receive abstraction consumed by Selector.pollSelectionKeys() for
+// inbound data. Implementation: NetworkReceive (size-prefixed framing). Used by KafkaChannel
+// to hold the current in-progress receive. Any change to this interface affects Selector's
+// read path and all protocol-level receive processing across clients/ and core/ modules.
 public interface Receive extends Closeable {
 
     /**
@@ -33,6 +45,10 @@ public interface Receive extends Closeable {
     /**
      * Are we done receiving data?
      */
+    // DECISION: complete() signals that the full message has been read. Implementations
+    // (e.g., NetworkReceive) expose payload data only after complete() returns true.
+    // Calling payload accessors before completion is undefined — this contract ensures
+    // no partial data is exposed to upper protocol layers.
     boolean complete();
 
     /**
@@ -46,6 +62,10 @@ public interface Receive extends Closeable {
     /**
      * Do we know yet how much memory we require to fully read this
      */
+    // DECISION: requiredMemoryAmountKnown() returns true once the 4-byte size prefix has been
+    // read, enabling the memory pool to allocate the exact buffer size needed. This two-phase
+    // approach (read size, then allocate, then read payload) minimizes over-allocation and
+    // supports memory pool integration for backpressure in Selector.
     boolean requiredMemoryAmountKnown();
 
     /**
