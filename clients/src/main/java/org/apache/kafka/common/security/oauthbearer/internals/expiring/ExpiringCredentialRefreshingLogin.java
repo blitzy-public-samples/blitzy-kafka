@@ -38,6 +38,31 @@ import javax.security.auth.login.LoginException;
  * server when the login is a type that has a limited lifetime/will expire. The
  * credentials for the login must implement {@link ExpiringCredential}.
  */
+// SECURITY: (HIGH) Background daemon thread runs token refresh with broker/client privileges.
+// The refresh thread has access to the Subject and can modify its credential set.
+// Why: This class is the scheduling engine for ALL expiring credential refresh -- both
+// OAUTHBEARER and Kerberos TGT. The refresh daemon runs with the same privileges as the Kafka
+// process and can replace credentials in the JAAS Subject. The class-level lock (synchronized
+// on the provided Class<?> object at line 364) serializes refresh operations -- a blocked
+// refresh (e.g., stuck HTTP call to an OAuth provider) blocks ALL refreshes sharing the same
+// lock in the JVM.
+// Exploit: If the refresh thread is compromised (e.g., via a malicious LoginContextFactory
+// injected through the test-visible constructor at line 160), it could replace valid tokens
+// with attacker-controlled tokens in the Subject. Because the Subject is volatile (line 146)
+// and shared across threads, the attacker's token would be picked up by all subsequent SASL
+// authentications. Additionally, a blocked refresh (stuck synchronized block) prevents ALL
+// credential refresh operations, causing eventual token expiry and authentication failure.
+// Improvement: Add a timeout on the synchronized block (e.g., tryLock with timeout) to prevent
+// indefinite blocking. Consider health monitoring for the refresh thread via a JMX gauge
+// tracking last successful refresh time and current refresh thread state.
+// CROSS-CUTTING: Extended by OAuthBearerRefreshingLogin (the concrete OAuth implementation in
+// oauthbearer/internals/OAuthBearerRefreshingLogin.java). Also used for Kerberos TGT refresh.
+// Depends on: ExpiringCredential (credential expiry interface), ExpiringCredentialRefreshConfig
+// (refresh policy from SaslConfigs), AuthenticateCallbackHandler (login callback from
+// auth/ package), KafkaThread (daemon thread from common/utils/), Time (clock abstraction).
+// Uses javax.security.auth.login.LoginContext for JAAS login/logout operations.
+// Impact: This is the scheduling engine for ALL expiring credential types -- both OAUTHBEARER
+// token refresh and Kerberos TGT renewal flow through this class.
 public abstract class ExpiringCredentialRefreshingLogin implements AutoCloseable {
     /**
      * Class that can be overridden for testing
@@ -67,6 +92,17 @@ public abstract class ExpiringCredentialRefreshingLogin implements AutoCloseable
         }
     }
 
+    // COMPLEXITY: Refresher.run() is ~59 lines (lines 72-130) -- core refresh scheduling loop.
+    // Structure: Outer while(true) loop computes next refresh time via refreshMs(), sleeps until
+    // that time, then enters inner while(true) retry loop calling reLogin().
+    // Control flow: (1) Compute nextRefreshMs -- null means exit thread (line 83), past-time
+    // means adjust to 10s from now (KAFKA-7945 safety, line 90). (2) Sleep until nextRefreshMs
+    // (line 94). (3) Check thread interrupt -- exit if interrupted (line 95-100). (4) Inner
+    // retry loop: call reLogin() -- on success break to outer loop for next credential lifetime.
+    // On ExitRefresherThreadDueToIllegalStateException -- log error and exit thread. On
+    // LoginException -- sleep 10s (DELAY_SECONDS_BEFORE_NEXT_RETRY_WHEN_RELOGIN_FAILS) and
+    // retry, exit if interrupted during retry sleep.
+    // Exit paths: (a) refreshMs returns null, (b) thread interrupted, (c) irrecoverable error.
     private class Refresher implements Runnable {
         @Override
         public void run() {
@@ -130,6 +166,14 @@ public abstract class ExpiringCredentialRefreshingLogin implements AutoCloseable
         }
     }
 
+    // DECISION: Daemon thread via KafkaThread rather than ScheduledExecutorService for refresh.
+    // Alternative: ScheduledExecutorService with scheduleAtFixedRate or scheduleWithFixedDelay.
+    // Rationale: A single dedicated daemon thread simplifies lifecycle management -- interrupt()
+    // + join() on close() (lines 249-258) is straightforward. The refresh interval is dynamic
+    // (computed per-token based on expiry window, jitter, and buffer) which doesn't fit
+    // fixed-rate scheduling. The daemon flag ensures the JVM can exit without waiting for
+    // the refresh thread. Risk: No thread pool -- if the thread dies unexpectedly (uncaught
+    // exception), refresh stops entirely with no automatic recovery.
     private static final Logger log = LoggerFactory.getLogger(ExpiringCredentialRefreshingLogin.class);
     private static final long DELAY_SECONDS_BEFORE_NEXT_RETRY_WHEN_RELOGIN_FAILS = 10L;
     private static final Random RNG = new Random();
@@ -148,6 +192,12 @@ public abstract class ExpiringCredentialRefreshingLogin implements AutoCloseable
     private String principalName = null;
     private LoginContext loginContext = null;
     private ExpiringCredential expiringCredential = null;
+    // DECISION: Class-level lock (mandatoryClassToSynchronizeOnPriorToRefresh) for refresh
+    // serialization rather than instance-level lock. This ensures only one refresh across ALL
+    // instances (in the same JVM) sharing the same lock class runs at a time. Alternative:
+    // Instance-level lock -- each Login refreshes independently. Rationale: Serialization
+    // prevents thundering herd on the OAuth/Kerberos provider when multiple clients refresh
+    // simultaneously. Risk: A hung refresh blocks all other refreshes sharing the lock.
     private final Class<?> mandatoryClassToSynchronizeOnPriorToRefresh;
 
     public ExpiringCredentialRefreshingLogin(String contextName, Configuration configuration,
@@ -200,6 +250,14 @@ public abstract class ExpiringCredentialRefreshingLogin implements AutoCloseable
      * and the {@code login()} method on the delegating class will itself be
      * synchronized if necessary.
      */
+    // COMPLEXITY: 43 lines -- Initial login and refresh thread bootstrap.
+    // Structure: (1) Create LoginContext via factory (line 204), (2) login() call (line 205),
+    // (3) Extract Subject (line 208) and ExpiringCredential (line 209), (4) If no credential,
+    // return early -- no refresh needed (lines 211-216). (5) Check clock skew -- if now >
+    // expiry, log error and return without starting refresh (lines 222-232). (6) Start daemon
+    // KafkaThread running Refresher (lines 241-244). Exit paths: return loginContext (normal,
+    // line 245), return loginContext without refresh (no credential, line 216; clock skew,
+    // line 231).
     public LoginContext login() throws LoginException {
         LoginContext tmpLoginContext = loginContextFactory.createLoginContext(this);
         tmpLoginContext.login();
@@ -270,6 +328,16 @@ public abstract class ExpiringCredentialRefreshingLogin implements AutoCloseable
      *         (in terms of the number of milliseconds since the epoch) before
      *         performing a refresh
      */
+    // COMPLEXITY: 88 lines -- Computes the next refresh timestamp with jitter and buffer
+    // constraints. Structure: 6 conditional branches: (1) null credential -> retry after
+    // DELAY_SECONDS (line 280), (2) clock past expiry + logout required -> exit thread
+    // (line 293), (3) clock past expiry + no logout required -> retry after DELAY_SECONDS
+    // (line 302), (4) absoluteLastRefreshTimeMs exceeded -> exit thread (line 315),
+    // (5) remaining lifetime too short for min+buffer -> apply pct within remaining time
+    // (line 337), (6) normal case -> compute proposedRefreshMs from start+pct, then clamp to
+    // [endOfMinRefreshBufferTime, beginningOfEndBufferTimeMs].
+    // Key: pct = windowFactor + (windowJitter * random) -- introduces randomness to prevent
+    // thundering herd across multiple clients refreshing the same token lifetime.
     private Long refreshMs(long relativeToMs) {
         if (expiringCredential == null) {
             /*
@@ -360,6 +428,20 @@ public abstract class ExpiringCredentialRefreshingLogin implements AutoCloseable
         return proposedRefreshMs;
     }
 
+    // SECURITY: (HIGH) Performs the actual logout/reLogin cycle under a class-level lock.
+    // The synchronized block on mandatoryClassToSynchronizeOnPriorToRefresh (line 364) ensures
+    // only one refresh across ALL instances (sharing the same lock class) runs at a time.
+    // The method accesses and mutates: loginContext, expiringCredential, hasExpiringCredential,
+    // principalName. All of these are non-volatile instance fields protected by the lock.
+    // COMPLEXITY: 68 lines -- Logout/reLogin cycle under class-level lock.
+    // Structure: synchronized block -> (1) If logout required and has credential: logout old
+    // context, verify credential removed (throw ExitRefresherThread if still present, line 376).
+    // (2) Save current credential/loginContext for potential rollback. (3) Create new
+    // LoginContext, login. (4) If old credential exists, logout old context. (5) finally: if
+    // login failed, restore original loginContext (line 397-399). (6) Extract new credential --
+    // if null, log error; if same object as old credential, throw ExitRefresherThread (line 422).
+    // (7) Update principalName. Exit paths: ExitRefresherThreadDueToIllegalStateException
+    // (2 throw sites), LoginException (propagated to caller), normal return.
     private void reLogin() throws LoginException, ExitRefresherThreadDueToIllegalStateException {
         synchronized (mandatoryClassToSynchronizeOnPriorToRefresh) {
             // Only perform one refresh of a particular type at a time
