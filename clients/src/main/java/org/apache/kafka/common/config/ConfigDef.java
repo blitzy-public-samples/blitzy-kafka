@@ -77,16 +77,34 @@ import java.util.stream.Collectors;
  * <p/>
  * This class can be used standalone or in combination with {@link AbstractConfig} which provides some additional
  * functionality for accessing configs.
+ *
+ * @implNote CROSS-CUTTING: ConfigDef is the schema definition framework consumed by EVERY Kafka configuration
+ * class: ProducerConfig, ConsumerConfig, AdminClientConfig (clients/), StreamsConfig (streams/),
+ * SourceConnectorConfig/SinkConnectorConfig/WorkerConfig (connect/), KafkaConfig/DynamicBrokerConfig (core/),
+ * ControllerConfig (metadata/), and all coordinator configs. The define/parse/validate/toHtml pipeline is
+ * the single source of truth for config schema metadata across the entire Kafka ecosystem.
+ *
+ * DECISION: Fluent builder pattern with 20+ define() overloads. Alternative: Builder object with named
+ * parameters. Rationale: Overloads were established before Java builder patterns became idiomatic; the
+ * pattern is now a stable public API used by hundreds of external connectors and client configurations.
+ * Breaking the API would require a KIP and multi-release deprecation cycle.
  */
 public class ConfigDef {
 
     private static final Pattern COMMA_WITH_WHITESPACE = Pattern.compile("\\s*,\\s*");
 
+    // DECISION: Sentinel unique Object instance to distinguish "no default" from null or empty string defaults.
+    // Alternative: Optional<Object>. Rationale: Sentinel avoids boxing/unwrapping overhead and works with the
+    // untyped Object defaultValue parameter across all Type variants. Identity comparison via .equals() is
+    // safe because the sentinel is a distinct Object no user-supplied default can equal.
     /**
      * A unique Java object which represents the lack of a default value.
      */
     public static final Object NO_DEFAULT_VALUE = new Object();
 
+    // DECISION: LinkedHashMap preserves definition order for documentation generation (toHtml, toRst).
+    // Alternative: HashMap + separate ordering list. Rationale: Single data structure for both lookup
+    // and ordered iteration simplifies the API and avoids synchronization between two collections.
     private final Map<String, ConfigKey> configKeys;
     private final List<String> groups;
     private Set<String> configsWithNoParent;
@@ -123,6 +141,10 @@ public class ConfigDef {
         return defaultValues;
     }
 
+    // DECISION: Single canonical define(ConfigKey) method — all 20+ overloads delegate here.
+    // Validates no duplicate keys and no re-definition of the same config name (throws
+    // ConfigException). The ConfigKey constructor eagerly validates default values against type
+    // and validator, failing fast at schema definition time rather than at parse time.
     public ConfigDef define(ConfigKey key) {
         if (configKeys.containsKey(key.name)) {
             throw new ConfigException("Configuration " + key.name + " is defined twice.");
@@ -483,6 +505,10 @@ public class ConfigDef {
         return groups;
     }
 
+    // CROSS-CUTTING: Registers SSL config keys (SslConfigs) into the calling ConfigDef.
+    // Called by ProducerConfig, ConsumerConfig, AdminClientConfig, and Connect configs.
+    // DECISION: Static registration method rather than inheritance ensures SSL configs have
+    // identical schema across all client types without requiring a common ConfigDef superclass.
     /**
      * Add standard SSL client configuration options.
      * @return this
@@ -492,6 +518,10 @@ public class ConfigDef {
         return this;
     }
 
+    // CROSS-CUTTING: Registers SASL config keys (SaslConfigs) into the calling ConfigDef.
+    // Called alongside withClientSslSupport() by all client config classes.
+    // DECISION: Combined with SSL registration to form the standard "client security config"
+    // block — these two methods are always called together as a pair.
     /**
      * Add standard SASL client configuration options.
      * @return this
@@ -619,6 +649,19 @@ public class ConfigDef {
         return configs;
     }
 
+    // COMPLEXITY: ~33 lines — Recursive parse-then-validate for a single config key and its dependents.
+    // Structure:
+    //   - Early return if name is not defined in this ConfigDef
+    //   - Resolve ConfigKey and corresponding ConfigValue
+    //   - Primary branch: parse from props (with ConfigException captured as error message) OR
+    //     emit "Missing required configuration" error when NO_DEFAULT_VALUE sentinel present OR
+    //     fall through to the defined default
+    //   - Validator phase: run key.validator.ensureValid() if present, capturing errors
+    //   - Record parsed value and recurse into each dependent config key
+    // DECISION: Errors are captured onto the ConfigValue rather than thrown, so a validate()
+    // caller receives the full picture of all invalid configs rather than failing on the first error.
+    // CROSS-CUTTING: Called by validate() which returns Config — used by Connect config validation
+    // REST endpoint to provide real-time feedback in connector configuration UIs.
     private void parseForValidate(String name, Map<String, String> props, Map<String, Object> parsed, Map<String, ConfigValue> configs) {
         if (!configKeys.containsKey(name)) {
             return;
@@ -680,6 +723,25 @@ public class ConfigDef {
         }
     }
 
+    // COMPLEXITY: 91 lines — Exhaustive type conversion switch over 9 Type variants.
+    // Structure:
+    //   - Entry guard: null check, String-to-trimmed coercion
+    //   - BOOLEAN branch: Case-insensitive "true"/"false" only — rejects "yes"/"1"/"on"
+    //   - PASSWORD branch: String -> new Password(), Password passthrough
+    //   - STRING branch: trimmed String passthrough
+    //   - INT/SHORT/LONG/DOUBLE branches: Integer.parseInt / Short.parseShort / Long.parseLong /
+    //     Double.parseDouble, NumberFormatException -> ConfigException via catch block
+    //   - LIST branch: Comma-separated split with whitespace trimming via COMMA_WITH_WHITESPACE,
+    //     empty String maps to empty List, or List passthrough
+    //   - CLASS branch: Utils.loadClass() (context classloader-aware), ClassNotFoundException
+    //     -> ConfigException via catch block
+    //   - Default: Unreachable — throws IllegalStateException for unknown Type
+    // Key paths: String input (most common path for all types), typed input passthrough, null returns null.
+    // Exit paths: normal return of parsed value, ConfigException (invalid format), IllegalStateException (bad type).
+    // DECISION: Strict BOOLEAN parsing (only "true"/"false") prevents ambiguity in config files;
+    // accepting "yes"/"1"/"on" would conflict with the STRING/INT/LIST types when Type is not yet known.
+    // DECISION: CLASS uses Utils.loadClass() which prefers the context classloader — enables plugins
+    // loaded by custom classloaders (e.g., Connect plugin isolation) to be instantiated correctly.
     /**
      * Parse a value according to its expected type.
      * @param name  The config name
@@ -832,6 +894,14 @@ public class ConfigDef {
         return result;
     }
 
+    // DECISION: Closed set of 9 primitive types — BOOLEAN, STRING, INT, SHORT, LONG, DOUBLE, LIST,
+    // CLASS, PASSWORD. Alternative: Extensible type system with custom type plugins. Rationale:
+    // Closed type system enables exhaustive switch() in parseType() and convertToString() and ensures
+    // all config values can be serialized/deserialized as strings for wire protocol compatibility.
+    // The PASSWORD type is a security decision: wraps values in Password object whose toString()
+    // returns "[hidden]", preventing accidental exposure in logs, JMX, or config dumps.
+    // CROSS-CUTTING: The Type enum is referenced by ConfigKey, AbstractConfig typed getters,
+    // ConfigCommand (tools/), ConfigurationControlManager (metadata/), and Connect config UI.
     /**
      * The type for a configuration value
      */
@@ -895,6 +965,10 @@ public class ConfigDef {
         }
     }
 
+    // DECISION: Three importance levels — HIGH, MEDIUM, LOW — used for documentation ordering
+    // and Connect UI rendering. Alternative: Numeric priority. Rationale: Named levels are more
+    // meaningful in documentation output (toHtml, toRst) and provide clear guidance to operators
+    // about which configs require attention vs. which can use defaults.
     /**
      * The importance level for a configuration
      */
@@ -902,6 +976,9 @@ public class ConfigDef {
         HIGH, MEDIUM, LOW
     }
 
+    // DECISION: UI hint enum — NONE, SHORT, MEDIUM, LONG — used by Connect config UI to
+    // determine input field sizing. Not enforced by ConfigDef itself — purely presentational.
+    // CROSS-CUTTING: Consumed by Connect's ConfigInfos REST API and Confluent Control Center.
     /**
      * The width of a configuration value
      */
@@ -909,6 +986,13 @@ public class ConfigDef {
         NONE, SHORT, MEDIUM, LONG
     }
 
+    // DECISION: Recommender provides dynamic valid-value suggestions and visibility control.
+    // Two methods: validValues() returns context-aware options, visible() controls conditional
+    // display. Alternative: Static enum of valid values. Rationale: Dynamic recommendations
+    // enable cascading config UIs (e.g., selecting a connector class reveals class-specific
+    // configs). CROSS-CUTTING: Used extensively by Connect config validation and UI rendering
+    // via the validate() REST endpoint — the returned ConfigValue.recommendedValues/visible
+    // flow directly into the Connect connector configuration UI.
     /**
      * This is used by the {@link #validate(Map)} to get valid values for a configuration given the current
      * configuration values in order to perform full configuration validation and visibility modification.
@@ -935,6 +1019,12 @@ public class ConfigDef {
         boolean visible(String name, Map<String, Object> parsedConfig);
     }
 
+    // DECISION: Validator is the extension point for config value constraints. Implementations:
+    // Range, ValidString, ValidList, CaseInsensitiveValidString, NonNullValidator, NonEmptyString,
+    // NonEmptyStringWithoutControlChars, ListSize, LambdaValidator, CompositeValidator.
+    // Alternative: Predicate<Object>. Rationale: ensureValid(name, value) signature enables
+    // context-aware error messages including the config name. toString() provides human-readable
+    // constraint descriptions for documentation generation (toHtml "Valid Values" column).
     /**
      * Validation logic the user may provide to perform single configuration validation.
      */
@@ -948,6 +1038,11 @@ public class ConfigDef {
         void ensureValid(String name, Object value);
     }
 
+    // DECISION: Range uses Number.doubleValue() for comparison, supporting all numeric types
+    // (INT, SHORT, LONG, DOUBLE) with a single validator. Null min/max allows open-ended ranges
+    // (e.g., atLeast(0) = [0,...], between(1,100) = [1,...,100]). Alternative: Separate validators
+    // per numeric type. Rationale: doubleValue() coercion loses precision for LONG values near
+    // Long.MAX_VALUE, but the practical config ranges (ms/byte limits) never approach that boundary.
     /**
      * Validation logic for numeric ranges
      */
@@ -1141,6 +1236,10 @@ public class ConfigDef {
         }
     }
 
+    // DECISION: LambdaValidator enables inline validator definitions without creating named classes.
+    // Alternative: Anonymous Validator subclasses. Rationale: Lambda syntax is more concise and
+    // the toString() supplier provides documentation-friendly constraint descriptions that can
+    // be computed lazily (e.g., when the valid values depend on the current system state).
     public static class LambdaValidator implements Validator {
         BiConsumer<String, Object> ensureValid;
         Supplier<String> toStringFunction;
@@ -1167,6 +1266,10 @@ public class ConfigDef {
         }
     }
 
+    // DECISION: CompositeValidator chains multiple validators with AND semantics — all must pass.
+    // Used to combine constraints (e.g., NonNull + Range). toString() concatenates descriptions
+    // with ", " separator for the "Valid Values" documentation column. Short-circuits on first
+    // failure via the fail-fast exception thrown by the underlying validator.
     public static class CompositeValidator implements Validator {
         private final List<Validator> validators;
 
@@ -1280,6 +1383,13 @@ public class ConfigDef {
         }
     }
 
+    // DECISION: ConfigKey is a public immutable value class (all fields public final) rather than
+    // using getters. Alternative: Encapsulated with accessor methods. Rationale: ConfigKey is a
+    // data carrier used in tight loops during validation and documentation generation — direct field
+    // access avoids method call overhead. The backward-compatible public constructor (13-param) is
+    // preserved alongside the private 14-param constructor that adds alternativeString support.
+    // CROSS-CUTTING: ConfigKey instances are read by AbstractConfig.parse(), ConfigDef.validate(),
+    // Connect config REST endpoints, and documentation generators (toHtml, toRst, toEnrichedRst).
     public static class ConfigKey {
         public final String name;
         public final Type type;
@@ -1343,6 +1453,17 @@ public class ConfigDef {
         return Arrays.asList("Name", "Description", "Type", "Default", "Valid Values", "Importance");
     }
 
+    // COMPLEXITY: 34 lines — Extracts string representation of a ConfigKey field by header name.
+    // Structure: Switch on header string -> format field value. Special cases:
+    //   - "Default": Handles hasDefault() check, null default, convertToString via Type, empty string quoting,
+    //     and unit suffix via niceMemoryUnits/niceTimeUnits when the config name ends in ".bytes" or ".ms"
+    //   - "Valid Values": Delegates to validator.toString() (returns "" when no validator)
+    //   - "Importance": Enum name in lowercase
+    //   - Default branch throws RuntimeException for unknown headers (programmer error)
+    // DECISION: Password type defaults display is handled by convertToString() which calls
+    // Password.toString() returning "[hidden]" — prevents secret exposure in generated docs.
+    // DECISION: Unit suffix heuristic (.bytes/.ms) provides human-readable annotations in docs
+    // (e.g., "1048576 (1 mebibyte)") without requiring explicit unit metadata per config key.
     protected String getConfigValue(ConfigKey key, String headerName) {
         switch (headerName) {
             case "Name":
@@ -1439,6 +1560,13 @@ public class ConfigDef {
         builder.append("</td>");
     }
 
+    // COMPLEXITY: 34 lines — Generates HTML <table> with one row per config key.
+    // Structure: Emits <thead> row with headers() columns plus optional "Dynamic Update Mode"
+    // column when dynamicUpdateModes is non-empty; iterates sortedConfigs(), emits <tr> per key
+    // skipping internalConfig keys. Each cell calls getConfigValue() for consistent formatting.
+    // Exit paths: returns accumulated StringBuilder contents.
+    // CROSS-CUTTING: Used by broker configuration documentation page (docs/configuration.html)
+    // and by KafkaConfig.toHtmlTable() for the server-side config reference.
     /**
      * Converts this config into an HTML table that can be embedded into docs.
      * If <code>dynamicUpdateModes</code> is non-empty, a "Dynamic Update Mode" column
@@ -1497,6 +1625,15 @@ public class ConfigDef {
         return b.toString();
     }
 
+    // COMPLEXITY: ~38 lines — Generates reStructuredText documentation with full metadata.
+    // Structure:
+    //   - Iterates sortedConfigs(), skips internalConfig keys
+    //   - On group change: emits RST section header with '^' underline characters sized to group name
+    //   - Delegates per-key body to getConfigKeyRst() which appends Type/Default/Valid Values/Importance
+    //   - Appends "Dependents" bullet listing dependent configs in ``backticks`` when present
+    // Exit paths: returns accumulated StringBuilder contents.
+    // CROSS-CUTTING: Used for Sphinx-based documentation generation in downstream projects that
+    // embed Kafka config references (e.g., Connect distribution docs).
     /**
      * Configs with new metadata (group, orderInGroup, dependents) formatted with reStructuredText, suitable for embedding in Sphinx
      * documentation.
@@ -1565,6 +1702,12 @@ public class ConfigDef {
         b.append("  * Importance: ").append(getConfigValue(key, "Importance")).append("\n");
     }
 
+    // DECISION: Multi-level sort implemented by the compare() helper: (1) group registration order,
+    // (2) orderInGroup within group, (3) required before optional (no default first), (4) importance
+    // (HIGH->MEDIUM->LOW via enum compareTo), (5) name alphabetical. This produces documentation
+    // output that presents the most critical configs first, matching operator expectations.
+    // Alternative: Alphabetical only. Rationale: Importance-based ordering reduces time-to-configure
+    // for operators dealing with 100+ config keys (e.g., broker configs exceed 200 entries).
     /**
      * Get a list of configs sorted taking the 'group' and 'orderInGroup' into account.
      *
@@ -1604,6 +1747,17 @@ public class ConfigDef {
         return cmp;
     }
 
+    // DECISION: embed() enables ConfigDef composition by prefixing child keys — used for Connect
+    // connector-specific configs embedded under a namespace (e.g., "producer.override." prefix).
+    // Wraps validators (embeddedValidator), dependents (embeddedDependents), and recommenders
+    // (embeddedRecommender) to strip/add prefixes transparently so the child's validation logic
+    // sees unprefixed keys while the parent ConfigDef stores the fully-qualified prefixed keys.
+    // Alternative: Separate ConfigDef hierarchy with explicit namespace resolution. Rationale:
+    // Inline composition keeps the child ConfigDef reusable as a standalone schema while enabling
+    // it to be nested into larger configs without duplication of key definitions.
+    // CROSS-CUTTING: Used by Connect SourceConnectorConfig/SinkConnectorConfig to embed
+    // producer/consumer/admin overrides under prefixes, and by broker/Connect configs to compose
+    // reusable sub-schemas (e.g., SSL, SASL) into listener-prefixed namespaces.
     public void embed(final String keyPrefix, final String groupPrefix, final int startingOrd, final ConfigDef child) {
         int orderInGroup = startingOrd;
         for (ConfigKey key : child.sortedConfigs()) {
@@ -1702,6 +1856,18 @@ public class ConfigDef {
         return toHtml(4, Function.identity(), dynamicUpdateModes);
     }
 
+    // COMPLEXITY: 41 lines — Generates HTML documentation (as a <ul> list) for config keys.
+    // Structure:
+    //   - Iterates sortedConfigs(), skips internalConfig keys
+    //   - For each key: emits <li> with anchor/header at specified headerDepth, documentation paragraph
+    //     (newlines converted to <br>)
+    //   - Emits detail <table> iterating headers(), skipping Name/Description columns
+    //   - Special handling: alternativeString overrides Default display via addConfigDetail
+    //   - Optional "Update Mode" row if dynamicUpdateModes is non-empty (defaults to "read-only")
+    // Exit paths: returns accumulated StringBuilder contents.
+    // CROSS-CUTTING: Output is embedded in docs/*.html site pages via Gradle docgen tasks.
+    // Used by KafkaConfig.toHtml(), ConnectorConfig.toHtml(), ProducerConfig/ConsumerConfig
+    // documentation generation, and AdminClientConfig for the online documentation index.
     /**
      * Converts this config into an HTML list that can be embedded into docs.
      * If <code>dynamicUpdateModes</code> is non-empty, a "Dynamic Update Mode" label
