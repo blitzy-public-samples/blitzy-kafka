@@ -34,7 +34,28 @@ import javax.security.auth.login.AppConfigurationEntry;
  * more concrete implementation. The underlying implementation is determined by the presence/absence
  * of the {@link VerificationKeyResolver}: if it's present, a {@link BrokerJwtValidator} is
  * created, otherwise a {@link ClientJwtValidator} is created.
+ *
+ * @implNote DECISION: Uses Optional-based delegation rather than subclassing. Alternative:
+ * Abstract base class with BrokerJwtValidator and ClientJwtValidator as subclasses. Rationale:
+ * Delegation allows runtime selection based on configuration rather than compile-time type
+ * hierarchy. The validator type is determined by whether the operator configures a JWKS endpoint.
  */
+// SECURITY: (MEDIUM) Default validator selection — routes to BrokerJwtValidator (JWKS-based
+// signature verification) when a VerificationKeyResolver is present, or ClientJwtValidator
+// (structural-only parsing without signature verification) when absent.
+// Why: The presence/absence of the key resolver determines whether the broker performs
+// cryptographic token verification — a critical security boundary.
+// Exploit: If the VerificationKeyResolver is not properly configured (e.g., JWKS endpoint
+// URL is missing), this validator silently falls back to ClientJwtValidator which does NOT
+// verify token signatures. An attacker could forge tokens with arbitrary claims.
+// Improvement: Log a WARNING when falling back to ClientJwtValidator on the broker side,
+// as this indicates no signature verification is occurring. Consider refusing to start
+// the broker if JWKS is not configured for OAUTHBEARER.
+//
+// CROSS-CUTTING: Depends on BrokerJwtValidator (broker-side validation), ClientJwtValidator
+// (client-side validation), internals/secured/CloseableVerificationKeyResolver (JWKS resolver).
+// Used by OAuthBearerValidatorCallbackHandler as the default JwtValidator implementation.
+// Contract: configure() must be called before validate(). Thread-safe after configure().
 public class DefaultJwtValidator implements JwtValidator {
 
     private final Optional<CloseableVerificationKeyResolver> verificationKeyResolver;
@@ -49,6 +70,9 @@ public class DefaultJwtValidator implements JwtValidator {
         this.verificationKeyResolver = Optional.of(verificationKeyResolver);
     }
 
+    // DECISION: Delegate creation deferred to configure() rather than constructor. This allows
+    // the VerificationKeyResolver to be fully configured before deciding which validator to use.
+    // The resolver is Optional — empty means client-side (no JWKS), present means broker-side.
     @Override
     public void configure(Map<String, ?> configs, String saslMechanism, List<AppConfigurationEntry> jaasConfigEntries) {
         if (verificationKeyResolver.isPresent()) {
