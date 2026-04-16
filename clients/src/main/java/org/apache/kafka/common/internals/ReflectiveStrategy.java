@@ -22,8 +22,25 @@ import java.lang.reflect.Method;
 /**
  * Utility methods for strategies which use reflection to access methods without requiring them at compile-time.
  */
+// DECISION: Stateless utility class centralizing reflection invocation and exception
+// normalization. Alternative: Each strategy (Legacy/Modern) handles its own reflection.
+// Rationale: Consistent exception handling across strategies — IllegalAccessException
+// always becomes UnsupportedOperationException (signaling "method exists but can't be
+// called"), and InvocationTargetException is always unwrapped to its cause. This
+// normalization is critical for CompositeStrategy's fallback logic which catches
+// UnsupportedOperationException to trigger strategy switching.
+//
+// CROSS-CUTTING: Foundational reflection utility consumed by LegacyStrategy,
+// ModernStrategy, and CompositeStrategy within this package. The Loader interface is
+// also used for testing SecurityManagerCompatibility strategy selection. Not consumed
+// outside of common/internals/ — this is purely internal plumbing.
 class ReflectiveStrategy {
 
+    // DECISION: IllegalAccessException→UnsupportedOperationException mapping enables
+    // CompositeStrategy.performAction() to catch UnsupportedOperationException and switch
+    // to fallback strategy. This happens when the JRE degrades AccessController (e.g.,
+    // Java 17 with --illegal-access=deny). InvocationTargetException is unwrapped to
+    // preserve the original exception type for callers.
     static Object invoke(Method method, Object obj, Object... args) {
         try {
             return method.invoke(obj, args);
@@ -39,6 +56,11 @@ class ReflectiveStrategy {
         }
     }
 
+    // DECISION: Generic checked exception variant using Class<T> parameter for type-safe
+    // exception rethrowing. Alternative: Catch all exceptions as RuntimeException.
+    // Rationale: LegacyStrategy.callAs() needs to propagate PrivilegedActionException
+    // (checked) while ModernStrategy.callAs() needs CompletionException — this method
+    // handles both via the generic type parameter.
     static <T extends Exception> Object invokeChecked(Method method, Class<T> ex, Object obj, Object... args) throws T {
         try {
             return method.invoke(obj, args);
@@ -59,6 +81,11 @@ class ReflectiveStrategy {
     /**
      * Interface to allow mocking out classloading infrastructure. This is used to test reflective operations.
      */
+    // DECISION: Loader interface abstracts Class.forName() for testability. Alternative:
+    // Direct Class.forName() calls in strategy constructors. Rationale: Tests can provide
+    // mock Loaders that simulate ClassNotFoundException or return mock classes, enabling
+    // comprehensive testing of the CompositeStrategy fallback chain without manipulating
+    // the actual JRE classpath.
     interface Loader {
         Class<?> loadClass(String className) throws ClassNotFoundException;
 
