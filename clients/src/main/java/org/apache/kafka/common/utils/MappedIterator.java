@@ -22,6 +22,10 @@ import java.util.function.Function;
 /**
  * An iterator that maps another iterator's elements from type `F` to type `T`.
  */
+// DECISION: Lazy mapping iterator that transforms elements on-the-fly. Alternative: Collect to
+// List, map, then iterate. Rationale: Lazy evaluation avoids materializing the entire mapped
+// collection — important for large partition lists and record batches where only a few elements
+// may be consumed before iteration stops.
 public final class MappedIterator<F, T> implements Iterator<T> {
     private final Iterator<? extends F> underlyingIterator;
     private final Function<F, T> mapper;
