@@ -18,6 +18,13 @@ package org.apache.kafka.common.utils;
 
 import java.util.Locale;
 
+// DECISION: Static OS detection at class-load time. Uses System.getProperty("os.name") with
+// uppercase comparison for platform-gated behaviors (e.g., directory fsync is skipped on Windows
+// per KAFKA-13391, and on z/OS). Alternative: Runtime.getRuntime().exec("uname"). Rationale:
+// System property is reliable, fast, and doesn't spawn a subprocess.
+//
+// CROSS-CUTTING: Consumed by Utils.flushDir() to skip fsync on Windows/z/OS, and by test
+// utilities for platform-specific test behavior. IS_WINDOWS and IS_ZOS are the primary flags.
 public final class OperatingSystem {
 
     private OperatingSystem() {
