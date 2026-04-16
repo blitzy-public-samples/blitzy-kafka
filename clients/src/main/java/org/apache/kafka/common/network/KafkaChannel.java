@@ -64,34 +64,26 @@ import java.util.function.Supplier;
  * to memory pressure or other reasons</li>
  * </ul>
  */
-// SECURITY: SEC-NET-006 (HIGH) Represents a single authenticated Kafka connection with transport-layer
-// Why: Kafka channel manages connection lifecycle including
-// authentication state and ready/mute transitions.
-// encryption and SASL/SSL authentication. This class manages the authentication lifecycle
-// (handshake → authenticate → ready → re-authenticate), mute/unmute flow control, and
-// send/receive I/O. A channel that completes transport handshake but fails authentication
-// enters a delayed-close state to prevent timing-based credential probing.
-// Exploit: An attacker can hold a channel in the pre-authentication state by sending partial
-// handshake data, consuming broker resources (file descriptor, memory for NetworkReceive buffer,
-// Authenticator state) without completing authentication. The mute state machine can also be
-// abused if a client triggers rapid mute/unmute cycles via quota violations.
-// Improvement: Enforce a maximum time-in-prepare() budget per channel, and rate-limit mute
-// state transitions to prevent state machine abuse.
+// SECURITY: (MEDIUM) KafkaChannel wraps TransportLayer + Authenticator, serving as the per-
+// connection security boundary. The channel enforces that no application-level reads/writes
+// occur until both the transport handshake (TLS) and application-level authentication (SASL)
+// are complete. The mute state machine prevents processing of unauthenticated requests.
+// Risk: If the ready() check is bypassed or the prepare() sequence is interrupted,
+// unauthenticated data could be processed. The muting mechanism (mute/unmute/muteState) gates
+// request processing on the server side — a bug in the mute state machine could allow request
+// processing on unauthenticated channels.
+// Improvement: Consider adding an explicit assertion in read()/write() that the channel is
+// authenticated, rather than relying solely on the caller (Selector.pollSelectionKeys) to
+// enforce the ready() check before invoking read operations.
 //
-// CROSS-CUTTING: Depends on clients/.../network/TransportLayer for raw socket I/O and SSL/TLS
-// handshake, clients/.../security/authenticator/Authenticator for SASL authentication,
-// clients/.../memory/MemoryPool for receive buffer allocation, and
-// clients/.../network/Selector for event-loop integration (mute/unmute, close lifecycle).
-// Contract: TransportLayer.ready() indicates transport-level handshake complete; Authenticator.complete()
-// indicates authentication complete. Both must be true for channel.ready() to return true.
-// Impact: Changes to Authenticator session expiry or TransportLayer handshake flow directly
-// affect channel readiness and re-authentication timing.
-//
-// DECISION: Supplier-based Authenticator creation enables re-authentication by swapping in a
-// fresh Authenticator instance while the old one is still closing. Alternative: Resettable
-// Authenticator with a reset() method. Rationale: The Supplier pattern provides cleaner
-// lifecycle isolation — each authentication attempt gets a fresh instance with no residual
-// state from prior attempts, eliminating an entire class of state-leakage bugs.
+// CROSS-CUTTING: KafkaChannel is the per-connection abstraction used by Selector (this package),
+// NetworkClient (clients/), and SocketServer (core/src/main/scala/kafka/network/). Any change
+// to KafkaChannel's mute state machine, authentication lifecycle, or read/write contract
+// affects all three consumers. The SocketServer in particular depends on the mute state machine
+// for request ordering and throttling.
+// Contract: Callers must call prepare() until ready() returns true before reading/writing data.
+// Impact: If prepare() semantics change, both client-side and server-side connection handling
+// break.
 public class KafkaChannel implements AutoCloseable {
     private static final long MIN_REAUTH_INTERVAL_ONE_SECOND_NANOS = 1000 * 1000 * 1000;
 
@@ -109,12 +101,16 @@ public class KafkaChannel implements AutoCloseable {
      *                                                  and a response is currently pending. </li>
      * </ul>
      */
-    // DECISION: Five-state mute machine (vs. simple boolean muted flag) encodes the interaction
-    // between flow control (mute/unmute), request processing (response pending), and quota
-    // enforcement (throttle). Alternative: Independent boolean flags (isMuted, isThrottled,
-    // isResponsePending). Rationale: The enum makes illegal state combinations unrepresentable
-    // and enforces valid transitions via handleChannelMuteEvent(), preventing subtle bugs where
-    // a channel is unmuted while a throttle is still active.
+    // DECISION: Five-state mute state machine rather than a simple boolean mute flag. The server
+    // (SocketServer) needs fine-grained mute control to enforce request ordering (one request at
+    // a time per channel) and throttling (quota violations). A boolean mute would conflate
+    // backpressure muting (memory pressure) with server-side request-ordering muting.
+    // Alternatives: (1) Simple boolean — rejected because it cannot distinguish between memory-
+    // pressure muting and server-initiated muting. (2) Multiple boolean flags — rejected because
+    // state transitions become error-prone without a single state variable.
+    // Risk: The state machine transitions are guarded by IllegalStateException in
+    // handleChannelMuteEvent() — an invalid transition indicates a programming error in the
+    // SocketServer's mute management.
     public enum ChannelMuteState {
         NOT_MUTED,
         MUTED,
@@ -150,6 +146,10 @@ public class KafkaChannel implements AutoCloseable {
     private final String id;
     private final TransportLayer transportLayer;
     private final Supplier<Authenticator> authenticatorCreator;
+    // CROSS-CUTTING: Depends on Authenticator interface (this package) with implementations in
+    // security/authenticator/ (SaslServerAuthenticator, SaslClientAuthenticator) and
+    // PlaintextChannelBuilder.DefaultAuthenticator (no-op for PLAINTEXT).
+    // Contract: authenticate() must be idempotent until complete() returns true.
     private Authenticator authenticator;
     // Tracks accumulated network thread time. This is updated on the network thread.
     // The values are read and reset after each response is sent.
@@ -205,16 +205,15 @@ public class KafkaChannel implements AutoCloseable {
      * For SSL with client authentication enabled, {@link TransportLayer#handshake()} performs
      * authentication. For SASL, authentication is performed by {@link Authenticator#authenticate()}.
      */
-    // SECURITY: SEC-NET-007 (HIGH) Drives the two-phase authentication: first TransportLayer handshake
-    // Why: Kafka channel manages connection lifecycle including
-    // authentication state and ready/mute transitions.
-    // (SSL/TLS), then Authenticator.authenticate() (SASL). Authentication failures are wrapped
-    // in DelayedResponseAuthenticationException to trigger Selector's delayed-close logic,
-    // preventing timing-based credential probing.
-    // Exploit: A client can repeatedly call prepare() with invalid credentials to trigger the
-    // delayed-close path, accumulating channels in Selector.delayedClosingChannels.
-    // Improvement: Track per-IP authentication failure counts and apply exponential backoff or
-    // temporary IP-level blocking after repeated failures.
+    // SECURITY: (HIGH) Two-phase authentication: first transportLayer.handshake() (TLS handshake),
+    // then authenticator.authenticate() (SASL). This ordering is critical — SASL credentials must
+    // only be transmitted after the TLS tunnel is established. If the order were reversed, SASL
+    // credentials would be sent in cleartext on SASL_SSL connections.
+    // Risk: An implementation bug that calls authenticator.authenticate() before
+    // transportLayer.ready() could leak credentials on the wire. The current code guards this
+    // with the conditional check.
+    // Improvement: Consider adding an explicit precondition check in Authenticator.authenticate()
+    // that verifies the transport layer is ready, as defense-in-depth.
     public void prepare() throws AuthenticationException, IOException {
         boolean authenticating = false;
         try {
@@ -314,12 +313,14 @@ public class KafkaChannel implements AutoCloseable {
         return muteState == ChannelMuteState.NOT_MUTED;
     }
 
-    // COMPLEXITY: Method size ~32 lines — switch-based state machine transition for mute events.
-    // Structure: Each ChannelMuteEvent case checks the current muteState and transitions to the
-    // next valid state. If no valid transition exists, IllegalStateException is thrown.
-    // Key paths: REQUEST_RECEIVED only valid from MUTED; RESPONSE_SENT valid from two states;
-    // THROTTLE_STARTED/THROTTLE_ENDED each valid from two states. The stateChanged flag ensures
-    // the exception fires only when no transition was made.
+    // COMPLEXITY: 38 lines — Mute state machine transition handler.
+    // Structure: Switch on ChannelMuteEvent type, each case validates the current muteState and
+    // transitions to the next state. If no valid transition exists, throws IllegalStateException.
+    // Key paths: REQUEST_RECEIVED (MUTED → MUTED_AND_RESPONSE_PENDING),
+    //   RESPONSE_SENT (MUTED_AND_RESPONSE_PENDING → MUTED),
+    //   THROTTLE_STARTED (MUTED_AND_RESPONSE_PENDING → MUTED_AND_THROTTLED_AND_RESPONSE_PENDING),
+    //   THROTTLE_ENDED (MUTED_AND_THROTTLED → MUTED).
+    // Exit: Always returns void; throws if transition is invalid.
     // Handle the specified channel mute-related event and transition the mute state according to the state machine.
     public void handleChannelMuteEvent(ChannelMuteEvent event) {
         boolean stateChanged = false;
@@ -369,14 +370,11 @@ public class KafkaChannel implements AutoCloseable {
      * Delay channel close on authentication failure. This will remove all read/write operations from the channel until
      * {@link #completeCloseOnAuthenticationFailure()} is called to finish up the channel close.
      */
-    // SECURITY: SEC-NET-008 (MEDIUM) Removes OP_WRITE interest to pause I/O while the authentication failure
-    // Why: Kafka channel manages connection lifecycle including
-    // authentication state and ready/mute transitions.
-    // response is prepared. The channel remains open in a quiescent state until
-    // completeCloseOnAuthenticationFailure() re-adds OP_WRITE to flush the error response.
-    // Exploit: If completeCloseOnAuthenticationFailure() is never called due to a bug,
-    // the channel remains in a zombie state consuming resources indefinitely.
-    // Improvement: Add a hard timeout that force-closes channels stuck in the delayed-close state.
+    // SECURITY: (MEDIUM) Removes OP_WRITE interest to prevent further writes on the channel
+    // after authentication failure. This is the server-side half of the timing-attack mitigation
+    // — the channel remains open (holding the TCP connection) for a configurable delay before
+    // the error response is sent and the connection is closed. See Selector.
+    // DelayedAuthenticationFailureClose for the delay mechanism.
     private void delayCloseOnAuthenticationFailure() {
         transportLayer.removeInterestOps(SelectionKey.OP_WRITE);
     }
@@ -398,6 +396,11 @@ public class KafkaChannel implements AutoCloseable {
         return muteState != ChannelMuteState.NOT_MUTED;
     }
 
+    // DECISION: Channel is considered "in mutable state" only when: (a) a receive is in progress,
+    // (b) memory for that receive has NOT yet been allocated, and (c) the transport layer is
+    // ready. This prevents muting channels that have already allocated their buffers (no point
+    // in muting) or channels not yet authenticated (transport not ready). This is the signal to
+    // Selector that the channel should be muted due to memory pressure.
     public boolean isInMutableState() {
         // Some requests do not require memory, so if we do not know what the current (or future) request is
         // (receive == null) we don't mute. We also don't mute if whatever memory required has already been
@@ -462,6 +465,10 @@ public class KafkaChannel implements AutoCloseable {
         return null;
     }
 
+    // DECISION: Auto-muting on memory exhaustion — if the receive requires memory but allocation
+    // failed (MemoryPool returned null), the channel mutes itself. This creates a backpressure
+    // signal that propagates from the MemoryPool through the channel to the Selector, which
+    // stops reading from this channel until memory is available. This prevents OOM in the broker.
     public long read() throws IOException {
         if (receive == null) {
             receive = new NetworkReceive(maxReceiveSize, id, memoryPool);
@@ -595,16 +602,14 @@ public class KafkaChannel implements AutoCloseable {
      * @throws IllegalStateException
      *             if this channel is not "ready"
      */
-    // SECURITY: SEC-NET-009 (HIGH) Server-side re-authentication enforces a minimum 1-second interval between
-    // Why: Kafka channel manages connection lifecycle including
-    // authentication state and ready/mute transitions.
-    // re-auth attempts to prevent a client from overwhelming the broker with rapid re-authentication
-    // requests that consume CPU for SASL computation. The session expiration time check ensures
-    // re-auth is only triggered for sessions that support it.
-    // Exploit: A malicious client could send SaslHandshakeRequests at high frequency to force
-    // repeated SCRAM/GSSAPI computation on the broker, consuming CPU resources.
-    // Improvement: Consider per-connection rate limiting on re-authentication attempts with
-    // exponential backoff beyond the fixed 1-second minimum interval.
+    // SECURITY: (MEDIUM) Re-authentication rate limiting — enforces a minimum 1-second interval
+    // between re-authentication attempts (MIN_REAUTH_INTERVAL_ONE_SECOND_NANOS). Without this
+    // guard, a malicious client could repeatedly trigger re-authentication to cause CPU-intensive
+    // SASL/SCRAM operations, creating a computational DoS.
+    // Risk: Attacker sends SaslHandshakeRequest at high frequency to exhaust broker CPU with
+    // PBKDF2/SCRAM computations. The 1-second floor limits the rate.
+    // Improvement: Consider making the re-auth interval configurable and/or using exponential
+    // backoff for repeated re-authentication attempts from the same connection.
     public boolean maybeBeginServerReauthentication(NetworkReceive saslHandshakeNetworkReceive,
             Supplier<Long> nowNanosSupplier) throws AuthenticationException, IOException {
         if (!ready())
@@ -662,6 +667,11 @@ public class KafkaChannel implements AutoCloseable {
      * @throws IllegalStateException
      *             if this channel is not "ready"
      */
+    // DECISION: Client-side re-authentication is gated on three conditions: (1) channel not
+    // muted, (2) no mid-write in progress, (3) session expiration time has passed. The midWrite
+    // check prevents re-auth from interrupting an in-flight request, which would corrupt the
+    // wire protocol. The receive field is set to null because the current in-progress receive
+    // will be passed to the new authenticator via ReauthenticationContext.
     public boolean maybeBeginClientReauthentication(Supplier<Long> nowNanosSupplier)
             throws AuthenticationException, IOException {
         if (!ready())
@@ -738,11 +748,16 @@ public class KafkaChannel implements AutoCloseable {
         return authenticator.connectedClientSupportsReauthentication();
     }
 
+    // SECURITY: Replaces the current authenticator with a fresh instance for re-authentication.
+    // The new authenticator is responsible for closing the old one after extracting its state
+    // (via ReauthenticationContext). The old authenticator's credentials are discarded during
+    // this swap — ensure no references to stale credentials are retained.
+    //
     // DECISION: Authenticator swap creates a new instance via authenticatorCreator Supplier,
     // delegating old-authenticator cleanup to the new authenticator (via ReauthenticationContext).
-    // Alternative: In-place authenticator reset. Rationale: Fresh instance ensures no state leakage
-    // from prior authentication, which is critical when switching between SASL mechanisms or when
-    // the prior session's cryptographic material must be fully discarded.
+    // Alternative: In-place authenticator reset. Rationale: Fresh instance ensures no state
+    // leakage from prior authentication, which is critical when switching between SASL mechanisms
+    // or when the prior session's cryptographic material must be fully discarded.
     private void swapAuthenticatorsAndBeginReauthentication(ReauthenticationContext reauthenticationContext)
             throws IOException {
         // it is up to the new authenticator to close the old one
