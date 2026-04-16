@@ -25,11 +25,31 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.function.Supplier;
 
+// SECURITY: (MEDIUM) Formats JWT bearer assertion grant request (RFC 7523 / urn:ietf:params:
+// oauth:grant-type:jwt-bearer). The assertion value (a signed JWT) is included in the form body.
+// Why: The assertion is a signed JWT that proves the client's identity — if intercepted, it can
+// be replayed to obtain access tokens within its validity window (typically short, ~5 minutes).
+// Exploit: If the token endpoint URL uses HTTP, the assertion JWT is sent in cleartext. An
+// attacker capturing the assertion can replay it to the token endpoint to obtain access tokens.
+// Unlike client_credentials, the assertion is a bearer credential — no additional secret needed.
+// Improvement: Enforce HTTPS-only for jwt-bearer grant type. Add assertion nonce/jti tracking.
+
+// CROSS-CUTTING: Implements HttpRequestFormatter — used by HttpJwtRetriever for the
+// jwt-bearer grant flow. Created by JwtBearerJwtRetriever during configure(). The
+// assertionSupplier wraps AssertionCreator.createAssertion() for on-demand JWT signing.
+// Depends on: HttpRequestFormatter (interface contract), Utils (blank checking).
+// Impact: Changes to body/header formatting affect all jwt-bearer OAuth authentication flows.
 public class JwtBearerRequestFormatter implements HttpRequestFormatter {
 
+    // DECISION: Uses the standard URN "urn:ietf:params:oauth:grant-type:jwt-bearer" per RFC 7523.
+    // This is URL-encoded in formatBody() because it contains special characters (:).
     public static final String GRANT_TYPE = "urn:ietf:params:oauth:grant-type:jwt-bearer";
 
     private final String scope;
+    // DECISION: Uses Supplier<String> for lazy assertion retrieval rather than a pre-computed
+    // String. Rationale: The assertion JWT contains time-sensitive claims (iat, exp, jti) that
+    // must be fresh at the time of each token request. A Supplier allows the AssertionCreator
+    // to generate a new assertion with current timestamps on each formatBody() call.
     private final Supplier<String> assertionSupplier;
 
     public JwtBearerRequestFormatter(String scope, Supplier<String> assertionSupplier) {
@@ -39,6 +59,9 @@ public class JwtBearerRequestFormatter implements HttpRequestFormatter {
 
     @Override
     public String formatBody() {
+        // SECURITY: (MEDIUM) The assertion is obtained from the assertionSupplier (Supplier<String>)
+        // at call time and URL-encoded before inclusion in the form body. URL encoding prevents body
+        // parameter injection via crafted assertion values.
         String assertion = assertionSupplier.get();
         StringBuilder requestParameters = new StringBuilder();
         requestParameters.append("grant_type=").append(URLEncoder.encode(GRANT_TYPE, StandardCharsets.UTF_8));
