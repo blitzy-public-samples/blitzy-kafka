@@ -23,6 +23,14 @@ import java.util.Comparator;
 /**
  * Utility class that handles immutable byte arrays.
  */
+// DECISION: Immutable byte array wrapper with Comparable semantics using unsigned
+// lexicographic ordering. Alternative: Raw byte[] with utility comparison methods.
+// Rationale: First-class Bytes type enables use as TreeMap/TreeSet key with consistent
+// ordering — critical for RocksDB state store key ranges in Kafka Streams where byte
+// array ordering determines partition range queries.
+// CROSS-CUTTING: Primary key type for Kafka Streams state stores (streams/state/).
+// Also used by serialization helpers and record key/value comparison utilities.
+// The Comparator is used by RocksDB-backed state stores for range scans.
 public class Bytes implements Comparable<Bytes> {
 
     public static final byte[] EMPTY = new byte[0];
@@ -34,6 +42,9 @@ public class Bytes implements Comparable<Bytes> {
     // cache the hash code for the string, default to 0
     private int hashCode;
 
+    // DECISION: Factory method rather than public constructor. Does NOT copy the array —
+    // caller must not mutate the source array after wrapping. This is a deliberate
+    // performance choice for high-throughput paths.
     public static Bytes wrap(byte[] bytes) {
         if (bytes == null)
             return null;
@@ -60,6 +71,9 @@ public class Bytes implements Comparable<Bytes> {
         return this.bytes;
     }
 
+    // DECISION: Delegates to Arrays.hashCode(bytes) for consistency with equals().
+    // Lazy caching is NOT used here (unlike TopicPartition) because Bytes instances
+    // are less frequently used as map keys in hot paths.
     /**
      * The hashcode is cached except for the case where it is computed as 0, in which
      * case we compute the hashcode on every call.
@@ -166,6 +180,9 @@ public class Bytes implements Comparable<Bytes> {
         }
     }
 
+    // DECISION: Unsigned lexicographic comparison using Byte.toUnsignedInt(). Alternative:
+    // Signed byte comparison. Rationale: Unsigned comparison matches RocksDB's default byte
+    // ordering and Kafka's wire protocol conventions where bytes are treated as unsigned.
     /**
      * A byte array comparator based on lexicograpic ordering.
      */
