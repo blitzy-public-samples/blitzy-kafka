@@ -55,6 +55,25 @@ import javax.security.auth.login.AppConfigurationEntry;
  * explicitly set via the {@code sasl.client.callback.handler.class}
  * configuration property.
  */
+// SECURITY: (LOW) Transfers OAuthBearerToken from JAAS Subject's private credentials to
+// SASL callbacks during the client-side SASL exchange.
+// Why: This handler accesses the Subject's private credential store which holds bearer tokens.
+// The token selection logic (latest lifetime) could mask a token replacement attack.
+// Exploit: If an attacker can inject a second OAuthBearerToken into the Subject's private
+// credentials (e.g., via a compromised JAAS LoginModule sharing the same Subject), the
+// handler will select the token with the longest lifetime — which could be the attacker's
+// forged token with an artificially long expiration. The legitimate token would be ignored.
+// Improvement: Consider logging the principalName of the selected token when multiple
+// tokens exist, enabling audit detection of unexpected principal switches.
+//
+// CROSS-CUTTING: Depends on auth/AuthenticateCallbackHandler (contract interface),
+// auth/SaslExtensions (public credential DTO), OAuthBearerToken (private credential),
+// OAuthBearerTokenCallback (callback contract), SecurityManagerCompatibility (Subject access).
+// Used by: OAuthBearerSaslClient via SASL factory (SaslClientFactory passes this as
+// the CallbackHandler). Configured by LoginManager during SASL authentication setup.
+// Contract: configure() must be called before handle(). Not thread-safe.
+// Impact: Changes to OAuthBearerToken interface or Subject credential storage affect
+// token retrieval behavior across all OAUTHBEARER client authentication paths.
 public class OAuthBearerSaslClientCallbackHandler implements AuthenticateCallbackHandler {
     private static final Logger log = LoggerFactory.getLogger(OAuthBearerSaslClientCallbackHandler.class);
     private boolean configured = false;
@@ -94,6 +113,11 @@ public class OAuthBearerSaslClientCallbackHandler implements AuthenticateCallbac
         // empty
     }
 
+    // SECURITY: (LOW) Token retrieval from Subject's private credentials. The private
+    // credentials set is accessed via Subject.getPrivateCredentials() which requires
+    // no special permissions in the current Kafka security model. The token's raw value
+    // (a bearer JWT string) is accessible to any code that obtains a reference to the
+    // returned OAuthBearerToken instance.
     private void handleCallback(OAuthBearerTokenCallback callback) throws IOException {
         if (callback.token() != null)
             throw new IllegalArgumentException("Callback had a token already");
@@ -106,6 +130,18 @@ public class OAuthBearerSaslClientCallbackHandler implements AuthenticateCallbac
         if (privateCredentials.size() == 1)
             callback.token(privateCredentials.iterator().next());
         else {
+            // SECURITY: (LOW) Multi-token race window — during refresh, old and new tokens briefly
+            // coexist. Selecting the longest-lived token is the correct choice for availability,
+            // but note: an attacker who can inject tokens would exploit this exact behavior.
+            // The WARN log message includes token lifetimes (dates) but not token values — correct.
+            //
+            // DECISION: Select token with longest lifetime when multiple exist, rather than
+            // implementing a lock to prevent the multi-token window. Alternatives: (1) Use a
+            // ReentrantLock to serialize refresh and callback, (2) Fail when multiple tokens exist.
+            // Rationale: Lock-free approach avoids deadlock risk between SASL thread and refresh
+            // thread. The multi-token window is O(milliseconds) during normal operation. This
+            // also handles the KAFKA-7902 bug scenario gracefully. Risk: If more than 2 tokens
+            // accumulate (leak), the WARN log is the only signal — no eviction occurs.
             /*
              * There a very small window of time upon token refresh (on the order of milliseconds)
              * where both an old and a new token appear on the Subject's private credentials.
@@ -115,6 +151,9 @@ public class OAuthBearerSaslClientCallbackHandler implements AuthenticateCallbac
              * exist (e.g. KAFKA-7902), so dealing with the unlikely possibility that occurs
              * during normal operation also allows us to deal more robustly with potential bugs.
              */
+            // DECISION: Uses TreeSet with Comparator.comparingLong(lifetimeMs) for O(n log n)
+            // sorting. Alternative: Stream.max(). Rationale: TreeSet provides natural ordering
+            // with .first()/.last() access for both logging and selection in one pass.
             SortedSet<OAuthBearerToken> sortedByLifetime =
                 new TreeSet<>(
                         Comparator.comparingLong(OAuthBearerToken::lifetimeMs));
