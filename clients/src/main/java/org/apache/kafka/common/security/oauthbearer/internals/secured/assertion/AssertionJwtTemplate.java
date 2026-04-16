@@ -46,6 +46,24 @@ import java.util.Map;
  * Java type equivalents (Map, List, String, Integer, Double, and Boolean) so that the JSON library will
  * know how to serialize the entire object graph.
  */
+// DECISION: Interface-based template pattern for JWT claim layering. Alternatives: (1) Direct
+// Map<String, Object> parameter to AssertionCreator.create(), (2) Builder pattern for claims.
+// Rationale: Interface enables composition via LayeredAssertionJwtTemplate — multiple claim
+// sources (static config, file-based, dynamic time-based) are layered together where later
+// sources override earlier ones. This is the Composite pattern adapted for JWT claim construction.
+// A Map parameter would require the caller to merge claims; a Builder would couple construction
+// order to the builder API. The interface allows each source to be independently configurable
+// and closeable (extends Closeable for resource cleanup).
+//
+// CROSS-CUTTING: Implemented by DynamicAssertionJwtTemplate (time-based claims: iat, exp, jti),
+// FileAssertionJwtTemplate (file-based claims from JSON template), LayeredAssertionJwtTemplate
+// (composite that merges multiple templates), and StaticAssertionJwtTemplate (config-driven claims).
+// Used by DefaultAssertionCreator.create() to obtain header and payload maps for JWT construction.
+// Created and composed by AssertionUtils.toTemplate() / layeredAssertionJwtTemplate().
+// Extends Closeable — lifecycle managed by LayeredAssertionJwtTemplate.close() which propagates
+// to all child templates. Consumed by JwtBearerJwtRetriever which holds the composed template.
+// Impact: Adding new claim sources requires implementing this interface and adding to the
+// layered composition in AssertionUtils.
 public interface AssertionJwtTemplate extends Closeable {
 
     /**
@@ -66,6 +84,9 @@ public interface AssertionJwtTemplate extends Closeable {
      * Closes any resources used by this implementation. The default implementation of
      * this method is a no op, for convenience to implementors.
      */
+    // DECISION: Default no-op close() for implementor convenience. Only FileAssertionJwtTemplate
+    // needs cleanup (CachedFile resources). StaticAssertionJwtTemplate and DynamicAssertionJwtTemplate
+    // are stateless and don't need close(). LayeredAssertionJwtTemplate overrides to propagate close().
     @Override
     default void close() throws IOException {
         // Do nothing...
