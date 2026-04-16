@@ -85,15 +85,19 @@ public class JaasContext {
     // SECURITY: (MEDIUM) Server-side JAAS context loading uses mechanism-prefixed config keys
     // to isolate per-mechanism credentials. Misconfigured prefix resolution could expose one
     // mechanism's credentials to another.
+    // Exploit: A malformed JAAS configuration could disable authentication or load a malicious login module.
+    // Improvement: Validate JAAS configurations at startup and restrict login module classes to an allowlist.
     public static JaasContext loadServerContext(ListenerName listenerName, String mechanism, Map<String, ?> configs) {
         if (listenerName == null)
             throw new IllegalArgumentException("listenerName should not be null for SERVER");
         if (mechanism == null)
             throw new IllegalArgumentException("mechanism should not be null for SERVER");
         String listenerContextName = listenerName.value().toLowerCase(Locale.ROOT) + "." + GLOBAL_CONTEXT_NAME_SERVER;
-        // SECURITY: Dynamic JAAS config from Password type -- value is in-memory only, not
+        // SECURITY: (MEDIUM) Dynamic JAAS config from Password type -- value is in-memory only, not
         // persisted to disk. May appear in config dumps unless explicitly masked.
         // The log.warn below correctly avoids logging the config value itself.
+        // Exploit: A malformed JAAS configuration could disable authentication or load a malicious login module.
+        // Improvement: Validate JAAS configurations at startup and restrict login module classes to an allowlist.
         Password dynamicJaasConfig = (Password) configs.get(mechanism.toLowerCase(Locale.ROOT) + "." + SaslConfigs.SASL_JAAS_CONFIG);
         if (dynamicJaasConfig == null && configs.get(SaslConfigs.SASL_JAAS_CONFIG) != null)
             LOG.warn("Server config {} should be prefixed with SASL mechanism name, ignoring config", SaslConfigs.SASL_JAAS_CONFIG);

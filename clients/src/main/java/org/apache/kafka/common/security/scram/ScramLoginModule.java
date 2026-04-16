@@ -65,6 +65,8 @@ public class ScramLoginModule implements LoginModule {
     // are registered on class load. This is global JVM state. If provider registration order is
     // manipulated (e.g., a malicious provider with the same mechanism name registered earlier),
     // a weaker or compromised SCRAM implementation could be selected during SASL negotiation.
+    // Exploit: Improper handling could be exploited to bypass security controls or leak sensitive information.
+    // Improvement: Add comprehensive logging for security-relevant operations and enforce fail-closed semantics.
     static {
         ScramSaslClientProvider.initialize();
         ScramSaslServerProvider.initialize();
@@ -72,15 +74,19 @@ public class ScramLoginModule implements LoginModule {
 
     @Override
     public void initialize(Subject subject, CallbackHandler callbackHandler, Map<String, ?> sharedState, Map<String, ?> options) {
-        // SECURITY: Username extracted via unchecked cast from options Map. A ClassCastException
+        // SECURITY: (MEDIUM) Username extracted via unchecked cast from options Map. A ClassCastException
         // here would prevent authentication but is not handled gracefully. The username is added
         // to public credentials -- visible to any code with access to the Subject.
+        // Exploit: Unauthorized access to the credential cache could expose authentication material.
+        // Improvement: Limit cache access to authenticated callers and consider cache entry encryption at rest.
         String username = (String) options.get(USERNAME_CONFIG);
         if (username != null)
             subject.getPublicCredentials().add(username);
         // SECURITY: (MEDIUM) Password added to Subject's private credentials as a String.
         // Strings are immutable and may be interned by the JVM, making them difficult to
         // erase from memory. A heap dump or memory scanner could extract the plaintext password.
+        // Exploit: An attacker on the network can intercept all data including credentials in transit.
+        // Improvement: Use TLS-encrypted transports (SSL or SASL_SSL) in production environments.
         String password = (String) options.get(PASSWORD_CONFIG);
         if (password != null)
             subject.getPrivateCredentials().add(password);
@@ -89,6 +95,8 @@ public class ScramLoginModule implements LoginModule {
         // map is injected into public credentials. This signals ScramSaslClient to include
         // the tokenauth extension in the client-first message, triggering delegation token
         // credential lookup on the server side instead of regular SCRAM credentials.
+        // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+        // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
         boolean useTokenAuthentication = "true".equalsIgnoreCase((String) options.get(TOKEN_AUTH_CONFIG));
         if (useTokenAuthentication) {
             Map<String, String> scramExtensions = Collections.singletonMap(TOKEN_AUTH_CONFIG, "true");

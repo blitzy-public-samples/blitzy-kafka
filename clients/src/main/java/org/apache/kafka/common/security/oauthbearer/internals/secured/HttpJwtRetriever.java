@@ -104,6 +104,8 @@ public class HttpJwtRetriever implements JwtRetriever {
     // like 408 (Request Timeout) and 429 (Too Many Requests) are transient and should be
     // retried. An exhaustive set is safer than a range because new HTTP status codes may be
     // added that are retryable. Risk: Unknown 4xx codes default to retryable, wasting retries.
+    // Exploit: An attacker could exhaust server resources by sending oversized or excessive requests.
+    // Improvement: Enforce strict per-connection resource limits and implement connection rate limiting.
     static {
         // This does not have to be an exhaustive list. There are other HTTP codes that
         // are defined in different RFCs (e.g. https://datatracker.ietf.org/doc/html/rfc6585)
@@ -136,6 +138,8 @@ public class HttpJwtRetriever implements JwtRetriever {
     // The factory determines which TLS protocol versions, cipher suites, and trust stores
     // are used for the token endpoint connection. A misconfigured factory (e.g., trust-all)
     // would allow MITM attacks on the token endpoint.
+    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
     private SSLSocketFactory sslSocketFactory;
 
     private URL tokenEndpointUrl;
@@ -159,6 +163,7 @@ public class HttpJwtRetriever implements JwtRetriever {
         // (http/https/file only). SSLSocketFactory only created when protocol is HTTPS.
         // If protocol is HTTP, credentials are sent in cleartext -- no warning is logged.
         // Improvement: Log a WARN when token endpoint uses HTTP (not HTTPS) protocol.
+        // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
         ConfigurationUtils cu = new ConfigurationUtils(configs, saslMechanism);
         JaasOptionsUtils jou = new JaasOptionsUtils(saslMechanism, jaasConfigEntries);
 
@@ -303,6 +308,8 @@ public class HttpJwtRetriever implements JwtRetriever {
     // responses don't contain sensitive data). The response body is held in memory as a
     // String. For very large responses, this could cause OOM -- consider limiting
     // response body size.
+    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
     static String handleOutput(final HttpURLConnection con) throws IOException {
         int responseCode = con.getResponseCode();
         log.debug("handleOutput - responseCode: {}", responseCode);
@@ -351,6 +358,8 @@ public class HttpJwtRetriever implements JwtRetriever {
             // errors, throws UnretryableException to stop retry loop immediately. This
             // prevents credential brute-forcing against the token endpoint -- a 401 (bad
             // credentials) won't be retried.
+            // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+            // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
             if (UNRETRYABLE_HTTP_CODES.contains(responseCode)) {
                 // We know that this is a non-transient error, so let's not keep retrying the
                 // request unnecessarily.

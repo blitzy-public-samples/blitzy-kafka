@@ -91,6 +91,8 @@ public class DefaultJwtRetriever implements JwtRetriever {
         // DECISION: "file:" protocol -> FileJwtRetriever, everything else -> ClientCredentialsJwtRetriever.
         // No support for other schemes (e.g., "classpath:", "s3:") — custom schemes require a custom
         // JwtRetriever implementation via SASL_OAUTHBEARER_JWT_RETRIEVER_CLASS config.
+        // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+        // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
         if (tokenEndpointUrl.getProtocol().toLowerCase(Locale.ROOT).equals("file"))
             delegate = new FileJwtRetriever();
         else

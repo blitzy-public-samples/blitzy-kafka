@@ -64,10 +64,12 @@ public class ScramMessages {
     // Risk: Complex regex patterns may be vulnerable to catastrophic backtracking (ReDoS).
     abstract static class AbstractScramMessage {
 
-        // SECURITY: Regex character classes define allowed character sets per RFC 5802 ABNF.
+        // SECURITY: (MEDIUM) Regex character classes define allowed character sets per RFC 5802 ABNF.
         // VALUE_SAFE: Excludes '=' and ',' -- prevents attribute boundary confusion.
         // PRINTABLE: Excludes only ',' -- used for nonce values which must be unique/random.
         // SASLNAME: Allows '=2C' and '=3D' escape sequences per RFC 5802 Section 5.1.
+        // Exploit: Predictable nonce or salt values would allow precomputation attacks against the challenge-response.
+        // Improvement: Verify SecureRandom is seeded from a strong entropy source on the deployment platform.
         static final String ALPHA = "[A-Za-z]+";
         static final String VALUE_SAFE = "[\\x01-\\x7F&&[^=,]]+";
         static final String VALUE = "[\\x01-\\x7F&&[^,]]+";
@@ -111,12 +113,13 @@ public class ScramMessages {
         private final String nonce;
         private final String authorizationId;
         private final ScramExtensions extensions;
-        // SECURITY: Parsing client-first message from untrusted network data. The regex
+        // SECURITY: (HIGH) Parsing client-first message from untrusted network data. The regex
         // PATTERN validates the overall structure, but individual field content is not
         // bounds-checked. The saslName field undergoes =2C/=3D unescaping in
         // ScramFormatter.username() -- crafted saslNames with unexpected escape sequences
         // could cause IllegalArgumentException.
         // Improvement: Add bounds-checking on saslName length after regex extraction.
+        // Exploit: Malformed serialized data could trigger parsing exceptions or inject unexpected values.
         public ClientFirstMessage(byte[] messageBytes) throws SaslException {
             String message = toMessage(messageBytes);
             Matcher matcher = PATTERN.matcher(message);
@@ -192,11 +195,13 @@ public class ScramMessages {
             Matcher matcher = PATTERN.matcher(message);
             if (!matcher.matches())
                 throw new SaslException("Invalid SCRAM server first message format: " + message);
-            // SECURITY: Iteration count parsed from server message. A compromised server
+            // SECURITY: (MEDIUM) Iteration count parsed from server message. A compromised server
             // could send extremely high iterations (e.g., Integer.MAX_VALUE) causing CPU
             // exhaustion during PBKDF2 key derivation on the client. ScramSaslClient checks
             // minimum but not maximum. Improvement: Enforce ScramMechanism.maxIterations()
             // (16384) here to reject excessive iteration counts before PBKDF2 begins.
+            // Exploit: An attacker could brute-force weak passwords if the iteration count is set below the recommended
+            // minimum.
             try {
                 this.iterations = Integer.parseInt(matcher.group("iterations"));
                 if (this.iterations <= 0)
@@ -252,12 +257,13 @@ public class ScramMessages {
 
             this.channelBinding = Base64.getDecoder().decode(matcher.group("channel"));
             this.nonce = matcher.group("nonce");
-            // SECURITY: Client proof is the core authentication token -- ClientProof =
+            // SECURITY: (HIGH) Client proof is the core authentication token -- ClientProof =
             // ClientKey XOR ClientSignature. This field is Base64-decoded from untrusted
             // client data. No length validation is performed -- an incorrect-length proof
             // would cause comparison failure in ScramSaslServer.verifyClientProof() but not
             // before crypto operations are performed.
             // Improvement: Validate decoded proof length matches expected hash output size.
+            // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
             this.proof = Base64.getDecoder().decode(matcher.group("proof"));
         }
         public ClientFinalMessage(byte[] channelBinding, String nonce) {

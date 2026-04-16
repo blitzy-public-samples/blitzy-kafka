@@ -89,16 +89,22 @@ public final class RefreshingHttpsJwks implements OAuthBearerConfigurable {
     // causing repeated refresh attempts for previously seen (and rate-limited) kid values.
     // DECISION: 16 entries chosen as a reasonable upper bound for concurrent key rotation
     // events. In normal operation, providers rotate 1-2 keys at a time.
+    // Exploit: An attacker could exhaust server resources by sending oversized or excessive requests.
+    // Improvement: Enforce strict per-connection resource limits and implement connection rate limiting.
     private static final int MISSING_KEY_ID_CACHE_MAX_ENTRIES = 16;
 
     // SECURITY: (MEDIUM) 60-second cooldown per missing key ID. Prevents rapid-fire
     // refresh attempts for the same unknown kid. After an expedited refresh is scheduled
     // for a kid, subsequent requests for the same kid within 60s are silently ignored.
+    // Exploit: Improper handling could be exploited to bypass security controls or leak sensitive information.
+    // Improvement: Add comprehensive logging for security-relevant operations and enforce fail-closed semantics.
     static final long MISSING_KEY_ID_CACHE_IN_FLIGHT_MS = 60000;
 
     // SECURITY: (MEDIUM) Maximum kid length — prevents memory exhaustion from maliciously
     // long kid values in crafted JWTs. Kid values exceeding 1000 characters are rejected
     // without caching, with only the first 1000 characters logged.
+    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
     static final int MISSING_KEY_ID_MAX_KEY_LENGTH = 1000;
 
     private static final int SHUTDOWN_TIMEOUT = 10;
@@ -141,6 +147,8 @@ public final class RefreshingHttpsJwks implements OAuthBearerConfigurable {
     // Thread-safety contract: Multiple authentication threads can read cached keys
     // concurrently; only the refresh thread (ScheduledExecutorService) or expedited
     // refresh modifies the cache.
+    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
     private final ReadWriteLock refreshLock = new ReentrantReadWriteLock();
 
     private final Map<String, Long> missingKeyIds;
@@ -152,6 +160,8 @@ public final class RefreshingHttpsJwks implements OAuthBearerConfigurable {
     // SECURITY: (LOW) AtomicBoolean gate preventing concurrent refresh invocations.
     // Without this, multiple expedited refresh attempts could spawn concurrent HTTP
     // requests to the JWKS endpoint, amplifying a DoS attack surface.
+    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
     private final AtomicBoolean refreshInProgressFlag = new AtomicBoolean(false);
 
     /**
@@ -386,6 +396,8 @@ public final class RefreshingHttpsJwks implements OAuthBearerConfigurable {
             // availability-over-security trade-off: a transient JWKS endpoint failure
             // should not cause all authentication to fail.
             // Risk: Revoked/rotated keys remain trusted until a successful refresh.
+            // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+            // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
             log.warn("OAuth JWKS refresh of {} encountered an error; not updating local JWKS cache", httpsJwks.getLocation(), e);
         } finally {
             refreshInProgressFlag.set(false);

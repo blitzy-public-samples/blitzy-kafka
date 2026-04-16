@@ -19,7 +19,7 @@ package org.apache.kafka.common.security.kerberos;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-// SECURITY (MEDIUM): Parses Kerberos principal names (user@REALM, user/host@REALM) into components.
+// SECURITY: (MEDIUM) Parses Kerberos principal names (user@REALM, user/host@REALM) into components.
 // Malformed principals could cause incorrect identity mapping downstream in KerberosShortNamer.
 // Exploit: A crafted principal with embedded special characters could manipulate the NAME_PARSER
 // regex, producing an incorrect serviceName that maps to a different user's identity
@@ -36,9 +36,11 @@ public class KerberosName {
     /**
      * A pattern that matches a Kerberos name with at most 3 components.
      */
-    // SECURITY (LOW): NAME_PARSER regex uses [^/@]* which accepts any characters except '/' and '@'.
+    // SECURITY: (LOW) NAME_PARSER regex uses [^/@]* which accepts any characters except '/' and '@'.
     // This means principal components can contain spaces, control characters, or other unexpected chars.
     // Risk: Unusual characters in serviceName could confuse downstream authorization systems.
+    // Exploit: A misconfigured auth_to_local rule could map an attacker principal to a privileged local identity.
+    // Improvement: Audit auth_to_local rules regularly and use strict realm-based principal validation.
     private static final Pattern NAME_PARSER = Pattern.compile("([^/@]*)(/([^/@]*))?@([^/@]*)");
 
     /** The first component of the name */

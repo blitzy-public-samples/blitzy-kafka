@@ -442,6 +442,8 @@ public abstract class ExpiringCredentialRefreshingLogin implements AutoCloseable
     // if null, log error; if same object as old credential, throw ExitRefresherThread (line 422).
     // (7) Update principalName. Exit paths: ExitRefresherThreadDueToIllegalStateException
     // (2 throw sites), LoginException (propagated to caller), normal return.
+    // Exploit: A misconfigured auth_to_local rule could map an attacker principal to a privileged local identity.
+    // Improvement: Audit auth_to_local rules regularly and use strict realm-based principal validation.
     private void reLogin() throws LoginException, ExitRefresherThreadDueToIllegalStateException {
         synchronized (mandatoryClassToSynchronizeOnPriorToRefresh) {
             // Only perform one refresh of a particular type at a time

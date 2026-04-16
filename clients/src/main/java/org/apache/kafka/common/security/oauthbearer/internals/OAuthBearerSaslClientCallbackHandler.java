@@ -118,6 +118,8 @@ public class OAuthBearerSaslClientCallbackHandler implements AuthenticateCallbac
     // no special permissions in the current Kafka security model. The token's raw value
     // (a bearer JWT string) is accessible to any code that obtains a reference to the
     // returned OAuthBearerToken instance.
+    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
     private void handleCallback(OAuthBearerTokenCallback callback) throws IOException {
         if (callback.token() != null)
             throw new IllegalArgumentException("Callback had a token already");
@@ -142,6 +144,8 @@ public class OAuthBearerSaslClientCallbackHandler implements AuthenticateCallbac
             // thread. The multi-token window is O(milliseconds) during normal operation. This
             // also handles the KAFKA-7902 bug scenario gracefully. Risk: If more than 2 tokens
             // accumulate (leak), the WARN log is the only signal — no eviction occurs.
+            // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+            // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
             /*
              * There a very small window of time upon token refresh (on the order of milliseconds)
              * where both an old and a new token appear on the Subject's private credentials.

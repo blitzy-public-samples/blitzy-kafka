@@ -137,6 +137,10 @@ public class OAuthBearerSaslClient implements SaslClient {
                     // token string is briefly held in memory as part of the response byte
                     // array. After this point, the token is on the wire -- network security
                     // (TLS) is the only protection.
+                    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are
+                    // leaked.
+                    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer
+                    // validation.
                     if (challenge != null && challenge.length != 0)
                         throw new SaslException("Expected empty challenge");
                     callbackHandler().handle(new Callback[] {callback});
@@ -151,6 +155,10 @@ public class OAuthBearerSaslClient implements SaslClient {
                     // ensure DEBUG logging is not enabled in production as error details could
                     // reveal server config. The client responds with control-A (0x01) per
                     // RFC 7628 error acknowledgment.
+                    // Exploit: Improper handling could be exploited to bypass security controls or leak sensitive
+                    // information.
+                    // Improvement: Add comprehensive logging for security-relevant operations and enforce fail-closed
+                    // semantics.
                     if (challenge != null && challenge.length != 0) {
                         String jsonErrorResponse = new String(challenge, StandardCharsets.UTF_8);
                         if (log.isDebugEnabled())
@@ -184,6 +192,8 @@ public class OAuthBearerSaslClient implements SaslClient {
     // SECURITY: (MEDIUM) OAUTHBEARER does NOT support SASL integrity or privacy layers.
     // wrap() and unwrap() throw IllegalStateException. This means the token exchange
     // has NO built-in replay protection or message integrity -- TLS MUST be used.
+    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
     @Override
     public byte[] unwrap(byte[] incoming, int offset, int len) {
         if (!isComplete())

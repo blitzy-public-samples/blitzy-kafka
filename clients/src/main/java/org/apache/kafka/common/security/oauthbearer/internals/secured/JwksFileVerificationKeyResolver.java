@@ -128,6 +128,8 @@ public class JwksFileVerificationKeyResolver implements CloseableVerificationKey
         // SECURITY: (MEDIUM) Null delegate check — fails with UnresolvableKeyException if
         // configure() hasn't been called. This is a defense against misconfigured lifecycle
         // where the resolver is used before initialization.
+        // Exploit: Improper handling could be exploited to bypass security controls or leak sensitive information.
+        // Improvement: Add comprehensive logging for security-relevant operations and enforce fail-closed semantics.
         if (delegate == null)
             throw new UnresolvableKeyException("VerificationKeyResolver delegate is null; please call configure() first");
 
@@ -141,6 +143,7 @@ public class JwksFileVerificationKeyResolver implements CloseableVerificationKey
     // algorithms (e.g., HMAC-SHA256 symmetric key) that weaken validation security.
     // Improvement: Validate that all keys in the JWKS use acceptable algorithms (e.g., RS256,
     // ES256) and reject JWKS files containing symmetric keys.
+    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
     /**
      * "Transforms" the raw file contents into a {@link VerificationKeyResolver} that can be used to resolve
      * the keys provided in the JWT.

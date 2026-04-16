@@ -151,6 +151,8 @@ class CommonNameLoggingTrustManagerFactoryWrapper {
             // HashMap growth and OOM. The LinkedHashMap with removeEldestEntry provides
             // O(1) eviction of oldest entries.
             // Restrict maximal size of the LinkedHashMap to avoid security attacks causing OOM
+            // Exploit: An attacker could exploit weak cipher suites or certificate validation gaps for MITM attacks.
+            // Improvement: Enforce strong cipher suite selection and certificate pinning where feasible.
             this.previouslyRejectedClientCertChains = new LinkedHashMap<>() {
                 @Override
                 protected boolean removeEldestEntry(final Map.Entry<ByteBuffer, String> eldest) {
@@ -170,6 +172,8 @@ class CommonNameLoggingTrustManagerFactoryWrapper {
         // to determine if expiry was the sole failure cause. This two-phase validation
         // approach ensures original security semantics are preserved -- the original
         // CertificateException is always rethrown regardless of the expiry check result.
+        // Exploit: An attacker could exploit weak cipher suites or certificate validation gaps for MITM attacks.
+        // Improvement: Enforce strong cipher suite selection and certificate pinning where feasible.
         @Override
         public void checkClientTrusted(X509Certificate[] chain, String authType)
                 throws CertificateException {
@@ -231,6 +235,8 @@ class CommonNameLoggingTrustManagerFactoryWrapper {
         // and computationally efficient. The digest is used as a cache key, not for security
         // decisions; a collision would only cause a misleading cached error message, not a
         // security bypass.
+        // Exploit: Unauthorized access to the credential cache could expose authentication material.
+        // Improvement: Limit cache access to authenticated callers and consider cache entry encryption at rest.
         public static ByteBuffer calcDigestForCertificateChain(X509Certificate[] chain) throws CertificateEncodingException {
             MessageDigest md;
             try {

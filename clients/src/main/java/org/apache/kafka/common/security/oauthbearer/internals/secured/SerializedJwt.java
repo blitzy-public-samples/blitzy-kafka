@@ -74,6 +74,8 @@ public class SerializedJwt {
         // The dot delimiter is regex-escaped. Note: String.split("\\.") with no limit parameter
         // discards trailing empty strings — this means a token ending in "." would have fewer than
         // 3 segments and be rejected. This is the correct security behavior.
+        // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+        // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
         String[] splits = token.split("\\.");
 
         if (splits.length != 3)

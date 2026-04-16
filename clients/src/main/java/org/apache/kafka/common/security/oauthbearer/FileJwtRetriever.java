@@ -66,12 +66,16 @@ public class FileJwtRetriever implements JwtRetriever {
         // This allows token rotation by updating the file. However, there is a TOCTOU race:
         // between checking mtime and reading, the file could be swapped by an attacker.
         // STRING_JSON_VALIDATING_TRANSFORMER validates JSON structure, rejecting non-JSON content.
+        // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+        // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
         jwtFile = new CachedFile<>(file, STRING_JSON_VALIDATING_TRANSFORMER, lastModifiedPolicy());
     }
 
-    // SECURITY: Token content is returned as a raw String — not wrapped in Password type.
+    // SECURITY: (MEDIUM) Token content is returned as a raw String — not wrapped in Password type.
     // The token value will be held in memory by the JAAS Subject's private credentials
     // until logout. GC behavior means the String may persist in memory after logout.
+    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
     @Override
     public String retrieve() throws JwtRetrieverException {
         if (jwtFile == null)

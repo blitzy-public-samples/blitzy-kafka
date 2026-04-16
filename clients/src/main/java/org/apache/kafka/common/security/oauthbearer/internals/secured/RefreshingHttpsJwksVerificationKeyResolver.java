@@ -167,6 +167,7 @@ public class RefreshingHttpsJwksVerificationKeyResolver implements CloseableVeri
     // in RefreshingHttpsJwks mitigates this by rate-limiting refresh attempts per keyId, but the
     // cache has a fixed size (16 entries) which could be exhausted by rotating keyIds.
     // Improvement: Add a global rate limiter on expedited refresh attempts (e.g., max N per minute).
+    // Exploit: Predictable nonce or salt values would allow precomputation attacks against the challenge-response.
     @Override
     public Key resolveKey(JsonWebSignature jws, List<JsonWebStructure> nestingContext) throws UnresolvableKeyException {
         // SECURITY: (MEDIUM) Fail-fast if configure() hasn't been called. This prevents resolveKey()
@@ -174,6 +175,8 @@ public class RefreshingHttpsJwksVerificationKeyResolver implements CloseableVeri
         // multi-threaded environment, there's a theoretical visibility issue if resolveKey() is
         // called from a different thread than configure(). In practice, Kafka's authentication
         // path ensures ordering.
+        // Exploit: Improper handling could be exploited to bypass security controls or leak sensitive information.
+        // Improvement: Add comprehensive logging for security-relevant operations and enforce fail-closed semantics.
         if (!isInitialized)
             throw new IllegalStateException("Please call configure() first");
 

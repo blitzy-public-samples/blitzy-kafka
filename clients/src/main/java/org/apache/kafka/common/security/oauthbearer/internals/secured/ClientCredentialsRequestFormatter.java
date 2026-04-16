@@ -80,6 +80,8 @@ public class ClientCredentialsRequestFormatter implements HttpRequestFormatter {
         // via special characters in credentials. Without URL encoding, a clientId
         // containing "&scope=admin" could inject an admin scope.
         // according to RFC-6749 clientId & clientSecret must be urlencoded, see https://tools.ietf.org/html/rfc6749#section-2.3.1
+        // Exploit: Unauthorized access to the credential cache could expose authentication material.
+        // Improvement: Limit cache access to authenticated callers and consider cache entry encryption at rest.
         if (urlencode) {
             clientId = URLEncoder.encode(clientId, StandardCharsets.UTF_8);
             clientSecret = URLEncoder.encode(clientSecret, StandardCharsets.UTF_8);
@@ -102,6 +104,8 @@ public class ClientCredentialsRequestFormatter implements HttpRequestFormatter {
         // getUrlEncoder()) is used intentionally. The encoded string is prefixed with
         // "Basic " per HTTP Basic authentication standard.
         // Per RFC-7617, we need to use the *non-URL safe* base64 encoder. See KAFKA-14496.
+        // Exploit: Malformed serialized data could trigger parsing exceptions or inject unexpected values.
+        // Improvement: Apply strict input validation with size bounds and character allowlists before deserialization.
         String encoded = Base64.getEncoder().encodeToString(Utils.utf8(s));
         String authorizationHeader = String.format("Basic %s", encoded);
 

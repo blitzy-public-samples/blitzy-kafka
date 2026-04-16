@@ -28,6 +28,7 @@ import org.apache.kafka.common.errors.AuthenticationException;
 // Improvement: Consider adding jitter to the delay to further obscure timing patterns.
 // Used by: KafkaChannel.prepare() wraps AuthenticationException in this type to
 // trigger Selector.maybeDelayCloseOnAuthenticationFailure() instead of immediate close.
+// Exploit: An attacker could exhaust server resources by sending oversized or excessive requests.
 public class DelayedResponseAuthenticationException extends AuthenticationException {
     private static final long serialVersionUID = 1L;
 

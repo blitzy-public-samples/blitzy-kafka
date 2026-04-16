@@ -186,6 +186,8 @@ public class ClientCredentialsJwtRetriever implements JwtRetriever {
     // Authorization: Basic header per RFC-6749 Section 2.3.1. This prevents special
     // characters in credentials from breaking HTTP header parsing on the OAuth provider
     // side and ensures interoperability with strict RFC-compliant providers.
+    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
     static boolean validateUrlencodeHeader(ConfigurationUtils configurationUtils) {
         Boolean urlencodeHeader = configurationUtils.get(SASL_OAUTHBEARER_HEADER_URLENCODE);
         return Objects.requireNonNullElse(urlencodeHeader, DEFAULT_SASL_OAUTHBEARER_HEADER_URLENCODE);
@@ -227,6 +229,7 @@ public class ClientCredentialsJwtRetriever implements JwtRetriever {
         // Exploit: If an attacker gains heap dump access (e.g., via JMX or -XX:+HeapDumpOn*),
         // secrets stored as plain Strings in the JAAS path persist in the heap until GC,
         // whereas the Password type avoids casual exposure via toString()/logging.
+        // Improvement: Validate JAAS configurations at startup and restrict login module classes to an allowlist.
         private String clientSecret() {
             return getValue(
                 SASL_OAUTHBEARER_CLIENT_CREDENTIALS_CLIENT_SECRET,
@@ -263,6 +266,8 @@ public class ClientCredentialsJwtRetriever implements JwtRetriever {
             // the config key names but NOT the values. This is correct — secret values must
             // never be logged. The warning helps operators migrate from less secure JAAS
             // options to config properties (Password-typed, masked in toString).
+            // Exploit: A malformed JAAS configuration could disable authentication or load a malicious login module.
+            // Improvement: Validate JAAS configurations at startup and restrict login module classes to an allowlist.
             if (isPresentInConfig) {
                 if (isPresentInJaas) {
                     // Log if the user is using the deprecated JAAS option.

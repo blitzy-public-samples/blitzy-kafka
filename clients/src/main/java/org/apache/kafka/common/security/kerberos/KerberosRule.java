@@ -24,7 +24,7 @@ import java.util.regex.Pattern;
 /**
  * An encoding of a rule for translating kerberos names.
  */
-// SECURITY (MEDIUM): Implements a single auth_to_local rule for Kerberos principal-to-short-name mapping.
+// SECURITY: (MEDIUM) Implements a single auth_to_local rule for Kerberos principal-to-short-name mapping.
 // User-configured regex patterns (match and fromPattern) are compiled in the constructor.
 // Exploit: A complex auth_to_local regex rule (e.g., with nested quantifiers) supplied via
 // configuration could cause catastrophic backtracking (ReDoS) on crafted principal names,
@@ -70,9 +70,11 @@ class KerberosRule {
         toUpperCase = false;
     }
 
-    // SECURITY (MEDIUM): Constructor compiles user-supplied regex patterns (match, fromPattern).
+    // SECURITY: (MEDIUM) Constructor compiles user-supplied regex patterns (match, fromPattern).
     // These patterns originate from broker configuration (sasl.kerberos.principal.to.local.rules).
     // No validation is performed on pattern complexity before compilation.
+    // Exploit: A misconfigured auth_to_local rule could map an attacker principal to a privileged local identity.
+    // Improvement: Audit auth_to_local rules regularly and use strict realm-based principal validation.
     KerberosRule(String defaultRealm, int numOfComponents, String format, String match, String fromPattern,
                  String toPattern, boolean repeat, boolean toLowerCase, boolean toUpperCase) {
         this.defaultRealm = defaultRealm;
@@ -173,9 +175,11 @@ class KerberosRule {
      * @param repeat whether the substitution should be repeated
      * @return
      */
-    // SECURITY (LOW): Applies regex substitution on the mapped base string.
+    // SECURITY: (LOW) Applies regex substitution on the mapped base string.
     // The 'to' pattern may contain backreferences ($1, $2) that reference captured groups from 'from'.
     // Risk: If 'to' contains unexpected backreferences, substitution could produce unintended mappings.
+    // Exploit: Improper handling could be exploited to bypass security controls or leak sensitive information.
+    // Improvement: Add comprehensive logging for security-relevant operations and enforce fail-closed semantics.
     static String replaceSubstitution(String base, Pattern from, String to,
                                       boolean repeat) {
         Matcher match = from.matcher(base);

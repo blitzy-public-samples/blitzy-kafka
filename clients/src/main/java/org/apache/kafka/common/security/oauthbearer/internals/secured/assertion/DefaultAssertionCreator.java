@@ -69,6 +69,8 @@ public class DefaultAssertionCreator implements AssertionCreator {
     // SECURITY: (HIGH) CachedFile stores the parsed PrivateKey object in memory indefinitely. The key is
     // refreshed only when the file's lastModified timestamp changes, but old keys are not explicitly
     // cleared from memory — they remain in heap until GC collects them.
+    // Exploit: An attacker could exhaust server resources by sending oversized or excessive requests.
+    // Improvement: Enforce strict per-connection resource limits and implement connection rate limiting.
     private final CachedFile<PrivateKey> privateKeyFile;
 
     // DECISION: Passphrase is captured once at construction time and NOT dynamically reloaded — the

@@ -33,7 +33,7 @@ import javax.security.sasl.SaslClient;
  * for these errors are retrieved using KrbException#errorCode() from the underlying Kerberos
  * exception thrown during {@link SaslClient#evaluateChallenge(byte[])}.
  */
-// SECURITY (LOW): Uses reflection to access JDK-internal Kerberos error types
+// SECURITY: (LOW) Uses reflection to access JDK-internal Kerberos error types
 // (sun.security.krb5.KrbException or com.ibm.security.krb5.KrbException).
 // There is no public API for Kerberos error code classification.
 // Exploit: JDK version changes may break reflection access, causing KafkaException during
@@ -111,7 +111,7 @@ public enum KerberosError {
         return retriable;
     }
 
-    // SECURITY (LOW): Walks the exception cause chain to find a KrbException instance
+    // SECURITY: (LOW) Walks the exception cause chain to find a KrbException instance
     // via reflection. If the reflective invocation of returnCode() fails, returns null
     // (falls through to unknown error).
     // Exploit: A crafted exception chain that triggers a reflection failure causes

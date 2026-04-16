@@ -31,6 +31,7 @@ import java.util.Objects;
 // stale credentials could persist in memory longer than necessary.
 // Improvement: Consider explicit zeroing of credential material in the previous authenticator
 // after the new authenticator has extracted the needed state.
+// Exploit: A malicious client could send crafted packets to manipulate state transitions and bypass authentication.
 public class ReauthenticationContext {
     private final NetworkReceive networkReceive;
     private final Authenticator previousAuthenticator;

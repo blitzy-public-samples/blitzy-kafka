@@ -22,8 +22,10 @@ import java.io.IOException;
 // or when a rule produces a non-simple name containing '/' or '@' characters.
 // CROSS-CUTTING: Thrown by KerberosShortNamer.shortName() and KerberosRule.apply().
 // Caught by DefaultKafkaPrincipalBuilder (authenticator/) which wraps it in KafkaException.
-// SECURITY (LOW): A NoMatchingRule exception means the principal cannot be mapped to a local
+// SECURITY: (LOW) A NoMatchingRule exception means the principal cannot be mapped to a local
 // identity. The caller should deny access for unmapped principals rather than using a default identity.
+// Exploit: A misconfigured auth_to_local rule could map an attacker principal to a privileged local identity.
+// Improvement: Audit auth_to_local rules regularly and use strict realm-based principal validation.
 public class NoMatchingRule extends IOException {
     NoMatchingRule(String msg) {
         super(msg);

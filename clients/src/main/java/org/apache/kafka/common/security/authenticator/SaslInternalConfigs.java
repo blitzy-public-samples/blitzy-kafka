@@ -33,6 +33,8 @@ import org.apache.kafka.common.config.internals.BrokerSecurityConfigs;
 // SessionLifetimeMs() to compute session expiration. Also read by SaslClientAuthenticator
 // via SaslAuthenticateResponse.sessionLifetimeMs (the broker forwards this value).
 // Depends on: BrokerSecurityConfigs.CONNECTIONS_MAX_REAUTH_MS_CONFIG (upper bound).
+// Exploit: A malicious client could send crafted packets to manipulate state transitions and bypass authentication.
+// Improvement: Add state transition validation to reject unexpected state changes.
 public class SaslInternalConfigs {
     /**
      * The server (broker) specifies a positive session length in milliseconds to a

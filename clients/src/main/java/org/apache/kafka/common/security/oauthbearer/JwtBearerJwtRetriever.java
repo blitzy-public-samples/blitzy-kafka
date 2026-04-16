@@ -171,6 +171,8 @@ public class JwtBearerJwtRetriever implements JwtRetriever {
             // from a file. If the file is writable by unauthorized users, they could
             // replace the assertion with one granting elevated privileges. Ensure
             // assertion file has restrictive permissions (600).
+            // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+            // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
             File assertionFile = cu.validateFile(SASL_OAUTHBEARER_ASSERTION_FILE);
             assertionCreator = new FileAssertionCreator(assertionFile);
             assertionJwtTemplate = new StaticAssertionJwtTemplate();
@@ -181,6 +183,8 @@ public class JwtBearerJwtRetriever implements JwtRetriever {
             // the actual key material is held in memory as a java.security.PrivateKey
             // object which cannot be reliably zeroed in Java. After configure(), the
             // key persists for the lifetime of the AssertionCreator.
+            // Exploit: An attacker could exhaust server resources by sending oversized or excessive requests.
+            // Improvement: Enforce strict per-connection resource limits and implement connection rate limiting.
             String algorithm = cu.validateString(SASL_OAUTHBEARER_ASSERTION_ALGORITHM);
             File privateKeyFile = cu.validateFile(SASL_OAUTHBEARER_ASSERTION_PRIVATE_KEY_FILE);
             Optional<String> passphrase = cu.containsKey(SASL_OAUTHBEARER_ASSERTION_PRIVATE_KEY_PASSPHRASE) ?
@@ -201,6 +205,8 @@ public class JwtBearerJwtRetriever implements JwtRetriever {
         // assertionCreator.create(). Each assertion gets fresh iat/exp claims
         // (via Time.SYSTEM). If assertion creation fails, JwtRetrieverException is
         // thrown — the exception message should not contain key material.
+        // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+        // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
         Supplier<String> assertionSupplier = () -> {
             try {
                 return assertionCreator.create(assertionJwtTemplate);

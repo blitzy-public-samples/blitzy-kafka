@@ -74,9 +74,11 @@ public final class ScramCredentialUtils {
 
     private ScramCredentialUtils() {}
 
-    // SECURITY: Serializes raw credential bytes as Base64. The output string contains storedKey
+    // SECURITY: (HIGH) Serializes raw credential bytes as Base64. The output string contains storedKey
     // and serverKey which are security-sensitive -- serverKey enables server impersonation.
     // This string should be stored in access-controlled storage (ZooKeeper ACLs or KRaft metadata).
+    // Exploit: Unauthorized access to the credential cache could expose authentication material.
+    // Improvement: Limit cache access to authenticated callers and consider cache entry encryption at rest.
     public static String credentialToString(ScramCredential credential) {
         return String.format("%s=%s,%s=%s,%s=%s,%s=%d",
                SALT,
@@ -89,10 +91,12 @@ public final class ScramCredentialUtils {
                credential.iterations());
     }
 
-    // SECURITY: Deserialization performs size check (exactly 4 properties) and key presence check,
+    // SECURITY: (MEDIUM) Deserialization performs size check (exactly 4 properties) and key presence check,
     // but does NOT validate: (1) byte array lengths (salt, storedKey, serverKey could be empty),
     // (2) iteration count bounds (could be 0, negative, or extremely large), (3) Base64 validity
     // (invalid Base64 throws IllegalArgumentException from Base64.getDecoder().decode()).
+    // Exploit: A caller retaining a reference could modify credential bytes in-place, corrupting shared state.
+    // Improvement: Return defensive copies of sensitive byte arrays via Arrays.copyOf().
     public static ScramCredential credentialFromString(String str) {
         Properties props = toProps(str);
         if (props.size() != 4 || !props.containsKey(SALT) || !props.containsKey(STORED_KEY) ||

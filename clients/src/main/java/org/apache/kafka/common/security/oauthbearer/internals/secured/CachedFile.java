@@ -114,6 +114,8 @@ public class CachedFile<T> {
     // and OAuthBearerUnsecuredJws.toMap() for JSON parsing validation. Does NOT verify signature —
     // this is a structural check only. A malformed file triggers OAuthBearerIllegalTokenException
     // or JwtValidatorException, preventing downstream processing of garbage data.
+    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
     public static final Transformer<String> STRING_JSON_VALIDATING_TRANSFORMER = (file, contents) -> {
         contents = contents.trim();
         SerializedJwt serializedJwt = new SerializedJwt(contents);
@@ -167,6 +169,8 @@ public class CachedFile<T> {
     // with current file metadata and contents. The old snapshot is replaced atomically (single
     // reference assignment, line 140). Concurrent readers may see either the old or new snapshot.
     // This is acceptable because snapshot replacement is monotonic (always moves forward).
+    // Exploit: Improper handling could be exploited to bypass security controls or leak sensitive information.
+    // Improvement: Add comprehensive logging for security-relevant operations and enforce fail-closed semantics.
     private Snapshot<T> snapshot() {
         if (cacheRefreshPolicy.shouldRefresh(file, snapshot)) {
             long size = file.length();

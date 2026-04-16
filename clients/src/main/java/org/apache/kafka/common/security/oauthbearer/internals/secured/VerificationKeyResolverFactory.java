@@ -82,6 +82,8 @@ public class VerificationKeyResolverFactory {
 
     // SECURITY: (LOW) Synchronized on class -- serializes resolver creation/retrieval.
     // Prevents race conditions during concurrent callback handler initialization.
+    // Exploit: Malformed serialized data could trigger parsing exceptions or inject unexpected values.
+    // Improvement: Apply strict input validation with size bounds and character allowlists before deserialization.
     public static synchronized CloseableVerificationKeyResolver get(Map<String, ?> configs,
                                                                     String saslMechanism,
                                                                     List<AppConfigurationEntry> jaasConfigEntries) {

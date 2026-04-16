@@ -174,6 +174,8 @@ public class SslFactory implements Reconfigurable, Closeable {
     // SSL_ENGINE_FACTORY_CLASS_CONFIG. If this config is writable by untrusted
     // users, a malicious class could be loaded that weakens TLS. The default
     // fallback to DefaultSslEngineFactory is safe; custom factories require trust.
+    // Exploit: An attacker could exploit weak cipher suites or certificate validation gaps for MITM attacks.
+    // Improvement: Enforce strong cipher suite selection and certificate pinning where feasible.
     private SslEngineFactory instantiateSslEngineFactory(Map<String, Object> configs) {
         @SuppressWarnings("unchecked")
         Class<? extends SslEngineFactory> sslEngineFactoryClass =
@@ -237,6 +239,9 @@ public class SslFactory implements Reconfigurable, Closeable {
                 // cert with a different identity, which could break
                 // inter-broker authentication or change the broker's identity
                 // in ACL checks.
+                // Exploit: An attacker could exploit weak cipher suites or certificate validation gaps for MITM
+                // attacks.
+                // Improvement: Enforce strong cipher suite selection and certificate pinning where feasible.
                 boolean allowDnChanges = ConfigUtils.getBoolean(nextConfigs, BrokerSecurityConfigs.SSL_ALLOW_DN_CHANGES_CONFIG, BrokerSecurityConfigs.DEFAULT_SSL_ALLOW_DN_CHANGES_VALUE);
                 boolean allowSanChanges = ConfigUtils.getBoolean(nextConfigs, BrokerSecurityConfigs.SSL_ALLOW_SAN_CHANGES_CONFIG, BrokerSecurityConfigs.DEFAULT_SSL_ALLOW_SAN_CHANGES_VALUE);
 
@@ -471,6 +476,8 @@ public class SslFactory implements Reconfigurable, Closeable {
     // break inter-broker communication. The validation creates both
     // client→server and server→client handshake pairs to verify bidirectional
     // compatibility (old-server↔new-client and new-server↔old-client).
+    // Exploit: A malicious client could send crafted packets to manipulate state transitions and bypass authentication.
+    // Improvement: Add state transition validation to reject unexpected state changes.
     /**
      * Validator used to verify dynamic update of keystore used in inter-broker communication.
      * The validator checks that a successful handshake can be performed using the keystore and

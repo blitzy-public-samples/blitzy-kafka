@@ -60,6 +60,8 @@ public class CredentialCache {
     // SECURITY: (LOW) putIfAbsent ensures only one Cache instance per mechanism,
     // preventing mechanism confusion where credentials for SCRAM-SHA-256 are
     // accidentally accessible via the SCRAM-SHA-512 mechanism name.
+    // Exploit: Unauthorized access to the credential cache could expose authentication material.
+    // Improvement: Limit cache access to authenticated callers and consider cache entry encryption at rest.
     public <C> Cache<C> createCache(String mechanism, Class<C> credentialClass) {
         Cache<C> cache = new Cache<>(credentialClass);
         @SuppressWarnings("unchecked")
@@ -70,6 +72,8 @@ public class CredentialCache {
     // SECURITY: (LOW) Runtime type validation prevents type confusion where a
     // Cache<ScramCredential> could be retrieved as Cache<DelegationTokenData>.
     // This ensures mechanism-level credential isolation at the type system level.
+    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
     @SuppressWarnings("unchecked")
     public <C> Cache<C> cache(String mechanism, Class<C> credentialClass) {
         Cache<?> cache = cacheMap.get(mechanism);
@@ -90,6 +94,8 @@ public class CredentialCache {
     // validation. Alternative: Separate classes per credential type. Rationale:
     // Generics enable a single cache implementation for all SASL mechanisms while
     // the credentialClass field enables safe downcasting in cache() method.
+    // Exploit: Unauthorized access to the credential cache could expose authentication material.
+    // Improvement: Limit cache access to authenticated callers and consider cache entry encryption at rest.
     public static class Cache<C> {
         private final Class<C> credentialClass;
         private final ConcurrentHashMap<String, C> credentials;

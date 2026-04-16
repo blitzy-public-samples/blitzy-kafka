@@ -44,6 +44,8 @@ import javax.security.auth.callback.Callback;
 public class PlainAuthenticateCallback implements Callback {
     // SECURITY: (MEDIUM) Raw credential storage -- char[] chosen over String to allow zeroing,
     // but this class does not implement zeroing. Callers must manage credential lifecycle.
+    // Exploit: Unauthorized access to the credential cache could expose authentication material.
+    // Improvement: Limit cache access to authenticated callers and consider cache entry encryption at rest.
     private final char[] password;
     private boolean authenticated;
 

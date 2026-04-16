@@ -135,6 +135,8 @@ public class OAuthBearerRefreshingLogin implements Login {
         // Kafka clients share the same OAuth provider. Token refresh is infrequent (minutes)
         // with substantial remaining lifetime, so serialization overhead is negligible.
         // Risk: A hung refresh (e.g., TCP timeout to OAuth provider) blocks all refreshes.
+        // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+        // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
         Class<OAuthBearerRefreshingLogin> classToSynchronizeOnPriorToRefresh = OAuthBearerRefreshingLogin.class;
         expiringCredentialRefreshingLogin = new ExpiringCredentialRefreshingLogin(contextName, configuration,
                 new ExpiringCredentialRefreshConfig(configs, true), loginCallbackHandler,
@@ -154,6 +156,8 @@ public class OAuthBearerRefreshingLogin implements Login {
             // to the internal refresh scheduling infrastructure. The adapter allows the refresh
             // framework to be reused for non-OAuth credentials (e.g., Kerberos TGTs via
             // ExpiringCredentialRefreshingLogin).
+            // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+            // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
             @Override
             public ExpiringCredential expiringCredential() {
                 Set<OAuthBearerToken> privateCredentialTokens = expiringCredentialRefreshingLogin.subject()

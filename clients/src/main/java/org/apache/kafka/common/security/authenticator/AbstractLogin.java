@@ -91,6 +91,8 @@ public abstract class AbstractLogin implements Login {
     // (username/password/realm callbacks). On successful login, the Subject contains
     // the authenticated principal and mechanism-specific credentials. log.info() does
     // NOT log credentials or principal names -- intentional to prevent leakage.
+    // Exploit: A malicious client could send crafted packets to manipulate state transitions and bypass authentication.
+    // Improvement: Add state transition validation to reject unexpected state changes.
 
     // DECISION: Passes null Subject to LoginContext constructor rather than a
     // pre-constructed Subject. This lets each JAAS login module populate the Subject
@@ -150,6 +152,10 @@ public abstract class AbstractLogin implements Login {
                     // non-interactive server/client environments. Prevents accidental
                     // use of interactive login modules (e.g., Krb5LoginModule without
                     // keytab) in production environments.
+                    // Exploit: A malformed JAAS configuration could disable authentication or load a malicious login
+                    // module.
+                    // Improvement: Validate JAAS configurations at startup and restrict login module classes to an
+                    // allowlist.
                     String errorMessage = "Could not login: the client is being asked for a password, but the Kafka" +
                                  " client code does not currently support obtaining a password from the user.";
                     throw new UnsupportedCallbackException(callback, errorMessage);

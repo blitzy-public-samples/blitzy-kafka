@@ -104,6 +104,7 @@ import javax.security.auth.kerberos.KerberosPrincipal;
 // buildChannel() is called.
 // Impact: Changes to any SASL mechanism's callback handler interface
 // break this builder.
+// Exploit: A malicious client could send crafted packets to manipulate state transitions and bypass authentication.
 public class SaslChannelBuilder implements ChannelBuilder, ListenerReconfigurable {
     static final String GSS_NATIVE_PROP = "sun.security.jgss.native";
 
@@ -213,6 +214,7 @@ public class SaslChannelBuilder implements ChannelBuilder, ListenerReconfigurabl
             // to hijack all connections using that mechanism.
             // Improvement: Consider per-connection LoginManager isolation
             // for high-security deployments at the cost of performance.
+            // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
             for (Map.Entry<String, JaasContext> entry : jaasContexts.entrySet()) {
                 String mechanism = entry.getKey();
                 // With static JAAS configuration, use KerberosLogin if Kerberos is enabled. With dynamic JAAS configuration,
@@ -387,6 +389,7 @@ public class SaslChannelBuilder implements ChannelBuilder, ListenerReconfigurabl
     // Improvement: Validate that the configured class implements
     // AuthenticateCallbackHandler before instantiation, and consider
     // restricting class loading to trusted packages.
+    // Exploit: A malicious client could send crafted packets to manipulate state transitions and bypass authentication.
     private void createClientCallbackHandler(Map<String, ?> configs) {
         @SuppressWarnings("unchecked")
         Class<? extends AuthenticateCallbackHandler> clazz = (Class<? extends AuthenticateCallbackHandler>) configs.get(SaslConfigs.SASL_CLIENT_CALLBACK_HANDLER_CLASS);
@@ -396,7 +399,7 @@ public class SaslChannelBuilder implements ChannelBuilder, ListenerReconfigurabl
         saslCallbackHandlers.put(clientSaslMechanism, callbackHandler);
     }
 
-    // SECURITY: Callback handlers are instantiated via reflection from
+    // SECURITY: (MEDIUM) Callback handlers are instantiated via reflection from
     // class names specified in SASL configuration. For PLAIN mechanism,
     // PlainServerCallbackHandler is used by default on the server side.
     // For SCRAM, ScramServerCallbackHandler retrieves stored credentials
@@ -409,6 +412,7 @@ public class SaslChannelBuilder implements ChannelBuilder, ListenerReconfigurabl
     // standard authentication checks if not properly validated.
     // Improvement: Log a warning when a custom (non-default) callback
     // handler is loaded, and consider a security audit hook.
+    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
     private void createServerCallbackHandlers(Map<String, ?> configs) {
         for (String mechanism : jaasContexts.keySet()) {
             AuthenticateCallbackHandler callbackHandler;
@@ -497,6 +501,7 @@ public class SaslChannelBuilder implements ChannelBuilder, ListenerReconfigurabl
     // "In addition, when performing operations as a particular Subject, for example, Subject.doAs(...)
     // or Subject.doAsPrivileged(...), the to-be-used GSSCredential should be added to Subject's
     // private credential set. Otherwise, the GSS operations will fail since no credential is found."
+    // Exploit: A misconfigured auth_to_local rule could map an attacker principal to a privileged local identity.
     private void maybeAddNativeGssapiCredentials(Subject subject) {
         boolean usingNativeJgss = Boolean.getBoolean(GSS_NATIVE_PROP);
         if (usingNativeJgss && subject.getPrivateCredentials(GSSCredential.class).isEmpty()) {

@@ -60,6 +60,8 @@ public class SaslExtensionsCallback implements Callback {
     // influence downstream behavior (e.g., quota assignment based on extension keys).
     // The Objects.requireNonNull guard prevents null injection but does not validate
     // individual extension keys or values against an allowlist.
+    // Exploit: Malicious extensions or callback values could inject unexpected behavior into the auth flow.
+    // Improvement: Validate all extension keys and values against an allowlist before processing.
     public void extensions(SaslExtensions extensions) {
         this.extensions = Objects.requireNonNull(extensions, "extensions must not be null");
     }

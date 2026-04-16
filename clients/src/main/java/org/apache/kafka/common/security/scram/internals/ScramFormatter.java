@@ -90,6 +90,8 @@ public class ScramFormatter {
     // Each ScramFormatter instance MUST be confined to a single thread.
     // The key parameter is raw byte[] -- if key material leaks via heap dump, the HMAC can be
     // recomputed by an attacker. No key zeroization is performed after use.
+    // Exploit: A caller retaining a reference could modify credential bytes in-place, corrupting shared state.
+    // Improvement: Return defensive copies of sensitive byte arrays via Arrays.copyOf().
     public byte[] hmac(byte[] key, byte[] bytes) throws InvalidKeyException {
         mac.init(new SecretKeySpec(key, mac.getAlgorithm()));
         return mac.doFinal(bytes);
@@ -115,6 +117,9 @@ public class ScramFormatter {
     // The salt is appended with INT(1) = [0,0,0,1] per RFC 2898 Section 5.2.
     // Minimum 4096 iterations per RFC 5802 -- enforced by caller (ScramMechanism.minIterations()),
     // NOT by this method. If iterations < 4096, brute-force resistance is significantly weakened.
+    // Exploit: An attacker could brute-force weak passwords if the iteration count is set below the recommended
+    // minimum.
+    // Improvement: Enforce a minimum iteration count floor and consider periodic increases as hardware improves.
     public byte[] hi(byte[] str, byte[] salt, int iterations) throws InvalidKeyException {
         mac.init(new SecretKeySpec(str, mac.getAlgorithm()));
         mac.update(salt);
@@ -171,10 +176,12 @@ public class ScramFormatter {
         return hmac(storedKey, authMessage);
     }
 
-    // SECURITY: ClientProof = ClientKey XOR ClientSignature. The XOR operation makes the proof
+    // SECURITY: (HIGH) ClientProof = ClientKey XOR ClientSignature. The XOR operation makes the proof
     // one-time-use -- knowing the ClientProof and ClientSignature allows computing ClientKey,
     // but the server only stores StoredKey = H(ClientKey), not ClientKey itself.
     // This is the core security property of SCRAM: the server never learns the ClientKey.
+    // Exploit: Unauthorized access to the credential cache could expose authentication material.
+    // Improvement: Limit cache access to authenticated callers and consider cache entry encryption at rest.
     public byte[] clientProof(byte[] saltedPassword, ClientFirstMessage clientFirstMessage, ServerFirstMessage serverFirstMessage, ClientFinalMessage clientFinalMessage) throws InvalidKeyException {
         byte[] clientKey = clientKey(saltedPassword);
         byte[] storedKey = hash(clientKey);
@@ -188,9 +195,11 @@ public class ScramFormatter {
                 clientFinalMessage.clientFinalMessageWithoutProof()));
     }
 
-    // SECURITY: Reconstructs StoredKey from ClientSignature and ClientProof for server-side
+    // SECURITY: (HIGH) Reconstructs StoredKey from ClientSignature and ClientProof for server-side
     // verification: StoredKey = H(ClientSignature XOR ClientProof) = H(ClientKey).
     // Used by ScramSaslServer.verifyClientProof() for constant-time comparison.
+    // Exploit: An attacker could use response timing differences to incrementally reconstruct the secret.
+    // Improvement: Ensure all cryptographic comparisons use constant-time algorithms like MessageDigest.isEqual().
     public byte[] storedKey(byte[] clientSignature, byte[] clientProof) {
         return hash(xor(clientSignature, clientProof));
     }
@@ -204,10 +213,12 @@ public class ScramFormatter {
         return hmac(serverKey, authMessage);
     }
 
-    // SECURITY: Nonce generation using SecureRandom (line 49). The nonce is represented as a
+    // SECURITY: (MEDIUM) Nonce generation using SecureRandom (line 49). The nonce is represented as a
     // BigInteger with 130 random bits converted to base-36 string (~25 characters).
     // 130 bits of entropy exceeds the 128-bit minimum for cryptographic nonce security.
     // Using SecureRandom (not java.util.Random) ensures cryptographic-quality randomness.
+    // Exploit: Predictable nonce or salt values would allow precomputation attacks against the challenge-response.
+    // Improvement: Verify SecureRandom is seeded from a strong entropy source on the deployment platform.
     public String secureRandomString() {
         return secureRandomString(random);
     }
@@ -216,9 +227,11 @@ public class ScramFormatter {
         return new BigInteger(130, random).toString(Character.MAX_RADIX);
     }
 
-    // SECURITY: Salt generation using SecureRandom. The salt is a random string converted to
+    // SECURITY: (MEDIUM) Salt generation using SecureRandom. The salt is a random string converted to
     // UTF-8 bytes (~25 bytes). Per NIST SP 800-132, salt should be at least 16 bytes (128 bits).
     // The generated salt exceeds this minimum.
+    // Exploit: Predictable nonce or salt values would allow precomputation attacks against the challenge-response.
+    // Improvement: Verify SecureRandom is seeded from a strong entropy source on the deployment platform.
     public byte[] secureRandomBytes() {
         return secureRandomBytes(random);
     }
@@ -231,10 +244,13 @@ public class ScramFormatter {
         return str.getBytes(StandardCharsets.UTF_8);
     }
 
-    // SECURITY: Credential generation from plaintext password. The password is processed through
+    // SECURITY: (HIGH) Credential generation from plaintext password. The password is processed through
     // normalize() then PBKDF2 (hi). The resulting ScramCredential contains only derived values
     // (salt, storedKey, serverKey, iterations) -- the original password is NOT stored.
     // Callers should zero the password char[]/byte[] after calling this method.
+    // Exploit: An attacker could brute-force weak passwords if the iteration count is set below the recommended
+    // minimum.
+    // Improvement: Enforce a minimum iteration count floor and consider periodic increases as hardware improves.
     public ScramCredential generateCredential(String password, int iterations) {
         try {
             byte[] salt = secureRandomBytes();

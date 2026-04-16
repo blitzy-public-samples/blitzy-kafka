@@ -85,11 +85,44 @@ import java.util.concurrent.atomic.AtomicReference;
  *
  * This class is not thread safe!
  */
+// SECURITY: (HIGH) Core NIO event loop handling ALL network I/O for Kafka clients and brokers.
+// This class is the primary attack surface for connection-level denial-of-service (DoS) because it
+// manages channel acceptance, read/write I/O, idle expiry, and authentication failure handling in a
+// single-threaded select loop. A slow or malicious client can monopolize the selector thread by
+// holding connections open without completing authentication, sending partial requests to keep
+// channels alive, or flooding with connection attempts to exhaust file descriptors.
+// Exploit: An attacker opens thousands of TCP connections without completing SASL/SSL handshakes,
+// exhausting the selector's channel map and blocking legitimate clients from connecting. The
+// IdleExpiryManager mitigates this but only after the configured idle timeout elapses.
+// Improvement: Consider per-IP connection rate limiting at the Selector level, and enforce a
+// maximum incomplete-authentication timeout shorter than the general idle timeout to shed
+// unauthenticated connections more aggressively.
+//
+// CROSS-CUTTING: Depends on clients/.../network/KafkaChannel for per-connection state and I/O,
+// clients/.../network/ChannelBuilder (SaslChannelBuilder, SslChannelBuilder, PlaintextChannelBuilder)
+// for constructing authenticated channels, clients/.../memory/MemoryPool for receive buffer allocation,
+// and clients/.../network/NetworkReceive / NetworkSend for framed message transport.
+// Contract: KafkaChannel.ready() must return true only after authentication completes successfully.
+// Impact: Changes to KafkaChannel mute/unmute semantics or ChannelBuilder authentication flow
+// directly affect Selector's poll loop correctness and DoS resilience.
+//
+// DECISION: Single-threaded NIO selector pattern chosen over thread-per-connection model.
+// Alternative: Thread-per-connection (simpler per-connection logic, natural isolation).
+// Rationale: Kafka brokers handle thousands of concurrent connections; a thread-per-connection
+// model would require thousands of OS threads with associated context-switch overhead and memory
+// consumption. The NIO selector achieves O(1) connection management with a single thread, at the
+// cost of requiring all operations to be non-blocking and the class being explicitly not thread-safe.
 public class Selector implements Selectable, AutoCloseable {
 
     public static final long NO_IDLE_TIMEOUT_MS = -1;
     public static final int NO_FAILED_AUTHENTICATION_DELAY = 0;
 
+    // DECISION: Three-tier close mode enum encodes the trade-off between data completeness and
+    // resource reclamation. GRACEFUL allows in-flight receives to be processed (important for
+    // acks=0 producers), NOTIFY_ONLY discards data but notifies upper layers, and
+    // DISCARD_NO_NOTIFY silently drops the connection (used for local-initiated close).
+    // Alternative: A single close() method with boolean flags. Rationale: The enum makes close
+    // semantics explicit at each call site and prevents accidental flag combinations.
     private enum CloseMode {
         GRACEFUL(true),            // process outstanding buffered receives, notify disconnect
         NOTIFY_ONLY(true),         // discard any outstanding receives, notify disconnect
@@ -123,7 +156,19 @@ public class Selector implements Selectable, AutoCloseable {
     private final IdleExpiryManager idleExpiryManager;
     private final LinkedHashMap<String, DelayedAuthenticationFailureClose> delayedClosingChannels;
     private final MemoryPool memoryPool;
+    // DECISION: Low memory threshold set to 10% of total pool size. When available memory drops
+    // below this threshold, selection key processing order is randomized to prevent starvation
+    // of reads from connections that happen to appear last in the iteration order.
+    // Alternative: Fixed byte threshold. Rationale: Proportional threshold adapts to different
+    // pool sizes across broker and client configurations.
     private final long lowMemThreshold;
+    // SECURITY: (MEDIUM) Configurable delay before closing channels after authentication failure.
+    // This delay prevents timing-based probing of valid usernames by ensuring failed auth responses
+    // take consistent time regardless of failure reason.
+    // Exploit: Without this delay, an attacker could measure response times to distinguish
+    // "invalid user" (fast reject) from "wrong password" (slower SCRAM computation), enabling
+    // username enumeration.
+    // Improvement: Consider adding jitter to the delay to further resist statistical timing analysis.
     private final int failedAuthenticationDelayMs;
 
     //indicates if the previous call to poll was able to make progress in reading already-buffered data.
@@ -441,6 +486,15 @@ public class Selector implements Selectable, AutoCloseable {
      * @throws IllegalStateException If a send is given for which we have no existing connection or for which there is
      *         already an in-progress send
      */
+    // COMPLEXITY: Method size ~72 lines — multi-phase I/O polling with memory pressure recovery,
+    // NIO select, three-pass key processing (buffered, ready, immediately-connected), delayed
+    // channel close completion, and idle connection expiry.
+    // Structure: (1) Memory recovery — unmute channels if memory pressure has lifted;
+    // (2) NIO select with adaptive timeout (0 if buffered data or immediate connections exist);
+    // (3) Three pollSelectionKeys passes: buffered-data keys, socket-ready keys, immediately-connected keys;
+    // (4) Post-I/O delayed close completion; (5) Idle connection expiry check.
+    // Key paths: Fast path when no ready keys and no buffered data skips all processing;
+    // memory-pressure path shuffles key order to prevent starvation.
     @Override
     public void poll(long timeout) throws IOException {
         if (timeout < 0)
@@ -510,6 +564,26 @@ public class Selector implements Selectable, AutoCloseable {
      * @param isImmediatelyConnected true if running over a set of keys for just-connected sockets
      * @param currentTimeNanos time at which set of keys was determined
      */
+    // COMPLEXITY: Method size ~121 lines — per-key I/O dispatch handling connection completion,
+    // authentication handshake, read, write, and error recovery for each selected channel.
+    // Structure: For each key: (1) finish TCP connect if connectable; (2) drive authentication
+    // handshake via channel.prepare() if connected but not ready; (3) read if ready and readable
+    // with no completed receive pending; (4) track buffered-read keys; (5) attempt write if
+    // channel has pending send; (6) close defunct keys. Exception handling distinguishes IOException
+    // (normal disconnect), AuthenticationException (auth failure with optional delayed close), and
+    // unexpected errors (logged as warnings).
+    // Key paths: Authentication success records metrics and logs; re-authentication updates
+    // separate sensors; delayed auth failure close defers channel teardown by configured delay.
+    //
+    // SECURITY: (HIGH) This method drives the authentication state machine for every connection.
+    // The channel.prepare() call invokes SASL/SSL handshake processing. A malicious client that
+    // connects but never completes the handshake holds a channel in the not-ready state indefinitely,
+    // consuming selector resources.
+    // Exploit: An attacker opens connections and sends partial SASL handshake data, keeping channels
+    // in the prepare() loop across multiple poll cycles without ever completing authentication,
+    // thereby exhausting the channel map capacity.
+    // Improvement: Enforce a per-channel authentication timeout that closes channels still in
+    // prepare() state after a configurable deadline, independent of the general idle timeout.
     // package-private for testing
     void pollSelectionKeys(Set<SelectionKey> selectionKeys,
                            boolean isImmediatelyConnected,
@@ -662,6 +736,11 @@ public class Selector implements Selectable, AutoCloseable {
         }
     }
 
+    // DECISION: Key processing order is randomized under memory pressure to prevent read starvation.
+    // Alternative: Always process in NIO iteration order (deterministic but unfair under pressure).
+    // Rationale: NIO selection key iteration order may be stable across invocations, causing the
+    // same channels to be processed first. Under low memory, early channels consume available
+    // buffers while later channels are perpetually starved. Shuffling ensures fair access.
     private Collection<SelectionKey> determineHandlingOrder(Set<SelectionKey> selectionKeys) {
         //it is possible that the iteration order over selectionKeys is the same every invocation.
         //this may cause starvation of reads when memory is low. to address this we shuffle the keys if memory is low.
@@ -674,6 +753,15 @@ public class Selector implements Selectable, AutoCloseable {
         }
     }
 
+    // SECURITY: (MEDIUM) Read path enforces maxReceiveSize via NetworkReceive to prevent a
+    // malicious client from sending an oversized request that exhausts broker heap memory.
+    // The channel auto-mutes itself when the MemoryPool cannot allocate a receive buffer,
+    // setting outOfMemory=true to trigger global back-pressure in the next poll cycle.
+    // Exploit: A client sends a request header declaring a very large payload size, forcing
+    // the selector to attempt a large buffer allocation. The maxReceiveSize cap and memory
+    // pool back-pressure mitigate this, but the pool must be correctly sized.
+    // Improvement: Consider per-connection memory accounting to prevent a single connection
+    // from consuming a disproportionate share of the memory pool.
     private void attemptRead(KafkaChannel channel) throws IOException {
         String nodeId = channel.id();
 
@@ -792,6 +880,14 @@ public class Selector implements Selectable, AutoCloseable {
         }
     }
 
+    // SECURITY: (MEDIUM) Idle connection expiry closes the least-recently-used connection when
+    // the idle timeout elapses. This bounds resource consumption from connections that complete
+    // authentication but then go silent (slowloris-style resource exhaustion).
+    // Exploit: An attacker completes authentication on many connections and then holds them idle
+    // just under the timeout, periodically sending keep-alive pings to prevent expiry while
+    // consuming file descriptors and channel map entries.
+    // Improvement: Enforce a hard per-IP connection limit in addition to idle timeout to prevent
+    // a single source from monopolizing connection slots.
     private void maybeCloseOldestConnection(long currentTimeNanos) {
         if (idleExpiryManager == null)
             return;
@@ -839,6 +935,12 @@ public class Selector implements Selectable, AutoCloseable {
      * is less critical and clearing once-per-poll provides the flexibility to process these results in
      * any order before the next poll.
      */
+    // COMPLEXITY: Method size ~39 lines — resets per-poll state lists and processes closing
+    // channels. Structure: (1) Clear completedSends, completedReceives, connected, disconnected;
+    // (2) Iterate closingChannels: attempt final read, close if no pending receives or if send
+    // failed; (3) Convert failedSends to disconnect notifications; (4) Reset progress flag.
+    // Key paths: closingChannels iteration may trigger reads from channels with buffered data
+    // (GRACEFUL close mode), allowing acks=0 producer records to be fully processed before teardown.
     private void clear() {
         this.completedSends.clear();
         this.completedReceives.clear();
@@ -898,6 +1000,13 @@ public class Selector implements Selectable, AutoCloseable {
         }
     }
 
+    // SECURITY: (HIGH) Delays channel close after authentication failure to prevent timing-based
+    // username enumeration. The delay is configured by failedAuthenticationDelayMs and ensures
+    // that failed authentication responses are sent before the channel is torn down.
+    // Exploit: Without this delay, an attacker could use response timing differences to enumerate
+    // valid usernames (fast reject for unknown user vs. slower SCRAM computation for known user).
+    // Improvement: Add random jitter to the delay to defeat statistical timing analysis across
+    // multiple probes.
     private void maybeDelayCloseOnAuthenticationFailure(KafkaChannel channel) {
         DelayedAuthenticationFailureClose delayedClose = new DelayedAuthenticationFailureClose(channel, failedAuthenticationDelayMs);
         if (delayedClosingChannels != null)
@@ -926,6 +1035,16 @@ public class Selector implements Selectable, AutoCloseable {
      * The channel will be added to disconnect list when it is actually closed if `closeMode.notifyDisconnect`
      * is true.
      */
+    // SECURITY: (MEDIUM) Channel close must clean up all state maps (channels, closingChannels,
+    // delayedClosingChannels, idleExpiryManager, immediatelyConnectedKeys) to prevent resource
+    // leaks that could be exploited for DoS. The GRACEFUL mode retains the channel in
+    // closingChannels to process buffered receives, creating a window where the channel consumes
+    // resources after disconnect.
+    // Exploit: A client that disconnects mid-stream with buffered data forces the channel into
+    // closingChannels, where it remains until the next poll drains buffered receives. Many such
+    // connections could accumulate in closingChannels.
+    // Improvement: Bound the number of channels in closingChannels and force-close the oldest
+    // when the limit is exceeded.
     private void close(KafkaChannel channel, CloseMode closeMode) {
         channel.disconnect();
 
@@ -1119,6 +1238,11 @@ public class Selector implements Selectable, AutoCloseable {
         }
     }
 
+    // CROSS-CUTTING: Depends on clients/.../metrics/Metrics for sensor registration,
+    // clients/.../metrics/internals/IntGaugeSuite for connection-by-cipher and connection-by-client
+    // gauges. These metrics are consumed by JMX monitoring, broker health dashboards, and alerting.
+    // Contract: Sensor names must be unique per Selector instance (ensured by tagsSuffix).
+    // Impact: Changes to metric naming or sensor structure affect monitoring integrations.
     class SelectorMetrics implements AutoCloseable {
         private final Metrics metrics;
         private final Map<String, String> metricTags;
@@ -1386,6 +1510,13 @@ public class Selector implements Selectable, AutoCloseable {
     /**
      * Encapsulate a channel that must be closed after a specific delay has elapsed due to authentication failure.
      */
+    // SECURITY: (HIGH) Delayed close mechanism for authentication failures — the channel remains
+    // open for failedAuthenticationDelayMs to send the error response before teardown. This
+    // prevents timing side-channels but creates a resource-consumption window.
+    // Exploit: An attacker rapidly sends invalid credentials to accumulate channels in the
+    // delayedClosingChannels map, each held open for the delay period, consuming file descriptors.
+    // Improvement: Cap the maximum number of simultaneous delayed-close channels and immediately
+    // close the oldest when the cap is exceeded.
     private class DelayedAuthenticationFailureClose {
         private final KafkaChannel channel;
         private final long endTimeNanos;
@@ -1423,6 +1554,11 @@ public class Selector implements Selectable, AutoCloseable {
         }
     }
 
+    // DECISION: LRU-based idle connection tracking using LinkedHashMap with accessOrder=true.
+    // Alternative: Priority queue keyed by last-active timestamp (O(log n) insertion/removal).
+    // Rationale: LinkedHashMap with access-order provides O(1) amortized update on each channel
+    // activity and O(1) polling of the oldest entry. The priority queue alternative would require
+    // O(log n) per update, which adds up with thousands of connections polled per cycle.
     // helper class for tracking least recently used connections to enable idle connection closing
     private static class IdleExpiryManager {
         private final Map<String, Long> lruConnections;

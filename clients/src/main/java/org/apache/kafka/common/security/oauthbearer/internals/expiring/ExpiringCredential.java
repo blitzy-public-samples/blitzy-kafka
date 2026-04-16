@@ -79,9 +79,11 @@ public interface ExpiringCredential {
      * @return the time when the credential expires, in terms of the number of
      *         milliseconds since the epoch
      */
-    // SECURITY: expireTimeMs() is the critical security-relevant method — it determines when
+    // SECURITY: (HIGH) expireTimeMs() is the critical security-relevant method — it determines when
     // the credential is no longer valid. Returning a manipulated value (too far in the future
     // or too far in the past) directly impacts authentication reliability.
+    // Exploit: Unauthorized access to the credential cache could expose authentication material.
+    // Improvement: Limit cache access to authenticated callers and consider cache entry encryption at rest.
     long expireTimeMs();
 
     /**
@@ -94,9 +96,11 @@ public interface ExpiringCredential {
      *         terms of the number of milliseconds since the epoch, if any,
      *         otherwise null
      */
-    // SECURITY: If absoluteLastRefreshTimeMs() returns a time before expireTimeMs(), the refresh
+    // SECURITY: (MEDIUM) If absoluteLastRefreshTimeMs() returns a time before expireTimeMs(), the refresh
     // thread will exit (ExpiringCredentialRefreshingLogin line 309-316), leaving the credential
     // to expire without further refresh attempts. A malicious implementation could use this to
     // force credential expiry by returning a past timestamp.
+    // Exploit: Unauthorized access to the credential cache could expose authentication material.
+    // Improvement: Limit cache access to authenticated callers and consider cache entry encryption at rest.
     Long absoluteLastRefreshTimeMs();
 }

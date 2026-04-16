@@ -66,6 +66,8 @@ public class FileAssertionCreator implements AssertionCreator {
     // Alternative: Merge template claims with file content. Rationale: A pre-signed assertion is
     // immutable -- modifying claims would invalidate the signature. The file is expected to contain
     // a complete, ready-to-use signed JWT assertion.
+    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
     @Override
     public String create(AssertionJwtTemplate ignored) throws GeneralSecurityException, IOException {
         return assertionFile.transformed();

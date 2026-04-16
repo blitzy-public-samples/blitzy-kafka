@@ -37,10 +37,13 @@ public final class JaasUtils {
     // If this file is writable by unauthorized users, any login module can
     // be injected. Improvement: Document that this file should have restrictive
     // file permissions (e.g., 600) in production deployments.
+    // Exploit: A malformed JAAS configuration could disable authentication or load a malicious login module.
     public static final String JAVA_LOGIN_CONFIG_PARAM = "java.security.auth.login.config";
     // SECURITY: (HIGH) Deprecated denylist approach -- dangerous because it
     // only blocks known-bad modules, allowing unknown/new dangerous modules
     // through. The allowlist (ALLOWED_LOGIN_MODULES_CONFIG) is preferred.
+    // Exploit: Accepting unapproved values could expand the attack surface beyond intended boundaries.
+    // Improvement: Maintain strict allowlists and log rejected values for security monitoring.
     @Deprecated(since = "4.2")
     public static final String DISALLOWED_LOGIN_MODULES_CONFIG = "org.apache.kafka.disallowed.login.modules";
     // SECURITY: (HIGH) Allowlist system property for login modules.
@@ -48,12 +51,15 @@ public final class JaasUtils {
     // against arbitrary class loading via JAAS config injection.
     // Improvement: Consider making the allowlist a broker config
     // (not just system property) for easier management.
+    // Exploit: A malformed JAAS configuration could disable authentication or load a malicious login module.
     public static final String ALLOWED_LOGIN_MODULES_CONFIG = "org.apache.kafka.allowed.login.modules";
     // SECURITY: (HIGH) Default denylist blocks JndiLoginModule and
     // LdapLoginModule which are known JNDI injection vectors (CVE-2023-25194).
     // These modules allow LDAP/RMI URL injection leading to remote code
     // execution. The denylist is not exhaustive -- other dangerous modules
     // may exist on the classpath. Prefer allowlist approach.
+    // Exploit: A malformed JAAS configuration could disable authentication or load a malicious login module.
+    // Improvement: Validate JAAS configurations at startup and restrict login module classes to an allowlist.
     @Deprecated(since = "4.2")
     public static final String DISALLOWED_LOGIN_MODULES_DEFAULT =
             "com.sun.security.auth.module.JndiLoginModule,com.sun.security.auth.module.LdapLoginModule";

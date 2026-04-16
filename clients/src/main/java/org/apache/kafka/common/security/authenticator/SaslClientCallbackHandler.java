@@ -84,6 +84,8 @@ public class SaslClientCallbackHandler implements AuthenticateCallbackHandler {
         // Subject.getSubject(AccessController.getContext()). If no Subject is available
         // (subject == null), NameCallback falls back to getDefaultName() and PasswordCallback
         // throws UnsupportedCallbackException -- preventing silent anonymous authentication.
+        // Exploit: Malicious extensions or callback values could inject unexpected behavior into the auth flow.
+        // Improvement: Validate all extension keys and values against an allowlist before processing.
         Subject subject = SecurityManagerCompatibility.get().current();
         for (Callback callback : callbacks) {
             if (callback instanceof NameCallback) {
@@ -138,6 +140,9 @@ public class SaslClientCallbackHandler implements AuthenticateCallbackHandler {
                 // during SASL exchange. GSSAPI is explicitly excluded from SaslExtensions
                 // because GSSAPI uses a binary token format that doesn't support extension
                 // key-value pairs.
+                // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+                // Improvement: Implement token binding or short-lived tokens with strict audience and issuer
+                // validation.
                 if (ScramMechanism.isScram(mechanism) && subject != null && !subject.getPublicCredentials(Map.class).isEmpty()) {
                     @SuppressWarnings("unchecked")
                     Map<String, String> extensions = (Map<String, String>) subject.getPublicCredentials(Map.class).iterator().next();

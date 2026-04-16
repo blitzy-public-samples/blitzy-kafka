@@ -87,6 +87,8 @@ public class ClaimValidationUtils {
     // duplicates after trimming. Returns unmodifiable Set -- downstream code cannot add scopes.
     // Note: Does not validate scope VALUE format -- any non-empty, non-whitespace string is
     // accepted.
+    // Exploit: Malformed serialized data could trigger parsing exceptions or inject unexpected values.
+    // Improvement: Apply strict input validation with size bounds and character allowlists before deserialization.
     public static Set<String> validateScopes(String scopeClaimName, Collection<String> scopes) throws JwtValidatorException {
         if (scopes == null)
             throw new JwtValidatorException(String.format("%s value must be non-null", scopeClaimName));
@@ -125,6 +127,8 @@ public class ClaimValidationUtils {
     // SECURITY: (LOW) Expiration validation: non-null, non-negative. The actual expiry check
     // (comparing against current time) is performed by the JWT validator, not here. This only
     // validates the structural integrity of the expiration claim value.
+    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
     public static long validateExpiration(String claimName, Long claimValue) throws JwtValidatorException {
         if (claimValue == null)
             throw new JwtValidatorException(String.format("%s value must be non-null", claimName));

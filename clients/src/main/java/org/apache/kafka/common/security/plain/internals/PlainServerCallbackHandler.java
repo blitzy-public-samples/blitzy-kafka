@@ -91,6 +91,8 @@ public class PlainServerCallbackHandler implements AuthenticateCallbackHandler {
     // differences to deduce password characters one by one.
     // Note: This is correctly implemented -- the constant-time comparison does NOT short-circuit
     // on the first mismatched character.
+    // Exploit: An attacker could use response timing differences to incrementally reconstruct the secret.
+    // Improvement: Ensure all cryptographic comparisons use constant-time algorithms like MessageDigest.isEqual().
     protected boolean authenticate(String username, char[] password) throws IOException {
         if (username == null)
             return false;

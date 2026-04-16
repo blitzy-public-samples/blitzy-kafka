@@ -225,6 +225,8 @@ public class PlainSaslServer implements SaslServer {
     // SECURITY: (LOW) Factory respects Sasl.POLICY_NOPLAINTEXT property to suppress PLAIN in
     // policy-restricted environments. getMechanismNames() returns empty array when NOPLAINTEXT
     // is set, preventing PLAIN from being offered during SASL mechanism negotiation.
+    // Exploit: An attacker on the network can intercept all data including credentials in transit.
+    // Improvement: Use TLS-encrypted transports (SSL or SASL_SSL) in production environments.
     public static class PlainSaslServerFactory implements SaslServerFactory {
 
         @Override

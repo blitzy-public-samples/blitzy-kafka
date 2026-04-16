@@ -98,6 +98,7 @@ import javax.security.auth.login.AppConfigurationEntry;
 // Contract: configure() -> handle() lifecycle. Single-threaded per SASL exchange.
 // Impact: Replacing this handler with a secured implementation (e.g.,
 // OAuthBearerValidatorCallbackHandler using JWKS) is the REQUIRED step for production.
+// Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
 public class OAuthBearerUnsecuredValidatorCallbackHandler implements AuthenticateCallbackHandler {
     private static final Logger log = LoggerFactory.getLogger(OAuthBearerUnsecuredValidatorCallbackHandler.class);
     private static final String OPTION_PREFIX = "unsecuredValidator";
@@ -143,6 +144,8 @@ public class OAuthBearerUnsecuredValidatorCallbackHandler implements Authenticat
         // SECURITY: (MEDIUM) Configuration captured from JAAS options without sanitization.
         // moduleOptions may contain attacker-controlled values if the JAAS config file is
         // writable. No validation is performed on option values until handle() is called.
+        // Exploit: A malformed JAAS configuration could disable authentication or load a malicious login module.
+        // Improvement: Validate JAAS configurations at startup and restrict login module classes to an allowlist.
     }
 
     @Override

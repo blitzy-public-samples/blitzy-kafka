@@ -137,6 +137,8 @@ public class BrokerJwtValidator implements JwtValidator {
     // Algorithm constraint DISALLOW_NONE prevents "alg":"none" attacks (CVE-2015-9235).
     // Required exp/iat claims prevent unbounded token lifetime. expectedAudience/Issuer
     // restrict token acceptance scope. Clock skew tolerance affects replay window.
+    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
     @Override
     public void configure(Map<String, ?> configs, String saslMechanism, List<AppConfigurationEntry> jaasConfigEntries) {
         ConfigurationUtils cu = new ConfigurationUtils(configs, saslMechanism);
@@ -171,6 +173,8 @@ public class BrokerJwtValidator implements JwtValidator {
             // without this, an attacker could strip the signature from a JWT, set alg=none,
             // and the token would pass verification as an "unsigned" JWT. This is a well-known
             // JWT bypass attack vector. See: RFC 7518 Section 3.6 and CVE-2015-9235.
+            // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+            // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
             .setJwsAlgorithmConstraints(DISALLOW_NONE)
             .setRequireExpirationTime()
             .setRequireIssuedAt()
@@ -178,6 +182,8 @@ public class BrokerJwtValidator implements JwtValidator {
             // verificationKeyResolver is obtained from VerificationKeyResolverFactory which
             // manages JWKS endpoint connectivity, caching, and refresh. Key rotation windows
             // create a brief period where tokens signed with the new key may be rejected.
+            // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+            // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
             .setVerificationKeyResolver(verificationKeyResolver)
             .build();
         this.scopeClaimName = scopeClaimName;
@@ -208,6 +214,8 @@ public class BrokerJwtValidator implements JwtValidator {
     // (6) Construct BasicOAuthBearerToken. Error path: InvalidJwtException wraps to
     // JwtValidatorException, MalformedClaimException wraps via getClaim().
     // Key branch: scopeRaw type dispatch -- String vs Collection vs default.
+    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
     @SuppressWarnings("unchecked")
     public OAuthBearerToken validate(String accessToken) throws JwtValidatorException {
         SerializedJwt serializedJwt = new SerializedJwt(accessToken);
@@ -228,6 +236,8 @@ public class BrokerJwtValidator implements JwtValidator {
         // SECURITY: (MEDIUM) Scope claim can be String or Collection -- OAuth providers differ.
         // Unexpected types (e.g., nested objects) fall through to emptySet, which restricts
         // access rather than granting it (fail-closed). This is correct security behavior.
+        // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+        // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
         if (scopeRaw instanceof String)
             scopeRawCollection = Collections.singletonList((String) scopeRaw);
         else if (scopeRaw instanceof Collection)

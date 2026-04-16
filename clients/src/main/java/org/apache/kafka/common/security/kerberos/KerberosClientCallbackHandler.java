@@ -33,7 +33,7 @@ import javax.security.sasl.RealmCallback;
 /**
  * Callback handler for SASL/GSSAPI clients.
  */
-// SECURITY (MEDIUM): Handles SASL/GSSAPI client-side callbacks during Kerberos authentication.
+// SECURITY: (MEDIUM) Handles SASL/GSSAPI client-side callbacks during Kerberos authentication.
 // Stateless and thread-safe. Rejects PasswordCallback to enforce ticket-based auth only.
 // Exploit: If this handler were to accept PasswordCallback, credentials could be intercepted in
 // plaintext during GSSAPI negotiation. The current rejection is a security safeguard.
@@ -70,9 +70,12 @@ public class KerberosClientCallbackHandler implements AuthenticateCallbackHandle
             } else if (callback instanceof RealmCallback) {
                 RealmCallback rc = (RealmCallback) callback;
                 rc.setText(rc.getDefaultText());
-            // SECURITY (MEDIUM): AuthorizeCallback compares authenticationID with authorizationID.
+            // SECURITY: (MEDIUM) AuthorizeCallback compares authenticationID with authorizationID.
             // Only authorizes if they are equal. This prevents impersonation where a
             // client authenticates as one principal but requests authorization as another.
+            // Exploit: A malicious client could send crafted packets to manipulate state transitions and bypass
+            // authentication.
+            // Improvement: Add state transition validation to reject unexpected state changes.
             } else if (callback instanceof AuthorizeCallback) {
                 AuthorizeCallback ac = (AuthorizeCallback) callback;
                 String authId = ac.getAuthenticationID();

@@ -82,6 +82,8 @@ public class OAuthBearerClientInitialResponse {
     // VALUE: [\x21-\x7E \t\r\n]+ -- printable ASCII plus whitespace. Note: \r\n
     // are included per the RFC but could enable header injection in downstream HTTP
     // components if extensions are forwarded without sanitization.
+    // Exploit: Malicious extensions or callback values could inject unexpected behavior into the auth flow.
+    // Improvement: Validate all extension keys and values against an allowlist before processing.
     public static final Pattern EXTENSION_KEY_PATTERN = Pattern.compile(KEY);
     public static final Pattern EXTENSION_VALUE_PATTERN = Pattern.compile(VALUE);
 
@@ -96,6 +98,8 @@ public class OAuthBearerClientInitialResponse {
     // full specification. Alternative: Single builder pattern. Rationale: Three constructors
     // cover the two primary use cases cleanly (server parsing, client construction) without
     // the overhead of a builder for this simple data carrier.
+    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
     public OAuthBearerClientInitialResponse(byte[] response) throws SaslException {
         String responseMsg = new String(response, StandardCharsets.UTF_8);
         Matcher matcher = CLIENT_INITIAL_RESPONSE_PATTERN.matcher(responseMsg);
@@ -173,6 +177,8 @@ public class OAuthBearerClientInitialResponse {
     // SECURITY: (LOW) Constructs the wire-format message. The token value is embedded
     // directly -- no encoding or escaping is applied beyond what was validated at
     // construction time. The SEPARATOR (U+0001) is used as a field delimiter.
+    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
     public byte[] toBytes() {
         String authzid = authorizationId.isEmpty() ? "" : "a=" + authorizationId;
         String extensions = extensionsMessage();
@@ -220,6 +226,8 @@ public class OAuthBearerClientInitialResponse {
     // key "auth". This prevents a client from injecting a second "auth" key to override
     // the legitimate token. The iteration over all entries ensures no key or value escapes
     // validation. Extension validation is called from both constructors.
+    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
     public static void validateExtensions(SaslExtensions extensions) throws SaslException {
         if (extensions == null)
             return;

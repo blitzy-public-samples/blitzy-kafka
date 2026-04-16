@@ -170,6 +170,7 @@ public class SaslClientAuthenticator implements Authenticator {
     // Without this, a LIST_OFFSET response could be parsed as SASL_HANDSHAKE
     // response (schemas are accidentally compatible), causing incorrect auth
     // state transitions. Improvement: widen the reserved range for safety.
+    // Exploit: A malicious client could send crafted packets to manipulate state transitions and bypass authentication.
     public static final int MAX_RESERVED_CORRELATION_ID = Integer.MAX_VALUE;
 
     /**
@@ -244,6 +245,9 @@ public class SaslClientAuthenticator implements Authenticator {
         // is only extracted for GSSAPI — for other mechanisms, the principal
         // comes from the SASL exchange (not the Subject), preventing spoofing
         // where the Subject principal differs from the authenticated identity.
+        // Exploit: A malicious client could send crafted packets to manipulate state transitions and bypass
+        // authentication.
+        // Improvement: Add state transition validation to reject unexpected state changes.
 
         try {
             setSaslState(SaslState.SEND_APIVERSIONS_REQUEST);
@@ -615,6 +619,7 @@ public class SaslClientAuthenticator implements Authenticator {
     // Subject, (3) On CompletionException: analyze KerberosError code,
     // classify as retriable (SaslException) or permanent
     // (SaslAuthenticationException).
+    // Improvement: Enforce a minimum iteration count floor and consider periodic increases as hardware improves.
     private byte[] createSaslToken(final byte[] saslToken, boolean isInitial) throws SaslException {
         if (saslToken == null)
             throw new IllegalSaslStateException("Error authenticating with the Kafka Broker: received a `null` saslToken.");
@@ -661,6 +666,8 @@ public class SaslClientAuthenticator implements Authenticator {
     // buffered in pendingAuthenticatedReceives for replay after re-auth
     // completes. A malicious broker could inject extra responses during
     // re-auth to confuse the client's request/response matching.
+    // Exploit: A malicious client could send crafted packets to manipulate state transitions and bypass authentication.
+    // Improvement: Add state transition validation to reject unexpected state changes.
     private AbstractResponse receiveKafkaResponse() throws IOException {
         if (netInBuffer == null)
             netInBuffer = new NetworkReceive(node);
@@ -701,6 +708,8 @@ public class SaslClientAuthenticator implements Authenticator {
     // The UnsupportedSaslMechanismException reveals the server's enabled
     // mechanisms list — this is information disclosure but necessary for client
     // configuration troubleshooting. Consider logging instead of in exception.
+    // Exploit: A malicious client could send crafted packets to manipulate state transitions and bypass authentication.
+    // Improvement: Add state transition validation to reject unexpected state changes.
     private void handleSaslHandshakeResponse(SaslHandshakeResponse response) {
         Errors error = response.error();
         if (error != Errors.NONE)

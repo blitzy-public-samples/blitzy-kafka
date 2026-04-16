@@ -19,7 +19,7 @@ package org.apache.kafka.common.security.token.delegation.internals;
 import org.apache.kafka.common.security.scram.ScramCredentialCallback;
 
 public class DelegationTokenCredentialCallback extends ScramCredentialCallback {
-    // SECURITY (LOW): Callback carrier extending ScramCredentialCallback to pass delegation
+    // SECURITY: (LOW) Callback carrier extending ScramCredentialCallback to pass delegation
     // token metadata (owner, expiry) through the SASL/SCRAM callback mechanism during
     // token-based authentication. The ScramServerCallbackHandler populates this callback
     // with token owner and expiry from DelegationTokenCache, enabling the SCRAM server
@@ -28,6 +28,8 @@ public class DelegationTokenCredentialCallback extends ScramCredentialCallback {
     // CROSS-CUTTING: Used by ScramServerCallbackHandler (authenticator package) when
     // authenticating via delegation tokens. Extends ScramCredentialCallback (scram package)
     // to carry additional token-specific metadata alongside SCRAM credentials.
+    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
     private String tokenOwner;
     private Long tokenExpiryTimestamp;
 
@@ -39,9 +41,11 @@ public class DelegationTokenCredentialCallback extends ScramCredentialCallback {
         return tokenOwner;
     }
 
-    // SECURITY (LOW): Token expiry timestamp passed through SASL callback chain.
+    // SECURITY: (LOW) Token expiry timestamp passed through SASL callback chain.
     // The SCRAM server uses this to reject authentication for expired tokens.
     // If this value is not set correctly, expired tokens may pass SCRAM authentication.
+    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
     public void tokenExpiryTimestamp(Long tokenExpiryTimestamp) {
         this.tokenExpiryTimestamp = tokenExpiryTimestamp;
     }

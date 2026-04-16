@@ -74,6 +74,7 @@ public class NetworkReceive implements Receive {
     // socket.request.max.bytes (default 100 MB) on the broker.
     // Improvement: Consider logging the source address when rejecting oversized
     // receives for security audit trail; currently only the size is logged.
+    // Exploit: An attacker could exhaust server resources by sending oversized or excessive requests.
     private final int maxSize;
     // CROSS-CUTTING: MemoryPool is provided by the common/memory/ package and
     // shared across all channels within a single Selector. Broker-side pooling

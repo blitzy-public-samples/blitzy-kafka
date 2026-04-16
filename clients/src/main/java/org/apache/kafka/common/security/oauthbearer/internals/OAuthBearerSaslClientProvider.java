@@ -53,6 +53,8 @@ public final class OAuthBearerSaslClientProvider extends Provider {
     // SECURITY: (LOW) No idempotency check — calling initialize() multiple times adds duplicate
     // providers. While harmless (SASL framework uses the first match), it wastes memory and
     // could confuse provider enumeration tools.
+    // Exploit: An attacker could exhaust server resources by sending oversized or excessive requests.
+    // Improvement: Enforce strict per-connection resource limits and implement connection rate limiting.
     public static void initialize() {
         Security.addProvider(new OAuthBearerSaslClientProvider());
     }

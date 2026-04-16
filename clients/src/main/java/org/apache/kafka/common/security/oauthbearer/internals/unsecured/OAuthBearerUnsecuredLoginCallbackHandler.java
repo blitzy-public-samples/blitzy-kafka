@@ -116,6 +116,7 @@ import javax.security.sasl.SaslException;
 // Impact: Tokens created here are consumed by OAuthBearerSaslClient for client-first
 // message construction, then validated by OAuthBearerUnsecuredValidatorCallbackHandler
 // (or a production validator) on the broker side.
+// Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
 public class OAuthBearerUnsecuredLoginCallbackHandler implements AuthenticateCallbackHandler {
     private static final Logger log = LoggerFactory.getLogger(OAuthBearerUnsecuredLoginCallbackHandler.class);
     private static final String OPTION_PREFIX = "unsecuredLogin";
@@ -279,6 +280,8 @@ public class OAuthBearerUnsecuredLoginCallbackHandler implements AuthenticateCal
             // claims from JAAS options. No cryptographic signing occurs. The
             // resulting token is a valid JWT compact serialization that any JWT
             // parser can decode — an attacker can trivially read all claims.
+            // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+            // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
             OAuthBearerUnsecuredJws jws = new OAuthBearerUnsecuredJws(
                     String.format("%s.%s.",
                             urlEncoderNoPadding.encodeToString(headerJson.getBytes(StandardCharsets.UTF_8)),

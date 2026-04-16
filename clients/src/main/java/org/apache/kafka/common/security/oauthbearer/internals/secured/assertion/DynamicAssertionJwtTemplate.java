@@ -89,6 +89,8 @@ public class DynamicAssertionJwtTemplate implements AssertionJwtTemplate {
         // SECURITY: (MEDIUM) Time-based claims (iat, exp, nbf) use seconds precision. Clock skew between
         // the Kafka client and the OAuth provider can cause premature expiry or delayed activation.
         // The nbf (not before) is set to currentTime - nbfSeconds to account for clock skew backward.
+        // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+        // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
         long currentTimeSecs = time.milliseconds() / 1000L;
 
         Map<String, Object> values = new HashMap<>();

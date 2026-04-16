@@ -87,8 +87,9 @@ import javax.net.ssl.SSLSession;
 // Impact: If SslFactory changes the SSLEngine configuration (e.g., enables
 // client auth), the handshake sequence in doHandshake() may require
 // additional NEED_UNWRAP iterations.
+// Exploit: A malicious client could send crafted packets to manipulate state transitions and bypass authentication.
 public class SslTransportLayer implements TransportLayer {
-    // SECURITY: The handshake state machine controls the authentication
+    // SECURITY: (HIGH) The handshake state machine controls the authentication
     // lifecycle. Each state transition is a security-critical operation:
     // NOT_INITIALIZED -> HANDSHAKE: SSLEngine.beginHandshake() initiates
     //   cryptographic negotiation
@@ -103,6 +104,8 @@ public class SslTransportLayer implements TransportLayer {
     // Any state -> CLOSING: Orderly shutdown with close_notify
     // Risk: If state transitions are not strictly enforced, data could be
     // sent/received during an incomplete handshake, bypassing encryption.
+    // Exploit: A malicious client could send crafted packets to manipulate state transitions and bypass authentication.
+    // Improvement: Add state transition validation to reject unexpected state changes.
     private enum State {
         // Initial state
         NOT_INITIALIZED,
@@ -232,6 +235,8 @@ public class SslTransportLayer implements TransportLayer {
     // Note: sslEngine.closeInbound() exception is logged at DEBUG level
     // because peers commonly fail to send close_notify, violating the TLS
     // spec but not indicating an attack.
+    // Exploit: An attacker could exploit weak cipher suites or certificate validation gaps for MITM attacks.
+    // Improvement: Enforce strong cipher suite selection and certificate pinning where feasible.
     @Override
     public void close() throws IOException {
         State prevState = state;
@@ -345,6 +350,7 @@ public class SslTransportLayer implements TransportLayer {
     // Improvement: Consider also checking SSLSession.getProtocol() to
     // conditionally apply renegotiation protection only for TLS versions
     // that support it.
+    // Exploit: A malicious client could send crafted packets to manipulate state transitions and bypass authentication.
     @Override
     public void handshake() throws IOException {
         if (state == State.NOT_INITIALIZED) {
@@ -694,7 +700,7 @@ public class SslTransportLayer implements TransportLayer {
                 SSLEngineResult unwrapResult;
                 try {
                     unwrapResult = sslEngine.unwrap(netReadBuffer, appReadBuffer);
-                    // SECURITY: TLS 1.3 specific -- after handshake
+                    // SECURITY: (MEDIUM) TLS 1.3 specific -- after handshake
                     // completes, the server may send post-handshake
                     // messages (NewSessionTicket, KeyUpdate). These are
                     // processed during read(). Once actual application
@@ -703,6 +709,9 @@ public class SslTransportLayer implements TransportLayer {
                     // occurs during post-handshake processing, it is
                     // treated as an authentication failure because the
                     // handshake is not truly complete yet.
+                    // Exploit: A malicious client could send crafted packets to manipulate state transitions and bypass
+                    // authentication.
+                    // Improvement: Add state transition validation to reject unexpected state changes.
                     if (state == State.POST_HANDSHAKE && appReadBuffer.position() != 0) {
                         // For TLSv1.3, we have finished processing post-handshake messages since we are now processing data
                         state = State.READY;
@@ -716,13 +725,14 @@ public class SslTransportLayer implements TransportLayer {
                         throw e;
                 }
                 netReadBuffer.compact();
-                // SECURITY: (HIGH) Explicit renegotiation rejection during
-                // data read for TLS < 1.3. For TLS 1.3, NEED_WRAP/
-                // NEED_UNWRAP during data transfer indicates a key update,
-                // which is a legitimate protocol operation (RFC 8446
-                // Section 4.6.3). For older TLS versions, any handshake
-                // status during data transfer indicates renegotiation,
-                // which is rejected to prevent CVE-2009-3555 style attacks.
+                // SECURITY: (HIGH) Explicit renegotiation rejection during data read for TLS < 1.3.
+                // For TLS 1.3, NEED_WRAP/NEED_UNWRAP indicates a legitimate key update (RFC 8446
+                // Section 4.6.3). For older TLS versions, any handshake status during data transfer
+                // indicates renegotiation, rejected to prevent CVE-2009-3555 style attacks.
+                // Exploit: A MITM could inject a renegotiation handshake into an active TLS < 1.3
+                // session and prepend attacker-controlled plaintext before the authentic data stream.
+                // Improvement: Log rejected renegotiation attempts as security audit events.
+                // reject renegotiation if TLS < 1.3, key updates for TLS 1.3 are allowed
                 if (unwrapResult.getHandshakeStatus() != HandshakeStatus.NOT_HANDSHAKING &&
                         unwrapResult.getHandshakeStatus() != HandshakeStatus.FINISHED &&
                         unwrapResult.getStatus() == Status.OK &&
@@ -852,10 +862,12 @@ public class SslTransportLayer implements TransportLayer {
             SSLEngineResult wrapResult = sslEngine.wrap(src, netWriteBuffer);
             netWriteBuffer.flip();
 
-            // SECURITY: (HIGH) Mirror of the renegotiation rejection in
-            // read(). Both read and write paths must reject renegotiation
-            // independently because a MITM could trigger renegotiation
-            // from either direction.
+            // SECURITY: (HIGH) Mirror of the renegotiation rejection in read(). Both read and
+            // write paths must reject renegotiation independently because a MITM could trigger
+            // renegotiation from either direction (CVE-2009-3555).
+            // Exploit: Attacker triggers renegotiation via write path to inject data.
+            // Improvement: Correlate read/write renegotiation rejections for anomaly detection.
+            // reject renegotiation if TLS < 1.3, key updates for TLS 1.3 are allowed
             if (wrapResult.getHandshakeStatus() != HandshakeStatus.NOT_HANDSHAKING &&
                     wrapResult.getStatus() == Status.OK &&
                     !sslEngine.getSession().getProtocol().equals(TLS13)) {
@@ -1023,12 +1035,14 @@ public class SslTransportLayer implements TransportLayer {
      * retries and report the failure. If `flush` is true, exceptions are propagated after
      * any pending outgoing bytes are flushed to ensure that the peer is notified of the failure.
      */
-    // SECURITY: SSL handshake failures are propagated as
+    // SECURITY: (MEDIUM) SSL handshake failures are propagated as
     // SslAuthenticationException to prevent retries -- the client should
     // not retry with the same (likely misconfigured) credentials. The
     // flush parameter controls whether remaining outgoing bytes are sent
     // before throwing -- this ensures the peer receives the TLS alert
     // message explaining the failure.
+    // Exploit: A malicious client could send crafted packets to manipulate state transitions and bypass authentication.
+    // Improvement: Add state transition validation to reject unexpected state changes.
     private void handshakeFailure(SSLException sslException, boolean flush) {
         //Release all resources such as internal buffers that SSLEngine is managing
         log.debug("SSL Handshake failed", sslException);
@@ -1076,6 +1090,7 @@ public class SslTransportLayer implements TransportLayer {
     // update could change messages.
     // Improvement: Track known SSLException message patterns and alert on
     // unrecognized patterns to detect JDK behavioral changes early.
+    // Exploit: A malicious client could send crafted packets to manipulate state transitions and bypass authentication.
     private void maybeProcessHandshakeFailure(SSLException sslException, boolean flush, IOException ioException) throws IOException {
         if (sslException instanceof SSLHandshakeException || sslException instanceof SSLProtocolException ||
                 sslException instanceof SSLPeerUnverifiedException || sslException instanceof SSLKeyException ||

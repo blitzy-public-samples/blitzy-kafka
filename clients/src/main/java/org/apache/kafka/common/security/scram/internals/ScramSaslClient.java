@@ -154,15 +154,23 @@ public class ScramSaslClient implements SaslClient {
 
                 case RECEIVE_SERVER_FIRST_MESSAGE:
                     this.serverFirstMessage = new ServerFirstMessage(challenge);
-                    // SECURITY: Verifies server nonce starts with client nonce per RFC 5802
+                    // SECURITY: (HIGH) Verifies server nonce starts with client nonce per RFC 5802
                     // Section 5. Prevents server nonce substitution attacks where a MITM
                     // replaces the server's nonce.
+                    // Exploit: Predictable nonce or salt values would allow precomputation attacks against the
+                    // challenge-response.
+                    // Improvement: Verify SecureRandom is seeded from a strong entropy source on the deployment
+                    // platform.
                     if (!serverFirstMessage.nonce().startsWith(clientNonce))
                         throw new SaslException("Invalid server nonce: does not start with client nonce");
-                    // SECURITY: Enforces minimum iteration count from the mechanism
+                    // SECURITY: (HIGH) Enforces minimum iteration count from the mechanism
                     // definition (4096 for both SHA-256 and SHA-512). Prevents a compromised
                     // server from requesting trivially low iterations, which would weaken the
                     // key derivation and make the salted password easier to brute-force.
+                    // Exploit: An attacker could brute-force weak passwords if the iteration count is set below the
+                    // recommended minimum.
+                    // Improvement: Enforce a minimum iteration count floor and consider periodic increases as hardware
+                    // improves.
                     if (serverFirstMessage.iterations() < mechanism.minIterations())
                         throw new SaslException("Requested iterations " + serverFirstMessage.iterations() +  " is less than the minimum " + mechanism.minIterations() + " for " + mechanism);
                     PasswordCallback passwordCallback = new PasswordCallback("Password:", false);
@@ -235,6 +243,9 @@ public class ScramSaslClient implements SaslClient {
     // original password. The char[] password from PasswordCallback is also converted to
     // byte[] via normalize() -- the char[] is managed by the CallbackHandler but the byte[]
     // copy (passwordBytes) persists on the heap until GC.
+    // Exploit: An attacker could brute-force weak passwords if the iteration count is set below the recommended
+    // minimum.
+    // Improvement: Enforce a minimum iteration count floor and consider periodic increases as hardware improves.
     private ClientFinalMessage handleServerFirstMessage(char[] password) throws SaslException {
         try {
             byte[] passwordBytes = ScramFormatter.normalize(new String(password));
@@ -249,10 +260,12 @@ public class ScramSaslClient implements SaslClient {
         }
     }
 
-    // SECURITY: Server signature verification using constant-time MessageDigest.isEqual().
+    // SECURITY: (HIGH) Server signature verification using constant-time MessageDigest.isEqual().
     // This prevents a malicious server from detecting partial signature match via timing
     // analysis. The verification ensures mutual authentication -- the server proves it
     // knows the ServerKey.
+    // Exploit: An attacker could use response timing differences to incrementally reconstruct the secret.
+    // Improvement: Ensure all cryptographic comparisons use constant-time algorithms like MessageDigest.isEqual().
     private void handleServerFinalMessage(byte[] signature) throws SaslException {
         try {
             byte[] serverKey = formatter.serverKey(saltedPassword);

@@ -32,12 +32,10 @@ import java.util.Locale;
  * level determines whether uncommitted transactional records are visible to the consumer.
  */
 public enum IsolationLevel {
-    // DECISION: Default isolation level — returns all records including uncommitted transactional
-    // records. Matches pre-transaction behavior for backward compatibility.
-    READ_UNCOMMITTED((byte) 0),
-    // DECISION: Only returns committed transactional records and all non-transactional records.
-    // Requires consumer to track LSO (Last Stable Offset).
-    READ_COMMITTED((byte) 1);
+    // DECISION: READ_UNCOMMITTED (default) returns all records including uncommitted transactional
+    // records for backward compatibility. READ_COMMITTED returns only committed transactional records
+    // and all non-transactional records, requiring the consumer to track LSO (Last Stable Offset).
+    READ_UNCOMMITTED((byte) 0), READ_COMMITTED((byte) 1);
 
     private final byte id;
 

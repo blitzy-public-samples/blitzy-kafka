@@ -138,7 +138,7 @@ public class OAuthBearerValidatorCallbackHandler implements AuthenticateCallback
 
     private JwtValidator jwtValidator;
 
-    // SECURITY: JwtValidator is instantiated via reflection using the
+    // SECURITY: (HIGH) JwtValidator is instantiated via reflection using the
     // configured class name. The class must implement JwtValidator and be
     // on the classpath. Malicious configuration could point to an
     // attacker-controlled class if config write access is compromised.
@@ -149,6 +149,8 @@ public class OAuthBearerValidatorCallbackHandler implements AuthenticateCallback
     // claim validation or opaque token introspection). Alternative:
     // Hard-code BrokerJwtValidator. Rationale: Pluggability supports
     // diverse OAuth provider requirements without code changes.
+    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
     @Override
     public void configure(Map<String, ?> configs, String saslMechanism, List<AppConfigurationEntry> jaasConfigEntries) {
         jwtValidator = getConfiguredInstance(
@@ -180,9 +182,11 @@ public class OAuthBearerValidatorCallbackHandler implements AuthenticateCallback
         this.jwtValidator.configure(configs, saslMechanism, jaasConfigEntries);
     }
 
-    // SECURITY: Uses Utils.closeQuietly to suppress close() exceptions,
+    // SECURITY: (LOW) Uses Utils.closeQuietly to suppress close() exceptions,
     // preventing resource cleanup failures from leaking internal state
     // through exception messages.
+    // Exploit: An attacker could exhaust server resources by sending oversized or excessive requests.
+    // Improvement: Enforce strict per-connection resource limits and implement connection rate limiting.
     @Override
     public void close() {
         Utils.closeQuietly(jwtValidator, "JWT validator");

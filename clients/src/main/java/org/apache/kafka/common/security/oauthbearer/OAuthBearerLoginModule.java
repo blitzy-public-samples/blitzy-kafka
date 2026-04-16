@@ -299,6 +299,8 @@ public class OAuthBearerLoginModule implements LoginModule {
     // registry via static initializer. This is a one-time, irreversible registration —
     // once registered, the OAUTHBEARER mechanism is available to all SASL contexts in
     // the JVM. No mechanism to unregister (by design — SASL providers are JVM-global).
+    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
     static {
         OAuthBearerSaslClientProvider.initialize(); // not part of public API
         OAuthBearerSaslServerProvider.initialize(); // not part of public API
@@ -309,6 +311,8 @@ public class OAuthBearerLoginModule implements LoginModule {
     // follow the Kafka authentication contract. However, the check is at runtime —
     // a misconfigured JAAS file could specify a handler that passes the type check
     // but behaves incorrectly.
+    // Exploit: A malicious client could send crafted packets to manipulate state transitions and bypass authentication.
+    // Improvement: Add state transition validation to reject unexpected state changes.
     @Override
     public void initialize(Subject subject, CallbackHandler callbackHandler, Map<String, ?> sharedState,
             Map<String, ?> options) {
@@ -357,10 +361,12 @@ public class OAuthBearerLoginModule implements LoginModule {
         return true;
     }
 
-    // SECURITY: Token is retrieved via callbackHandler.handle() — the actual token
+    // SECURITY: (HIGH) Token is retrieved via callbackHandler.handle() — the actual token
     // retrieval (HTTP call, file read, etc.) happens in the configured
     // AuthenticateCallbackHandler. Failures are logged but the specific failure reason
     // is not exposed beyond LoginException.
+    // Exploit: A malicious client could send crafted packets to manipulate state transitions and bypass authentication.
+    // Improvement: Add state transition validation to reject unexpected state changes.
     private void identifyToken() throws LoginException {
         OAuthBearerTokenCallback tokenCallback = new OAuthBearerTokenCallback();
         try {
@@ -418,6 +424,8 @@ public class OAuthBearerLoginModule implements LoginModule {
         // identity comparison (== not .equals()). This ensures only the specific token
         // instance logged in by THIS LoginModule is removed, preventing cross-context
         // token deletion when multiple tokens coexist on a shared Subject.
+        // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+        // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
         if (myCommittedToken != null) {
             log.trace("Logging out my token; current committed token count = {}", committedTokenCount());
             for (Iterator<Object> iterator = subject.getPrivateCredentials().iterator(); iterator.hasNext(); ) {

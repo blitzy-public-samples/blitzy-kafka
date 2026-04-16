@@ -94,6 +94,8 @@ public class ScramServerCallbackHandler implements AuthenticateCallbackHandler {
             // mechanism (mechanism mismatch), the HMAC verification could silently fail or succeed
             // incorrectly. The tokenExpiryTimestamp is passed back to ScramSaslServer's
             // getNegotiatedProperty() for the authenticator layer to enforce.
+            // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+            // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
             else if (callback instanceof DelegationTokenCredentialCallback) {
                 DelegationTokenCredentialCallback tokenCallback = (DelegationTokenCredentialCallback) callback;
                 tokenCallback.scramCredential(tokenCache.credential(saslMechanism, username));
@@ -101,14 +103,18 @@ public class ScramServerCallbackHandler implements AuthenticateCallbackHandler {
                 TokenInformation tokenInfo = tokenCache.token(username);
                 if (tokenInfo != null)
                     tokenCallback.tokenExpiryTimestamp(tokenInfo.expiryTimestamp());
-            // SECURITY: Regular SCRAM credential path -- simple lookup from CredentialCache by username.
+            // SECURITY: (MEDIUM) Regular SCRAM credential path -- simple lookup from CredentialCache by username.
             // Null credential result is handled by ScramSaslServer.evaluateResponse() which throws
             // SaslException("Authentication failed: Invalid user credentials") -- correct fail-closed.
+            // Exploit: Unauthorized access to the credential cache could expose authentication material.
+            // Improvement: Limit cache access to authenticated callers and consider cache entry encryption at rest.
             } else if (callback instanceof ScramCredentialCallback) {
                 ScramCredentialCallback sc = (ScramCredentialCallback) callback;
                 sc.scramCredential(credentialCache.get(username));
-            // SECURITY: Unknown callback types are rejected with UnsupportedCallbackException.
+            // SECURITY: (LOW) Unknown callback types are rejected with UnsupportedCallbackException.
             // This prevents unexpected callback injection from a modified SASL framework.
+            // Exploit: Malicious extensions or callback values could inject unexpected behavior into the auth flow.
+            // Improvement: Validate all extension keys and values against an allowlist before processing.
             } else
                 throw new UnsupportedCallbackException(callback);
         }

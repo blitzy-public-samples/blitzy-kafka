@@ -50,6 +50,8 @@ public class JwtResponseParser {
     // SECURITY: (LOW) Truncates response body to 1000 chars in error messages to prevent log
     // flooding from large malicious responses. The full response body is still parsed by Jackson
     // (no size limit on parsing) — this only affects the error message snippet.
+    // Exploit: An attacker could exhaust server resources by sending oversized or excessive requests.
+    // Improvement: Enforce strict per-connection resource limits and implement connection rate limiting.
     private static final int MAX_RESPONSE_BODY_LENGTH = 1000;
 
     public String parseJwt(String responseBody) throws JwtRetrieverException {

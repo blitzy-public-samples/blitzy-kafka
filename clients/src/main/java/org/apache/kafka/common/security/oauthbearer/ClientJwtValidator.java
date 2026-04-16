@@ -154,6 +154,8 @@ public class ClientJwtValidator implements JwtValidator {
         // could cause excessive memory allocation. The
         // OAuthBearerIllegalTokenException catches structural issues but not
         // resource exhaustion.
+        // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+        // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
         try {
             payload = OAuthBearerUnsecuredJws.toMap(serializedJwt.getPayload());
         } catch (OAuthBearerIllegalTokenException e) {
@@ -166,6 +168,8 @@ public class ClientJwtValidator implements JwtValidator {
         // SECURITY: (MEDIUM) Scope type coercion — same fail-closed pattern
         // as BrokerJwtValidator. Unexpected types default to empty set
         // (no scopes = restricted access).
+        // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+        // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
         if (scopeRaw instanceof String)
             scopeRawCollection = Collections.singletonList((String) scopeRaw);
         else if (scopeRaw instanceof Collection)
@@ -182,6 +186,8 @@ public class ClientJwtValidator implements JwtValidator {
         // convert epoch seconds to milliseconds. Integer overflow is
         // theoretically possible for timestamps far in the future
         // (~year 292278994) but practically irrelevant for token lifetimes.
+        // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+        // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
         long expiration = ClaimValidationUtils.validateExpiration(EXPIRATION_CLAIM_NAME,
             expirationRaw != null ? expirationRaw.longValue() * 1000L : null);
         String subject = ClaimValidationUtils.validateSubject(subClaimName, subRaw);

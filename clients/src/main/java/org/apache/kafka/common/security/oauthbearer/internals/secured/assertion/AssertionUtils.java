@@ -94,6 +94,8 @@ public class AssertionUtils {
         // key info itself — an attacker who can tamper with the key file could specify
         // a weak PBE algorithm. The Cipher is initialized with the PBE key and the
         // algorithm parameters from the encrypted key info.
+        // Exploit: An attacker could exploit weak cipher suites or certificate validation gaps for MITM attacks.
+        // Improvement: Enforce strong cipher suite selection and certificate pinning where feasible.
         if (passphrase.isPresent()) {
             EncryptedPrivateKeyInfo keyInfo = new EncryptedPrivateKeyInfo(privateKeyContents);
             String algorithm = keyInfo.getAlgName();
@@ -125,6 +127,8 @@ public class AssertionUtils {
     // RS256 -> SHA256withRSA, ES256 -> SHA256withECDSA. These mappings follow the
     // JWA (RFC 7518) to JCA algorithm name mapping. Case-insensitive comparison via
     // equalsIgnoreCase() for resilience against config case variations.
+    // Exploit: A compromised proof or signature could allow authentication without knowing the password.
+    // Improvement: Ensure proof computations use constant-time operations and reject malformed proofs early.
     public static Signature getSignature(String algorithm) throws GeneralSecurityException {
         if (algorithm.equalsIgnoreCase(TOKEN_SIGNING_ALGORITHM_RS256)) {
             return Signature.getInstance("SHA256withRSA");

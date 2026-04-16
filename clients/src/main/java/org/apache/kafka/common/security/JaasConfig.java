@@ -72,11 +72,13 @@ class JaasConfig extends Configuration {
     private final List<AppConfigurationEntry> configEntries;
 
     public JaasConfig(String loginContextName, String jaasConfigParams) {
-        // SECURITY: StreamTokenizer configured with slashSlash and slashStar comments
+        // SECURITY: (MEDIUM) StreamTokenizer configured with slashSlash and slashStar comments
         // enabled — comment sequences (//, /* */) inside JAAS config values will be
         // silently consumed, potentially hiding injected content from human review.
         // Characters '-', '_', '$' are added as word chars to support Java class names
         // with inner classes and hyphens in option keys.
+        // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+        // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
         StreamTokenizer tokenizer = new StreamTokenizer(new StringReader(jaasConfigParams));
         tokenizer.slashSlashComments(true);
         tokenizer.slashStarComments(true);
@@ -152,16 +154,20 @@ class JaasConfig extends Configuration {
     // reading key=value pairs until ';' or EOF. Error paths: EOF before control flag,
     // missing '=' in options, EOF before option value, missing terminating ';'. All
     // errors throw IllegalArgumentException with descriptive messages.
+    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
     private AppConfigurationEntry parseAppConfigurationEntry(StreamTokenizer tokenizer) throws IOException {
         String loginModule = tokenizer.sval;
         if (tokenizer.nextToken() == StreamTokenizer.TT_EOF)
             throw new IllegalArgumentException("Login module control flag not specified in JAAS config");
         LoginModuleControlFlag controlFlag = loginModuleControlFlag(tokenizer.sval);
         Map<String, String> options = new HashMap<>();
-        // SECURITY: Key=value option parsing. Option values are read as raw
+        // SECURITY: (MEDIUM) Key=value option parsing. Option values are read as raw
         // StreamTokenizer tokens. Values containing special characters ('=', ';')
         // must be quoted per JAAS syntax. Unquoted values terminate at whitespace,
         // which could cause option value truncation if not properly quoted.
+        // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+        // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
         while (tokenizer.nextToken() != StreamTokenizer.TT_EOF && tokenizer.ttype != ';') {
             String key = tokenizer.sval;
             if (tokenizer.nextToken() != '=' || tokenizer.nextToken() == StreamTokenizer.TT_EOF || tokenizer.sval == null)

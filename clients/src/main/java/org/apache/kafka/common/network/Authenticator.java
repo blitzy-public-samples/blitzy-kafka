@@ -46,6 +46,7 @@ import java.util.Optional;
 // all implementations.
 // Contract: authenticate() is idempotent until complete() returns true. principal() is valid
 // only after complete() returns true. close() must release all resources including JAAS subjects.
+// Exploit: A malicious client could send crafted packets to manipulate state transitions and bypass authentication.
 public interface Authenticator extends Closeable {
     /**
      * Implements any authentication mechanism. Use transportLayer to read or write tokens.
@@ -56,11 +57,13 @@ public interface Authenticator extends Closeable {
      *      other security configuration errors
      * @throws IOException if read/write fails due to an I/O error
      */
-    // SECURITY: This method drives the authentication state machine. For SASL mechanisms, this
+    // SECURITY: (HIGH) This method drives the authentication state machine. For SASL mechanisms, this
     // involves reading/writing SASL tokens from/to the TransportLayer. The method may be called
     // multiple times (non-blocking) until complete() returns true.
     // The AuthenticationException thrown on failure is non-retriable — clients should not retry
     // with the same credentials.
+    // Exploit: A malicious client could send crafted packets to manipulate state transitions and bypass authentication.
+    // Improvement: Add state transition validation to reject unexpected state changes.
     void authenticate() throws AuthenticationException, IOException;
 
     /**
@@ -113,6 +116,8 @@ public interface Authenticator extends Closeable {
     // between the start and completion of re-authentication.
     // Risk: If re-authentication partially completes and the connection continues processing
     // requests, the principal may be stale (old credentials) or undefined (mid-auth).
+    // Exploit: A misconfigured auth_to_local rule could map an attacker principal to a privileged local identity.
+    // Improvement: Audit auth_to_local rules regularly and use strict realm-based principal validation.
     default void reauthenticate(ReauthenticationContext reauthenticationContext) throws IOException {
         // empty
     }
@@ -129,9 +134,11 @@ public interface Authenticator extends Closeable {
      * 
      * @return the session expiration time, if any, otherwise null
      */
-    // SECURITY: serverSessionExpirationTimeNanos() and clientSessionReauthenticationTimeNanos()
+    // SECURITY: (MEDIUM) serverSessionExpirationTimeNanos() and clientSessionReauthenticationTimeNanos()
     // control credential rotation enforcement. If a session expires and re-authentication fails,
     // the connection must be terminated to prevent use of stale credentials.
+    // Exploit: An attacker could exhaust server resources by sending oversized or excessive requests.
+    // Improvement: Enforce strict per-connection resource limits and implement connection rate limiting.
     default Long serverSessionExpirationTimeNanos() {
         return null;
     }

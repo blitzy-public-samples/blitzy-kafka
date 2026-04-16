@@ -44,6 +44,8 @@ public enum SecurityProtocol {
     // traverse the network in cleartext. Both should be avoided in production environments
     // where network sniffing or MITM attacks are possible. SSL (id=1) and SASL_SSL (id=3)
     // are the recommended protocols for production deployments.
+    // Exploit: An attacker could exploit weak cipher suites or certificate validation gaps for MITM attacks.
+    // Improvement: Enforce strong cipher suite selection and certificate pinning where feasible.
 
     /** Un-authenticated, non-encrypted channel */
     PLAINTEXT(0, "PLAINTEXT"),

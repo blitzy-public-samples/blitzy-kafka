@@ -61,15 +61,20 @@ import java.util.Map;
 // Impact: Changing mechanism names breaks JAAS configuration and SASL negotiation.
 public enum ScramMechanism {
 
-    // SECURITY: SHA-256 variant -- 256-bit hash output. Currently secure against known cryptanalysis.
+    // SECURITY: (MEDIUM) SHA-256 variant -- 256-bit hash output. Currently secure against known cryptanalysis.
     // min=4096, max=16384 iterations. Type byte 1 -- persisted in metadata records, must not change.
     // DECISION: Iteration bounds [4096, 16384]. The minimum (4096) follows RFC 5802 Section 5.1.
     // The maximum (16384) balances security with authentication latency -- at 16384 iterations,
     // PBKDF2 with SHA-256 takes ~20ms on modern hardware per authentication attempt.
+    // Exploit: An attacker could brute-force weak passwords if the iteration count is set below the recommended
+    // minimum.
+    // Improvement: Enforce a minimum iteration count floor and consider periodic increases as hardware improves.
     SCRAM_SHA_256((byte) 1, "SHA-256", "HmacSHA256", 4096, 16384),
-    // SECURITY: SHA-512 variant -- 512-bit hash output. Higher security margin than SHA-256.
+    // SECURITY: (MEDIUM) SHA-512 variant -- 512-bit hash output. Higher security margin than SHA-256.
     // min=4096, max=16384 iterations. Type byte 2 -- persisted in metadata records, must not change.
     // SHA-512 has slightly higher computational cost but provides stronger collision resistance.
+    // Exploit: A weakness in the hash algorithm could enable preimage or collision attacks.
+    // Improvement: Monitor NIST guidance on hash algorithm deprecation and plan migration paths.
     SCRAM_SHA_512((byte) 2, "SHA-512", "HmacSHA512", 4096, 16384);
 
     // DECISION: Byte type codes (1=SHA-256, 2=SHA-512) are duplicated in admin/ScramMechanism
@@ -81,9 +86,12 @@ public enum ScramMechanism {
     private final String mechanismName;
     private final String hashAlgorithm;
     private final String macAlgorithm;
-    // SECURITY: Minimum iteration count for PBKDF2 key derivation. Set to 4096 per RFC 5802
+    // SECURITY: (HIGH) Minimum iteration count for PBKDF2 key derivation. Set to 4096 per RFC 5802
     // Section 5.1. Enforced in ScramSaslServer.evaluateResponse() and ScramSaslClient.evaluateChallenge().
     // Lowering this value would reduce brute-force resistance of all SCRAM credentials.
+    // Exploit: An attacker could brute-force weak passwords if the iteration count is set below the recommended
+    // minimum.
+    // Improvement: Enforce a minimum iteration count floor and consider periodic increases as hardware improves.
     private final int minIterations;
     private final int maxIterations;
 

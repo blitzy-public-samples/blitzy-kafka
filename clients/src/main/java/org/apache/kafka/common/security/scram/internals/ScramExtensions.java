@@ -48,9 +48,11 @@ public class ScramExtensions extends SaslExtensions {
         this(Collections.emptyMap());
     }
 
-    // SECURITY: Parses extension string using Utils.parseMap() with "=" key-value separator
+    // SECURITY: (MEDIUM) Parses extension string using Utils.parseMap() with "=" key-value separator
     // and "," pair separator. No validation on extension keys or values -- arbitrary extensions
     // can be passed through to the server.
+    // Exploit: Malformed serialized data could trigger parsing exceptions or inject unexpected values.
+    // Improvement: Apply strict input validation with size bounds and character allowlists before deserialization.
     public ScramExtensions(String extensions) {
         this(Utils.parseMap(extensions, "=", ","));
     }
@@ -59,10 +61,12 @@ public class ScramExtensions extends SaslExtensions {
         super(extensionMap);
     }
 
-    // SECURITY: Checks if the "tokenauth" extension is set to "true". This single boolean flag
+    // SECURITY: (MEDIUM) Checks if the "tokenauth" extension is set to "true". This single boolean flag
     // controls the entire credential dispatch path in ScramSaslServer (line 112 in that file).
     // The value is parsed from the extension map using Boolean.parseBoolean(), which returns
     // false for any value other than case-insensitive "true" -- this is safe default behavior.
+    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
     public boolean tokenAuthenticated() {
         return Boolean.parseBoolean(map().get(ScramLoginModule.TOKEN_AUTH_CONFIG));
     }

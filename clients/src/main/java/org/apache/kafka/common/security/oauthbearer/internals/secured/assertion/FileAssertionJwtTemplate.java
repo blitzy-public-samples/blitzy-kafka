@@ -142,6 +142,7 @@ public class FileAssertionJwtTemplate implements AssertionJwtTemplate {
     // TypeReference<Map<String, Object>> for type-safe deserialization. Rationale: The @SuppressWarnings
     // is acceptable because Jackson's readValue(json, Map.class) always returns Map<String, Object>
     // for JSON objects. The extra type safety of TypeReference adds verbosity without behavioral change.
+    // Exploit: An attacker could exhaust server resources by sending oversized or excessive requests.
     @SuppressWarnings("unchecked")
     private static final CachedFile.Transformer<CachedJwtTemplate> JSON_TRANSFORMER = (file, json) -> {
         try {

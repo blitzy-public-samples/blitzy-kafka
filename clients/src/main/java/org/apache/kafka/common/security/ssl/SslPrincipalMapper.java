@@ -57,6 +57,8 @@ public class SslPrincipalMapper {
     // the rule configuration string, not to client-supplied DNs. The DN matching uses the
     // per-rule regex pattern (compiled in Rule constructor). RULE_PATTERN handles the
     // DEFAULT|RULE:pattern/replacement/flags syntax with escaped delimiters.
+    // Exploit: An attacker could exhaust server resources by sending oversized or excessive requests.
+    // Improvement: Enforce strict per-connection resource limits and implement connection rate limiting.
     private static final String RULE_PATTERN = "(DEFAULT)|RULE:((\\\\.|[^\\\\/])*)/((\\\\.|[^\\\\/])*)/([LU]?).*?|(.*?)";
     private static final Pattern RULE_SPLITTER = Pattern.compile("\\s*(" + RULE_PATTERN + ")\\s*(,\\s*|$)");
     private static final Pattern RULE_PARSER = Pattern.compile(RULE_PATTERN);
@@ -117,6 +119,8 @@ public class SslPrincipalMapper {
     // mapping (due to misconfigured rules or regex edge cases) could grant a client the
     // permissions of a different principal. Throws NoMatchingRule if no rule matches -- this
     // fails-closed, preventing unauthenticated access when rules are misconfigured.
+    // Exploit: A malicious client could send crafted packets to manipulate state transitions and bypass authentication.
+    // Improvement: Add state transition validation to reject unexpected state changes.
     public String getName(String distinguishedName) throws IOException {
         for (Rule r : rules) {
             String principalName = r.apply(distinguishedName);

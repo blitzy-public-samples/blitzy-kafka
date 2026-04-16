@@ -233,6 +233,8 @@ public class ConfigurationUtils {
     // The additional allowlist check via throwIfURLIsNotAllowed() validates the specific URL
     // against a configurable system property (ALLOWED_SASL_OAUTHBEARER_URLS_CONFIG).
     // Default: all URLs allowed.
+    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
     public URL validateUrl(String name) {
         String value = validateString(name);
         URL url;
@@ -298,6 +300,8 @@ public class ConfigurationUtils {
     // back to the unprefixed key. This enables per-listener isolation of OAUTHBEARER
     // configuration. The prefix is set by ListenerName.saslMechanismPrefix() during
     // construction.
+    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
     @SuppressWarnings("unchecked")
     public <T> T get(String name) {
         T value = (T) configs.get(prefix + name);

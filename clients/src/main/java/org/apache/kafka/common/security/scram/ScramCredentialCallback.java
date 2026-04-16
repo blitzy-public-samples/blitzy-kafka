@@ -48,8 +48,10 @@ public class ScramCredentialCallback implements Callback {
     /**
      * Sets the SCRAM credential for this instance.
      */
-    // SECURITY: No validation on the credential being set -- a null or malformed credential
+    // SECURITY: (MEDIUM) No validation on the credential being set -- a null or malformed credential
     // would cause NullPointerException downstream in ScramSaslServer.evaluateResponse().
+    // Exploit: Unauthorized access to the credential cache could expose authentication material.
+    // Improvement: Limit cache access to authenticated callers and consider cache entry encryption at rest.
     public void scramCredential(ScramCredential scramCredential) {
         this.scramCredential = scramCredential;
     }

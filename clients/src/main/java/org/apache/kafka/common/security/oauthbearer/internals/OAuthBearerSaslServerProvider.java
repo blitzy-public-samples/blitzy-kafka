@@ -51,6 +51,8 @@ public final class OAuthBearerSaslServerProvider extends Provider {
 
     // SECURITY: (LOW) Same idempotency concern as OAuthBearerSaslClientProvider — multiple
     // calls add duplicate providers. The SASL framework uses the first matching provider.
+    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
     public static void initialize() {
         Security.addProvider(new OAuthBearerSaslServerProvider());
     }

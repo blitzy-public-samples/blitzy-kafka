@@ -66,6 +66,7 @@ import java.util.Set;
 // consistent, validated values. Claims map is immutable. Scope is immutable.
 // Impact: The toMap() method is used by production code (ClientJwtValidator) —
 // changes to its parsing behavior affect secured token validation as well.
+// Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
 public class OAuthBearerUnsecuredJws implements OAuthBearerToken {
     private final String compactSerialization;
     private final List<String> splits;

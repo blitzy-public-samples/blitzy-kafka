@@ -53,6 +53,7 @@ import java.util.function.Supplier;
 // Contract: Must return a fully constructed KafkaChannel from buildChannel().
 // Impact: If this builder's behavior changes, all PLAINTEXT listeners across broker and
 // client connections are affected.
+// Exploit: An attacker could exploit weak cipher suites or certificate validation gaps for MITM attacks.
 public class PlaintextChannelBuilder implements ChannelBuilder {
     private final ListenerName listenerName;
     private Map<String, ?> configs;
@@ -139,6 +140,8 @@ public class PlaintextChannelBuilder implements ChannelBuilder {
         // IP-based principals, which are trivially spoofable on shared networks.
         // Improvement: Use SASL_PLAINTEXT or SASL_SSL to bind principals to
         // authenticated identities rather than unauthenticated IP addresses.
+        // Exploit: A malicious client could send crafted packets to manipulate state transitions and bypass
+        // authentication.
         @Override
         public KafkaPrincipal principal() {
             InetAddress clientAddress = transportLayer.socketChannel().socket().getInetAddress();

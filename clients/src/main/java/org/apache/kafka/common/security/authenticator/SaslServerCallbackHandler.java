@@ -76,6 +76,8 @@ public class SaslServerCallbackHandler implements AuthenticateCallbackHandler {
     // for any unrecognized callback. This prevents silent acceptance of callbacks that
     // this handler doesn't know how to process, which could mask authentication issues
     // or allow unexpected credential flows.
+    // Exploit: Unauthorized access to the credential cache could expose authentication material.
+    // Improvement: Limit cache access to authenticated callers and consider cache entry encryption at rest.
     @Override
     public void handle(Callback[] callbacks) throws UnsupportedCallbackException {
         for (Callback callback : callbacks) {
@@ -106,6 +108,7 @@ public class SaslServerCallbackHandler implements AuthenticateCallbackHandler {
     // authorizing as another) is not supported. Alternative: use authorizationID if
     // different from authenticationID. Rationale: Kafka does not support Kerberos
     // delegation/proxy authentication at the SASL level.
+    // Improvement: Add state transition validation to reject unexpected state changes.
     private void handleAuthorizeCallback(AuthorizeCallback ac) {
         String authenticationID = ac.getAuthenticationID();
         String authorizationID = ac.getAuthorizationID();

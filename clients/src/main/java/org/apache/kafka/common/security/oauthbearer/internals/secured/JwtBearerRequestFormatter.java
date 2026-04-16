@@ -62,6 +62,8 @@ public class JwtBearerRequestFormatter implements HttpRequestFormatter {
         // SECURITY: (MEDIUM) The assertion is obtained from the assertionSupplier (Supplier<String>)
         // at call time and URL-encoded before inclusion in the form body. URL encoding prevents body
         // parameter injection via crafted assertion values.
+        // Exploit: Improper handling could be exploited to bypass security controls or leak sensitive information.
+        // Improvement: Add comprehensive logging for security-relevant operations and enforce fail-closed semantics.
         String assertion = assertionSupplier.get();
         StringBuilder requestParameters = new StringBuilder();
         requestParameters.append("grant_type=").append(URLEncoder.encode(GRANT_TYPE, StandardCharsets.UTF_8));

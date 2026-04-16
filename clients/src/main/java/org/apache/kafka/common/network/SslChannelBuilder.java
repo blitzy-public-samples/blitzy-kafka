@@ -56,6 +56,7 @@ import java.util.function.Supplier;
 // Contract: SslFactory must be configured before buildChannel() is called.
 // Impact: If SslFactory changes its SSLEngine initialization (e.g., different cipher
 // suites), all connections created by this builder are affected.
+// Exploit: An attacker could exploit weak cipher suites or certificate validation gaps for MITM attacks.
 public class SslChannelBuilder implements ChannelBuilder, ListenerReconfigurable {
     private final ListenerName listenerName;
     private final boolean isInterBrokerListener;

@@ -56,17 +56,26 @@ package org.apache.kafka.common.security.scram;
 // all SCRAM authentication paths and credential persistence/migration.
 public class ScramCredential {
 
-    // SECURITY: Salt is a random value generated per-user by ScramFormatter.secureRandomBytes().
+    // SECURITY: (HIGH) Salt is a random value generated per-user by ScramFormatter.secureRandomBytes().
     // Must be at least 16 bytes (128 bits) per NIST SP 800-132 recommendations.
+    // Exploit: Predictable nonce or salt values would allow precomputation attacks against the challenge-response.
+    // Improvement: Verify SecureRandom is seeded from a strong entropy source on the deployment platform.
     private final byte[] salt;
     // SECURITY: (HIGH) ServerKey = HMAC(SaltedPassword, "Server Key"). Direct exposure enables
     // server impersonation -- an attacker with ServerKey can compute valid ServerSignatures.
+    // Exploit: Stolen delegation tokens could be used for unauthorized access until expiry or revocation.
+    // Improvement: Implement token usage auditing and consider shorter default token lifetimes.
     private final byte[] serverKey;
-    // SECURITY: StoredKey = H(ClientKey) where ClientKey = HMAC(SaltedPassword, "Client Key").
+    // SECURITY: (HIGH) StoredKey = H(ClientKey) where ClientKey = HMAC(SaltedPassword, "Client Key").
     // Stored instead of ClientKey so the server cannot impersonate the client.
+    // Exploit: Stolen delegation tokens could be used for unauthorized access until expiry or revocation.
+    // Improvement: Implement token usage auditing and consider shorter default token lifetimes.
     private final byte[] storedKey;
     // SECURITY: (MEDIUM) Iteration count for PBKDF2 key derivation. Minimum 4096 per RFC 5802
     // Section 5.1. Lower values dramatically reduce brute-force resistance.
+    // Exploit: An attacker could brute-force weak passwords if the iteration count is set below the recommended
+    // minimum.
+    // Improvement: Enforce a minimum iteration count floor and consider periodic increases as hardware improves.
     private final int iterations;
 
     /**
@@ -86,9 +95,11 @@ public class ScramCredential {
     /**
      * Returns the salt used to process this credential using the SCRAM algorithm.
      */
-    // SECURITY: Returns direct reference to internal byte array (no defensive copy).
+    // SECURITY: (MEDIUM) Returns direct reference to internal byte array (no defensive copy).
     // Callers MUST NOT modify the returned array. A defensive copy would be safer but
     // was omitted for performance -- SCRAM authentication is on the hot path.
+    // Exploit: A caller retaining a reference could modify credential bytes in-place, corrupting shared state.
+    // Improvement: Return defensive copies of sensitive byte arrays via Arrays.copyOf().
     public byte[] salt() {
         return salt;
     }
@@ -96,9 +107,11 @@ public class ScramCredential {
     /**
      * Server key computed from the client password using the SCRAM algorithm.
      */
-    // SECURITY: Returns direct reference to internal byte array (no defensive copy).
+    // SECURITY: (MEDIUM) Returns direct reference to internal byte array (no defensive copy).
     // Callers MUST NOT modify the returned array. A defensive copy would be safer but
     // was omitted for performance -- SCRAM authentication is on the hot path.
+    // Exploit: A caller retaining a reference could modify credential bytes in-place, corrupting shared state.
+    // Improvement: Return defensive copies of sensitive byte arrays via Arrays.copyOf().
     public byte[] serverKey() {
         return serverKey;
     }
@@ -106,9 +119,11 @@ public class ScramCredential {
     /**
      * Stored key computed from the client password using the SCRAM algorithm.
      */
-    // SECURITY: Returns direct reference to internal byte array (no defensive copy).
+    // SECURITY: (MEDIUM) Returns direct reference to internal byte array (no defensive copy).
     // Callers MUST NOT modify the returned array. A defensive copy would be safer but
     // was omitted for performance -- SCRAM authentication is on the hot path.
+    // Exploit: A caller retaining a reference could modify credential bytes in-place, corrupting shared state.
+    // Improvement: Return defensive copies of sensitive byte arrays via Arrays.copyOf().
     public byte[] storedKey() {
         return storedKey;
     }

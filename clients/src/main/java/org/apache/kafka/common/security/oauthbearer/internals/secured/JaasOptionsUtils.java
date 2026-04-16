@@ -89,6 +89,8 @@ public class JaasOptionsUtils {
     // name matches OAUTHBEARER and exactly 1 config entry exists. The returned map is
     // unmodifiable (Collections.unmodifiableMap) to prevent downstream modification of
     // JAAS state.
+    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
     public static Map<String, Object> getOptions(String saslMechanism, List<AppConfigurationEntry> jaasConfigEntries) {
         if (!OAuthBearerLoginModule.OAUTHBEARER_MECHANISM.equals(saslMechanism))
             throw new IllegalArgumentException(String.format("Unexpected SASL mechanism: %s", saslMechanism));
@@ -129,6 +131,8 @@ public class JaasOptionsUtils {
     // using the trust store specified in JAAS options (or JVM default if not specified).
     // Note: The SSL config values are logged at DEBUG level — ensure DEBUG logging is
     // not enabled in production as it may reveal trust/key store paths.
+    // Exploit: An attacker could forge or replay tokens if validation is insufficient or tokens are leaked.
+    // Improvement: Implement token binding or short-lived tokens with strict audience and issuer validation.
     public SSLSocketFactory createSSLSocketFactory() {
         Map<String, ?> sslClientConfig = getSslClientConfig();
         SslFactory sslFactory = new SslFactory(ConnectionMode.CLIENT);

@@ -62,9 +62,11 @@ public class ScramExtensionsCallback implements Callback {
     /**
      * Sets the SCRAM extensions on this callback. Maps passed in should be unmodifiable
      */
-    // SECURITY: No validation on extension keys or values. Javadoc states maps should be
+    // SECURITY: (MEDIUM) No validation on extension keys or values. Javadoc states maps should be
     // unmodifiable, but this is not enforced — a mutable map could be modified after being
     // set, changing the SCRAM message content mid-authentication.
+    // Exploit: Malicious extensions or callback values could inject unexpected behavior into the auth flow.
+    // Improvement: Validate all extension keys and values against an allowlist before processing.
     public void extensions(Map<String, String> extensions) {
         this.extensions = extensions;
     }

@@ -90,6 +90,8 @@ public class DefaultKafkaPrincipalBuilder implements KafkaPrincipalBuilder {
     // Alternatives: (1) Visitor pattern, (2) Map<Class, Function>. Rationale: Auth context
     // types are a closed set (3 types); instanceof is simpler. IllegalArgumentException
     // on unknown types forces explicit handling of future context additions.
+    // Exploit: An attacker could exploit weak cipher suites or certificate validation gaps for MITM attacks.
+    // Improvement: Enforce strong cipher suite selection and certificate pinning where feasible.
     @Override
     public KafkaPrincipal build(AuthenticationContext context) {
         if (context instanceof PlaintextAuthenticationContext) {
@@ -116,6 +118,7 @@ public class DefaultKafkaPrincipalBuilder implements KafkaPrincipalBuilder {
     // auth_to_local rules (KerberosShortNamer). Misconfigured regex rules could map
     // all principals to one short name, breaking identity isolation.
     // Improvement: Log the full Kerberos principal alongside the short name for audit.
+    // Exploit: A misconfigured auth_to_local rule could map an attacker principal to a privileged local identity.
     private KafkaPrincipal applyKerberosShortNamer(String authorizationId) {
         KerberosName kerberosName = KerberosName.parse(authorizationId);
         try {
@@ -149,6 +152,8 @@ public class DefaultKafkaPrincipalBuilder implements KafkaPrincipalBuilder {
     // Alternative: Fixed version. Chosen approach auto-includes new schema fields.
     // SECURITY: (MEDIUM) Version-prefixed format; deserialize validates version bounds
     // to reject principals from unknown schema versions with different security semantics.
+    // Exploit: A misconfigured auth_to_local rule could map an attacker principal to a privileged local identity.
+    // Improvement: Audit auth_to_local rules regularly and use strict realm-based principal validation.
     @Override
     public byte[] serialize(KafkaPrincipal principal) {
         DefaultPrincipalData data = new DefaultPrincipalData()
@@ -161,6 +166,7 @@ public class DefaultKafkaPrincipalBuilder implements KafkaPrincipalBuilder {
     // SECURITY: (MEDIUM) Version check prevents deserialization of principals from
     // unknown schema versions. Improvement: Consider adding integrity verification
     // (e.g., checksum) to detect byte-level tampering in serialized principal data.
+    // Exploit: A misconfigured auth_to_local rule could map an attacker principal to a privileged local identity.
     @Override
     public KafkaPrincipal deserialize(byte[] bytes) {
         ByteBuffer buffer = ByteBuffer.wrap(bytes);
