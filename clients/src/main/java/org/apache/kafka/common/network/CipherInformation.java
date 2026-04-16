@@ -18,6 +18,13 @@ package org.apache.kafka.common.network;
 
 import java.util.Objects;
 
+// DECISION: Immutable value type capturing TLS cipher suite and protocol version for a
+// connection. Registered with ChannelMetadataRegistry after TLS handshake completion for
+// metrics tracking (Selector.SelectorMetrics.connectionsByCipher gauge). This enables
+// operators to monitor the distribution of cipher suites across active connections,
+// which is important for security compliance (e.g., detecting deprecated cipher usage).
+// Alternative: Store cipher info as plain strings — rejected because the record provides
+// type safety and proper equals/hashCode for use as IntGaugeSuite keys.
 public class CipherInformation {
     private final String cipher;
     private final String protocol;
