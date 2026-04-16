@@ -26,11 +26,28 @@ import java.nio.channels.GatheringByteChannel;
  * 
  * @see SslTransportLayer
  */
+// DECISION: Extension of GatheringByteChannel that adds hasPendingWrites() and
+// transferFrom(FileChannel, position, count). The transferFrom() method enables zero-copy
+// file transfer when the underlying channel supports it (PlaintextTransportLayer uses
+// FileChannel.transferTo -> sendfile(2) syscall). For encrypted channels (SslTransportLayer),
+// transferFrom() must read into a user-space buffer then encrypt, so zero-copy is not possible.
+// Alternative: Use GatheringByteChannel directly and handle file transfers externally -- rejected
+// because the channel knows whether zero-copy is possible (plaintext vs SSL) and can choose
+// the optimal transfer strategy.
+//
+// CROSS-CUTTING: Extended by TransportLayer. Implementations: PlaintextTransportLayer (zero-copy
+// via FileChannel.transferTo), SslTransportLayer (buffered copy through SSLEngine).
+// Impact: The transferFrom() contract affects log fetch performance -- plaintext gets zero-copy
+// kernel-to-socket transfer while SSL requires additional data copies through user space.
 public interface TransferableChannel extends GatheringByteChannel {
 
     /**
      * @return true if there are any pending writes. false if the implementation directly write all data to output.
      */
+    // DECISION: Boolean method allowing callers to check if the channel has unflushed write data.
+    // This is essential for the Selector's send-completion tracking: a send is only considered
+    // complete when hasPendingWrites() returns false. Without this, the Selector would need to
+    // track write buffer state externally, duplicating logic from the transport layer.
     boolean hasPendingWrites();
 
     /**
