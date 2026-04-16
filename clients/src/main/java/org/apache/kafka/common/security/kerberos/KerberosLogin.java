@@ -47,8 +47,22 @@ import javax.security.auth.login.LoginException;
  * This class is responsible for refreshing Kerberos credentials for
  * logins for both Kafka client and server.
  */
+// CROSS-CUTTING: Extends AbstractLogin (o.a.k.common.security.authenticator.AbstractLogin)
+// which provides the JAAS LoginContext lifecycle. Consumed by LoginManager for GSSAPI mechanism.
+// Contract: configure() must be called before login(). Subject is shared with
+// SaslServerAuthenticator for Kerberos auth. Changes to AbstractLogin lifecycle affect all
+// GSSAPI connections.
 public class KerberosLogin extends AbstractLogin {
     private static final Logger log = LoggerFactory.getLogger(KerberosLogin.class);
+
+    // SECURITY (HIGH): KerberosLogin manages a background daemon thread that periodically
+    // refreshes Kerberos TGT credentials. Race condition: between TGT expiry and successful
+    // renewal, the broker may lack valid credentials, causing authentication failures.
+    // Exploit: An attacker could time requests during the renewal window when old TGT has
+    // expired but new TGT is not yet obtained, triggering auth failures to force fallback
+    // to weaker mechanisms or DoS.
+    // Improvement: Implement a grace period where both old and new TGTs are valid, or block
+    // auth requests during renewal until new credentials are confirmed.
 
     private static final Random RNG = new Random();
 
@@ -76,6 +90,10 @@ public class KerberosLogin extends AbstractLogin {
 
     private String kinitCmd;
 
+    // DECISION: Subject is volatile rather than using synchronized access because the TGT
+    // renewal thread updates it asynchronously. Volatile provides visibility guarantee
+    // without blocking reads during authentication. Alternative: ReentrantReadWriteLock
+    // — rejected due to overhead on every auth check.
     private volatile Subject subject;
 
     private LoginContext loginContext;
@@ -97,6 +115,16 @@ public class KerberosLogin extends AbstractLogin {
      * Performs login for each login module specified for the login context of this instance and starts the thread used
      * to periodically re-login to the Kerberos Ticket Granting Server.
      */
+    // COMPLEXITY: Method size ~163 lines — Kerberos login with embedded TGT refresh thread.
+    // Structure: (1) JAAS LoginContext.login() and Subject extraction,
+    // (2) TGT refresh daemon thread creation with infinite renewal loop,
+    // (3) Thread start. The daemon loop: locates krbtgt ticket, computes next refresh
+    // via getRefreshTime with window factor + jitter, enforces minTimeBeforeRelogin,
+    // handles ticket cache (kinit -R) vs keytab (reLogin), and implements single-retry
+    // with 10s sleep.
+    // Key exit paths: (a) non-renewable TGT, (b) clock skew detection,
+    // (c) nextRefresh in past, (d) InterruptedException,
+    // (e) exhausted retries on kinit or reLogin.
     @Override
     public LoginContext login() throws LoginException {
 
@@ -135,6 +163,10 @@ public class KerberosLogin extends AbstractLogin {
         // TGT's existing expiry date and the configured minTimeBeforeRelogin. For testing and development,
         // you can decrease the interval of expiration of tickets (for example, to 3 minutes) by running:
         //  "modprinc -maxlife 3mins <principal>" in kadmin.
+        // SECURITY (HIGH): TGT renewal daemon thread runs for the lifetime of the JVM.
+        // Race condition between TGT expiry check and actual renewal: during this window,
+        // authentication requests may use an expired TGT.
+        // The 10-second retry sleep on failure extends the vulnerability window.
         t = KafkaThread.daemon(String.format("kafka-kerberos-refresh-thread-%s", principal), () -> {
             log.info("[Principal={}]: TGT refresh thread started.", principal);
             while (true) {  // renewal thread's main loop. if it exits from here, thread will exit.
@@ -204,6 +236,11 @@ public class KerberosLogin extends AbstractLogin {
                         + " Exiting refresh thread.", principal, nextRefreshDate);
                     return;
                 }
+                // SECURITY (MEDIUM): Executes external shell command (kinit) for ticket
+                // cache renewal. Exploit: If kinitCmd config is attacker-controlled,
+                // arbitrary command execution is possible. The kinitCmd value comes from
+                // SaslConfigs.SASL_KERBEROS_KINIT_CMD (user-configurable).
+                // Improvement: Validate kinitCmd against an allowlist of known kinit paths.
                 if (isUsingTicketCache) {
                     String kinitArgs = "-R";
                     int retry = 1;
@@ -286,6 +323,11 @@ public class KerberosLogin extends AbstractLogin {
         return serviceName;
     }
 
+    // DECISION: Service name resolved from JAAS config first, then Kafka config, with conflict
+    // detection. Throws IllegalArgumentException if both are set to different values — fail-fast
+    // over silent override.
+    // Alternative: Prefer Kafka config over JAAS — rejected for backward compatibility with
+    // existing deployments.
     private static String getServiceName(Map<String, ?> configs, String contextName, Configuration configuration) {
         List<AppConfigurationEntry> configEntries = Arrays.asList(configuration.getAppConfigurationEntry(contextName));
         String jaasServiceName = JaasContext.configEntryOption(configEntries, JaasUtils.SERVICE_NAME, null);
@@ -305,6 +347,11 @@ public class KerberosLogin extends AbstractLogin {
     }
 
 
+    // DECISION: Refresh time = start + (expires - start) * (windowFactor + jitter * random).
+    // Jitter prevents thundering-herd when multiple brokers renew simultaneously against
+    // the same KDC.
+    // Alternative: Fixed interval refresh — rejected because it doesn't adapt to TGT
+    // lifetime changes.
     private long getRefreshTime(KerberosTicket tgt) {
         long start = tgt.getStartTime().getTime();
         long expires = tgt.getEndTime().getTime();
@@ -320,6 +367,11 @@ public class KerberosLogin extends AbstractLogin {
             return proposedRefresh;
     }
 
+    // SECURITY (LOW): Iterates Subject's private credentials to find the TGT by matching
+    // the krbtgt service principal pattern. Returns null if no TGT found (triggers
+    // minTimeBeforeRelogin wait).
+    // Risk: If Subject.getPrivateCredentials throws SecurityException under a restrictive
+    // SecurityManager, TGT lookup silently fails and renewal stops.
     private KerberosTicket getTGT() {
         Set<KerberosTicket> tickets = subject.getPrivateCredentials(KerberosTicket.class);
         for (KerberosTicket ticket : tickets) {
@@ -343,6 +395,15 @@ public class KerberosLogin extends AbstractLogin {
         return true;
     }
 
+    // SECURITY (MEDIUM): reLogin synchronizes on KerberosLogin.class (class-level lock).
+    // This prevents concurrent re-login attempts but blocks all other KerberosLogin
+    // instances during renewal.
+    // Exploit: A slow KDC response could cause a denial-of-service by holding the class lock.
+    // Improvement: Use instance-level locking or a timeout on the synchronized block.
+    // DECISION: Class-level synchronized block (KerberosLogin.class) instead of instance lock.
+    // Rationale: Prevents multiple JVM-wide concurrent re-login attempts that could overwhelm
+    // the KDC. Alternative: Per-instance lock — rejected because concurrent re-logins from
+    // multiple instances could cause KDC throttling or account lockout.
     /**
      * Re-login a principal. This method assumes that {@link #login()} has happened already.
      * @throws javax.security.auth.login.LoginException on a failure
@@ -365,6 +426,9 @@ public class KerberosLogin extends AbstractLogin {
             //the Java kerberos login module code, only the kerberos credentials
             //are cleared. If previous logout succeeded but login failed, we shouldn't
             //logout again since duplicate logout causes NPE from Java 9 onwards.
+            // DECISION: Check subject non-null AND principals non-empty before logout.
+            // This guards against duplicate logout which causes NPE from Java 9 onwards
+            // (JDK Kerberos login module behavior change).
             if (subject != null && !subject.getPrincipals().isEmpty()) {
                 logout();
             }
