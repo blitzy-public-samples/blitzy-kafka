@@ -19,4 +19,9 @@ package org.apache.kafka.common.network;
 /**
  * Connection mode for SSL and SASL connections.
  */
+// DECISION: Distinguishes CLIENT (connection initiator) from SERVER (connection acceptor) mode.
+// This enum determines the SASL role: CLIENT mode creates SaslClientAuthenticator (initiates
+// SASL challenge-response), SERVER mode creates SaslServerAuthenticator (responds to SASL
+// challenges). The mode is set by ChannelBuilders based on the caller context.
+// Alternative: Boolean isServer flag — rejected for clarity and extensibility.
 public enum ConnectionMode { CLIENT, SERVER }
