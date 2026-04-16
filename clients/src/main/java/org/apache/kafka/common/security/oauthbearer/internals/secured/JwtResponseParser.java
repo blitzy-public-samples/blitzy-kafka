@@ -24,9 +24,32 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.io.IOException;
 
+// SECURITY: (MEDIUM) Parses JSON response from OAuth token endpoint to extract JWT.
+// Why: The token endpoint response is untrusted network input. A compromised token endpoint
+// could return malicious JSON payloads designed to exploit the JSON parser or downstream
+// token consumers.
+// Exploit: (1) Malformed JSON from a compromised endpoint could cause Jackson parsing errors
+// (IOException), which are wrapped in JwtRetrieverException — no information leakage. (2) A
+// response containing a very large JSON document could cause OOM during parsing — the response
+// body size is only limited by HttpJwtRetriever's stream copy buffer. (3) A response where
+// /access_token contains a non-JWT string could bypass downstream validation if validators
+// assume well-formed JWT input.
+// Improvement: Add response body size limit before JSON parsing. Validate that the extracted
+// token has the expected JWT structure (3 dot-separated segments) before returning.
+
+// CROSS-CUTTING: Used by HttpJwtRetriever.retrieve() to parse the token endpoint JSON response.
+// Depends on: Jackson ObjectMapper (JSON parsing), JwtRetrieverException (error reporting).
+// No state — can be instantiated per-call (as HttpJwtRetriever does at line 173).
+// Impact: Changes to JSON path extraction affect all OAuth token retrieval flows.
 public class JwtResponseParser {
 
+    // DECISION: Checks /access_token first, then /id_token as fallback. Rationale: OAuth 2.0
+    // token responses typically use access_token; OIDC may additionally include id_token.
+    // The first non-blank match is returned — in the rare case both exist, access_token wins.
     private static final String[] JSON_PATHS = new String[] {"/access_token", "/id_token"};
+    // SECURITY: (LOW) Truncates response body to 1000 chars in error messages to prevent log
+    // flooding from large malicious responses. The full response body is still parsed by Jackson
+    // (no size limit on parsing) — this only affects the error message snippet.
     private static final int MAX_RESPONSE_BODY_LENGTH = 1000;
 
     public String parseJwt(String responseBody) throws JwtRetrieverException {
