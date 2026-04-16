@@ -44,6 +44,33 @@ import javax.security.auth.login.AppConfigurationEntry;
  * is separated out here for easier, more direct testing.
  */
 
+// SECURITY: (MEDIUM) JAAS option extraction utility — reads SASL/SSL configuration from
+// JAAS login module options. These options may contain sensitive material (passwords, key
+// store paths, trust store configurations).
+// Why: JAAS options are the primary mechanism for passing SSL client configuration to the
+// OAUTHBEARER HTTP components (token endpoint, JWKS endpoint). Misconfigured SSL options
+// (e.g., trust-all trust manager) weaken the TLS security of OAuth token retrieval.
+// Exploit: A malicious JAAS configuration could specify a custom SSLSocketFactory that
+// disables certificate verification, enabling MITM attacks on the token/JWKS endpoints.
+// The createSSLSocketFactory() method creates the factory from JAAS options without
+// additional validation of the resulting SSL context's trust configuration.
+// Improvement: Validate that the created SSLContext has a non-empty trust store and uses
+// TLS 1.2+ protocol. Log a WARNING if the trust store is empty or uses weak protocols.
+
+// DECISION: Centralized JAAS option parsing rather than per-class extraction. Alternatives:
+// (1) Each class reads JAAS options directly, (2) Inject options via constructor. Rationale:
+// Centralization ensures consistent mechanism validation, option extraction, and SSL factory
+// creation. Reduces code duplication across HttpJwtRetriever, ClientCredentialsJwtRetriever,
+// and VerificationKeyResolverFactory.
+
+// CROSS-CUTTING: Used by HttpJwtRetriever (SSL for token endpoint),
+// VerificationKeyResolverFactory (SSL for JWKS endpoint), ClientCredentialsJwtRetriever,
+// and JwtBearerJwtRetriever.
+// Depends on: SslFactory (SSL context creation), DefaultSslEngineFactory (SSLContext
+// access), OAuthBearerLoginModule (mechanism name constant), ConfigDef (SSL config
+// definitions).
+// Contract: Constructor validates mechanism and extracts options. createSSLSocketFactory()
+// creates a configured SSLSocketFactory. Thread-safe for read-only access.
 public class JaasOptionsUtils {
 
     private static final Logger log = LoggerFactory.getLogger(JaasOptionsUtils.class);
@@ -58,6 +85,10 @@ public class JaasOptionsUtils {
         this.options = getOptions(saslMechanism, jaasConfigEntries);
     }
 
+    // SECURITY: (LOW) Extracts options map from JAAS config entry. Validates mechanism
+    // name matches OAUTHBEARER and exactly 1 config entry exists. The returned map is
+    // unmodifiable (Collections.unmodifiableMap) to prevent downstream modification of
+    // JAAS state.
     public static Map<String, Object> getOptions(String saslMechanism, List<AppConfigurationEntry> jaasConfigEntries) {
         if (!OAuthBearerLoginModule.OAUTHBEARER_MECHANISM.equals(saslMechanism))
             throw new IllegalArgumentException(String.format("Unexpected SASL mechanism: %s", saslMechanism));
@@ -72,10 +103,19 @@ public class JaasOptionsUtils {
         return options.containsKey(name);
     }
 
+    // DECISION: Only creates SSLSocketFactory when URL protocol is HTTPS. For HTTP URLs,
+    // no custom SSL is needed (and would be ignored by HttpURLConnection). For file://
+    // URLs, SSL is not applicable. Rationale: Avoids unnecessary SSL context
+    // initialization overhead.
     public boolean shouldCreateSSLSocketFactory(URL url) {
         return url.getProtocol().equalsIgnoreCase("https");
     }
 
+    // DECISION: Creates a temporary ConfigDef with SSL client support, then wraps JAAS
+    // options in an AbstractConfig to extract typed SSL config values. Alternative:
+    // Manual option extraction by key name. Rationale: Reuses Kafka's SSL config parsing
+    // logic (ConfigDef validation, type coercion, default values) for consistency with
+    // broker SSL configuration.
     public Map<String, ?> getSslClientConfig() {
         ConfigDef sslConfigDef = new ConfigDef();
         sslConfigDef.withClientSslSupport();
@@ -83,6 +123,12 @@ public class JaasOptionsUtils {
         return sslClientConfig.values();
     }
 
+    // SECURITY: (MEDIUM) Creates SSLSocketFactory from JAAS SSL options via SslFactory.
+    // The factory is used for HTTPS connections to the token endpoint and JWKS endpoint.
+    // The SslFactory is configured in CLIENT mode — it will verify server certificates
+    // using the trust store specified in JAAS options (or JVM default if not specified).
+    // Note: The SSL config values are logged at DEBUG level — ensure DEBUG logging is
+    // not enabled in production as it may reveal trust/key store paths.
     public SSLSocketFactory createSSLSocketFactory() {
         Map<String, ?> sslClientConfig = getSslClientConfig();
         SslFactory sslFactory = new SslFactory(ConnectionMode.CLIENT);
