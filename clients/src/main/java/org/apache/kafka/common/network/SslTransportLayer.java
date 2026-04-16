@@ -55,7 +55,54 @@ import javax.net.ssl.SSLSession;
  *   These messages use a handshake content type and are encrypted under
  *   the appropriate application traffic key."
  */
+// SECURITY: (HIGH) SSL/TLS transport layer implementing non-blocking JSSE
+// SSLEngine handling. This class is the cryptographic boundary for all
+// encrypted Kafka communication (SSL and SASL_SSL).
+// Why: All data encryption/decryption for TLS-protected connections passes
+// through this class. A vulnerability here compromises confidentiality and
+// integrity of all Kafka traffic.
+// Risk: (1) TLS renegotiation attack -- a malicious peer could request
+// renegotiation to trigger DoS or key material exposure.
+// (2) SSLEngine state confusion -- incorrect buffer management during
+// handshake could leak plaintext data into encrypted buffers or vice versa.
+// (3) Post-handshake TLS 1.3 message manipulation -- post-handshake
+// messages are encrypted but could inject unexpected state changes.
+// Mitigation: Renegotiation is explicitly rejected for TLS < 1.3 (see
+// read/write methods). For TLS 1.3, key updates are allowed per the
+// protocol specification.
+// Improvement: Consider setting SSLEngine parameters to disable
+// renegotiation at the engine level via
+// SSLParameters.setEnableRetransmissions(false) where available, rather
+// than relying solely on application-level rejection. Also consider adding
+// metrics for rejected renegotiation attempts for security monitoring.
+//
+// CROSS-CUTTING: Implements TransportLayer interface consumed by
+// KafkaChannel (this package). SslTransportLayer is created by
+// SslChannelBuilder (this package) which delegates to SslFactory
+// (security/ssl/) for SSLEngine configuration. Changes to SslFactory's
+// SSLEngine setup (cipher suites, protocols, trust managers) directly
+// affect this layer's behavior.
+// Contract: ready() returns true only when handshake is complete and data
+// can be transferred.
+// Impact: If SslFactory changes the SSLEngine configuration (e.g., enables
+// client auth), the handshake sequence in doHandshake() may require
+// additional NEED_UNWRAP iterations.
 public class SslTransportLayer implements TransportLayer {
+    // SECURITY: The handshake state machine controls the authentication
+    // lifecycle. Each state transition is a security-critical operation:
+    // NOT_INITIALIZED -> HANDSHAKE: SSLEngine.beginHandshake() initiates
+    //   cryptographic negotiation
+    // HANDSHAKE -> HANDSHAKE_FAILED: Authentication failure, connection
+    //   must be terminated
+    // HANDSHAKE -> POST_HANDSHAKE: TLS 1.3 only -- handshake complete but
+    //   post-handshake messages pending
+    // POST_HANDSHAKE -> READY: Post-handshake processing complete, data
+    //   transfer allowed
+    // HANDSHAKE -> READY: TLS < 1.3 -- handshake complete, data transfer
+    //   allowed
+    // Any state -> CLOSING: Orderly shutdown with close_notify
+    // Risk: If state transitions are not strictly enforced, data could be
+    // sent/received during an incomplete handshake, bypassing encryption.
     private enum State {
         // Initial state
         NOT_INITIALIZED,
@@ -174,6 +221,17 @@ public class SslTransportLayer implements TransportLayer {
     /**
     * Sends an SSL close message and closes socketChannel.
     */
+    // SECURITY: (MEDIUM) Orderly TLS shutdown sending close_notify before
+    // closing the socket. The close_notify alert prevents truncation attacks
+    // where an attacker prematurely terminates the TLS stream, causing the
+    // receiver to treat an incomplete message as complete.
+    // Risk: If close_notify fails to send (e.g., network error), the peer
+    // may not detect the truncation. The code catches IOException during
+    // close_notify and proceeds with socket close regardless -- this is
+    // acceptable because the connection is being terminated.
+    // Note: sslEngine.closeInbound() exception is logged at DEBUG level
+    // because peers commonly fail to send close_notify, violating the TLS
+    // spec but not indicating an attack.
     @Override
     public void close() throws IOException {
         State prevState = state;
@@ -276,6 +334,17 @@ public class SslTransportLayer implements TransportLayer {
     * @throws IOException if read/write fails
     * @throws SslAuthenticationException if handshake fails with an {@link SSLException}
     */
+    // SECURITY: (HIGH) Drives the TLS handshake state machine. Renegotiation
+    // is explicitly rejected (renegotiationException) to prevent TLS
+    // renegotiation attacks where a MITM injects data into the
+    // pre-renegotiation stream that the server processes as authenticated.
+    // This is a well-known attack vector (CVE-2009-3555).
+    // Risk: If the renegotiation check is removed or bypassed, an attacker
+    // positioned as MITM could inject arbitrary data that appears
+    // authenticated to the server.
+    // Improvement: Consider also checking SSLSession.getProtocol() to
+    // conditionally apply renegotiation protection only for TLS versions
+    // that support it.
     @Override
     public void handshake() throws IOException {
         if (state == State.NOT_INITIALIZED) {
@@ -331,6 +400,19 @@ public class SslTransportLayer implements TransportLayer {
         }
     }
 
+    // COMPLEXITY: 89 lines -- SSLEngine handshake state machine dispatcher.
+    // Structure: Switch on handshakeStatus (NEED_TASK, NEED_WRAP,
+    // NEED_UNWRAP, FINISHED, NOT_HANDSHAKING). NEED_WRAP falls through to
+    // NEED_UNWRAP when possible to complete both operations in a single
+    // call. Each branch handles SSLEngineResult.Status for buffer mgmt.
+    // Key paths: NEED_WRAP -> flush -> fall-through to NEED_UNWRAP
+    // (optimization). BUFFER_OVERFLOW in NEED_WRAP -> expand
+    // netWriteBuffer. BUFFER_OVERFLOW in NEED_UNWRAP -> expand
+    // appReadBuffer. BUFFER_UNDERFLOW -> expand netReadBuffer.
+    // Exit: Returns void; handshakeFinished() is called when FINISHED
+    // status is reached.
+    // Note: @SuppressWarnings("fallthrough") is intentional -- NEED_WRAP
+    // falls through to NEED_UNWRAP for efficiency.
     @SuppressWarnings("fallthrough")
     private void doHandshake() throws IOException {
         boolean read = key.isReadable();
@@ -450,6 +532,20 @@ public class SslTransportLayer implements TransportLayer {
      * Checks if the handshake status is finished
      * Sets the interestOps for the selectionKey.
      */
+    // DECISION: TLS 1.3 enters POST_HANDSHAKE state instead of READY after
+    // handshake completion. This is because TLS 1.3 may send post-handshake
+    // messages (NewSessionTicket) that must be processed before the channel
+    // is truly ready for application data. For TLS < 1.3, the channel
+    // transitions directly to READY.
+    // Alternatives: (1) Treat TLS 1.3 the same as older versions and go
+    // straight to READY, risking that post-handshake messages are processed
+    // out-of-order. (2) Buffer all post-handshake messages internally.
+    // Rationale: The POST_HANDSHAKE intermediate state correctly models the
+    // TLS 1.3 protocol semantics where the handshake is not truly complete
+    // until post-handshake messages are consumed.
+    // The protocol version check uses string comparison
+    // (session.getProtocol().equals("TLSv1.3")) because
+    // SSLSession.getProtocol() returns the negotiated protocol as a string.
     private void handshakeFinished() throws IOException {
         // SSLEngine.getHandshakeStatus is transient and it doesn't record FINISHED status properly.
         // It can move from FINISHED status to NOT_HANDSHAKING after the handshake is completed.
@@ -556,6 +652,20 @@ public class SslTransportLayer implements TransportLayer {
     *         and no more data is available
     * @throws IOException if some other I/O error occurs
     */
+    // COMPLEXITY: 95 lines -- Primary read path decrypting data from network
+    // to application buffer.
+    // Structure: (1) Check state (CLOSING returns -1, not-ready returns 0),
+    // (2) Drain existing decrypted data from appReadBuffer, (3) Loop: read
+    // from socket -> unwrap via SSLEngine -> handle Status (OK,
+    // BUFFER_OVERFLOW, BUFFER_UNDERFLOW, CLOSED) -> copy decrypted data to
+    // dst.
+    // Key paths: BUFFER_OVERFLOW requires expanding appReadBuffer.
+    // BUFFER_UNDERFLOW requires expanding netReadBuffer. CLOSED signals
+    // end-of-stream. POST_HANDSHAKE -> READY transition occurs when first
+    // application data is received (TLS 1.3).
+    // Exit: Returns bytes read (>=0), or -1 on close. Throws IOException
+    // on I/O error, SslAuthenticationException on post-handshake failure,
+    // EOFException on unexpected EOF.
     @Override
     public int read(ByteBuffer dst) throws IOException {
         if (state == State.CLOSING) return -1;
@@ -584,6 +694,15 @@ public class SslTransportLayer implements TransportLayer {
                 SSLEngineResult unwrapResult;
                 try {
                     unwrapResult = sslEngine.unwrap(netReadBuffer, appReadBuffer);
+                    // SECURITY: TLS 1.3 specific -- after handshake
+                    // completes, the server may send post-handshake
+                    // messages (NewSessionTicket, KeyUpdate). These are
+                    // processed during read(). Once actual application
+                    // data is received (appReadBuffer.position() != 0),
+                    // we transition to READY state. If an SSLException
+                    // occurs during post-handshake processing, it is
+                    // treated as an authentication failure because the
+                    // handshake is not truly complete yet.
                     if (state == State.POST_HANDSHAKE && appReadBuffer.position() != 0) {
                         // For TLSv1.3, we have finished processing post-handshake messages since we are now processing data
                         state = State.READY;
@@ -597,7 +716,13 @@ public class SslTransportLayer implements TransportLayer {
                         throw e;
                 }
                 netReadBuffer.compact();
-                // reject renegotiation if TLS < 1.3, key updates for TLS 1.3 are allowed
+                // SECURITY: (HIGH) Explicit renegotiation rejection during
+                // data read for TLS < 1.3. For TLS 1.3, NEED_WRAP/
+                // NEED_UNWRAP during data transfer indicates a key update,
+                // which is a legitimate protocol operation (RFC 8446
+                // Section 4.6.3). For older TLS versions, any handshake
+                // status during data transfer indicates renegotiation,
+                // which is rejected to prevent CVE-2009-3555 style attacks.
                 if (unwrapResult.getHandshakeStatus() != HandshakeStatus.NOT_HANDSHAKING &&
                         unwrapResult.getHandshakeStatus() != HandshakeStatus.FINISHED &&
                         unwrapResult.getStatus() == Status.OK &&
@@ -706,6 +831,14 @@ public class SslTransportLayer implements TransportLayer {
     * @return The number of bytes read from src, possibly zero, or -1 if the channel has reached end-of-stream
     * @throws IOException If some other I/O error occurs
     */
+    // COMPLEXITY: 32 lines -- Encrypts and sends data via SSLEngine.wrap().
+    // Structure: Loop while netWriteBuffer can be flushed and src has
+    // remaining data: (1) Clear netWriteBuffer, (2) SSLEngine.wrap(src,
+    // netWriteBuffer), (3) Flip netWriteBuffer, (4) Handle Status (OK,
+    // BUFFER_OVERFLOW, BUFFER_UNDERFLOW, CLOSED).
+    // Key paths: BUFFER_OVERFLOW requires expanding netWriteBuffer.
+    // BUFFER_UNDERFLOW should never occur during wrap (IllegalStateException
+    // thrown). CLOSED throws EOFException.
     @Override
     public int write(ByteBuffer src) throws IOException {
         if (state == State.CLOSING)
@@ -719,7 +852,10 @@ public class SslTransportLayer implements TransportLayer {
             SSLEngineResult wrapResult = sslEngine.wrap(src, netWriteBuffer);
             netWriteBuffer.flip();
 
-            // reject renegotiation if TLS < 1.3, key updates for TLS 1.3 are allowed
+            // SECURITY: (HIGH) Mirror of the renegotiation rejection in
+            // read(). Both read and write paths must reject renegotiation
+            // independently because a MITM could trigger renegotiation
+            // from either direction.
             if (wrapResult.getHandshakeStatus() != HandshakeStatus.NOT_HANDSHAKING &&
                     wrapResult.getStatus() == Status.OK &&
                     !sslEngine.getSession().getProtocol().equals(TLS13)) {
@@ -887,6 +1023,12 @@ public class SslTransportLayer implements TransportLayer {
      * retries and report the failure. If `flush` is true, exceptions are propagated after
      * any pending outgoing bytes are flushed to ensure that the peer is notified of the failure.
      */
+    // SECURITY: SSL handshake failures are propagated as
+    // SslAuthenticationException to prevent retries -- the client should
+    // not retry with the same (likely misconfigured) credentials. The
+    // flush parameter controls whether remaining outgoing bytes are sent
+    // before throwing -- this ensures the peer receives the TLS alert
+    // message explaining the failure.
     private void handshakeFailure(SSLException sslException, boolean flush) {
         //Release all resources such as internal buffers that SSLEngine is managing
         log.debug("SSL Handshake failed", sslException);
@@ -922,6 +1064,18 @@ public class SslTransportLayer implements TransportLayer {
     // We want to handle a) as a non-retriable SslAuthenticationException and b) as a retriable IOException.
     // To do this we need to rely on the exception string. Since it is safer to throw a retriable exception
     // when we are not sure, we will treat only the first exception string as a handshake exception.
+    // SECURITY: (MEDIUM) Distinguishes between retriable I/O errors and
+    // non-retriable authentication failures based on SSLException subclass
+    // and message string. SSLHandshakeException, SSLProtocolException,
+    // SSLPeerUnverifiedException, SSLKeyException are all treated as
+    // authentication failures. For base SSLException, the message is
+    // checked for known patterns: "Unrecognized SSL message"
+    // (misconfiguration) and "Received fatal alert" (peer-reported error)
+    // are treated as auth failures.
+    // Risk: Relying on exception message strings is fragile -- a JDK
+    // update could change messages.
+    // Improvement: Track known SSLException message patterns and alert on
+    // unrecognized patterns to detect JDK behavioral changes early.
     private void maybeProcessHandshakeFailure(SSLException sslException, boolean flush, IOException ioException) throws IOException {
         if (sslException instanceof SSLHandshakeException || sslException instanceof SSLProtocolException ||
                 sslException instanceof SSLPeerUnverifiedException || sslException instanceof SSLKeyException ||
@@ -999,6 +1153,27 @@ public class SslTransportLayer implements TransportLayer {
             hasBytesBuffered = false;
     }
 
+    // COMPLEXITY: 60 lines -- Encrypted file-to-socket transfer (no
+    // zero-copy possible with TLS).
+    // Structure: (1) State and flush checks, (2) Lazy allocation of direct
+    // ByteBuffer (32KB), (3) Loop: read from FileChannel ->
+    // write(fileChannelBuffer) encrypts via SSLEngine -> break if partial
+    // write or EOF.
+    // Key paths: fileChannelBuffer.hasRemaining() after write indicates
+    // partial write -- must drain buffer before next FileChannel.read to
+    // maintain position tracking.
+    // DECISION: 32KB transfer buffer size balances disk read efficiency,
+    // memory overhead per connection, and typical socket send buffer size
+    // (100KB default). Direct buffer avoids one heap-to-heap copy since
+    // SSLEngine performs an internal copy anyway.
+    // Alternatives: (1) Use a larger buffer (e.g. 64KB) for better disk I/O
+    // throughput at the cost of higher per-connection memory.
+    // (2) Use a heap buffer, but this adds an unnecessary copy since
+    // FileChannel.read() to heap buffer copies from direct buffer
+    // internally.
+    // Rationale: 32KB is <= netWriteBuffer (16KB packet size) * 2 and fits
+    // within the typical 100KB socket send buffer, allowing most writes to
+    // complete in a single syscall.
     @Override
     public long transferFrom(FileChannel fileChannel, long position, long count) throws IOException {
         if (state == State.CLOSING)
