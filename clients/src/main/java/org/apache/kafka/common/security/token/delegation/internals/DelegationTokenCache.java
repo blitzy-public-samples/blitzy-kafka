@@ -31,6 +31,27 @@ import java.util.concurrent.ConcurrentHashMap;
 
 public class DelegationTokenCache {
 
+    // SECURITY (MEDIUM): Thread-safe in-memory cache for active delegation tokens.
+    // Stores tokenId->TokenInformation, hmac->tokenId, and tokenId->hmac mappings using
+    // ConcurrentHashMap for lock-free reads. However, multi-map updates in updateCache()
+    // and removeToken() are NOT atomic -- a concurrent reader may observe a partially-updated
+    // state (e.g., token info present but hmac mapping absent, or vice versa).
+    // Exploit: If token revocation (removeToken) races with authentication lookup
+    // (tokenForHmac), a revoked token's HMAC could still resolve to a valid TokenInformation
+    // in the window between the tokenCache.remove() and hmacTokenIdCache.remove() calls.
+    // Improvement: Consider wrapping multi-map mutations in a synchronized block or using
+    // a versioned/CAS-based approach to ensure atomic token lifecycle transitions.
+    //
+    // DECISION: Uses three separate ConcurrentHashMaps rather than a single composite map
+    // to optimize for the common read path (HMAC->token lookup during SCRAM authentication)
+    // at the cost of non-atomic multi-map mutations. Lock-free reads provide better
+    // throughput under high-concurrency authentication workloads.
+    //
+    // CROSS-CUTTING: Consumed by authenticator/CredentialCache for SCRAM credential storage,
+    // core/DelegationTokenManager for broker-side token lifecycle, and
+    // ScramServerCallbackHandler for delegation token authentication during SASL/SCRAM
+    // handshake.
+
     private final CredentialCache credentialCache = new CredentialCache();
 
     //Cache to hold all the tokens
@@ -57,6 +78,9 @@ public class DelegationTokenCache {
         return tokenInfo == null ? null : tokenInfo.owner().getName();
     }
 
+    // SECURITY (MEDIUM): Non-atomic multi-map update -- adds token info, SCRAM credentials,
+    // and HMAC mappings in sequence. A concurrent authentication attempt during this window
+    // may find partial state (token info without SCRAM credentials, or vice versa).
     public void updateCache(DelegationToken token, Map<String, ScramCredential> scramCredentialMap) {
         //Update TokenCache
         String tokenId =  token.tokenInfo().tokenId();
@@ -69,6 +93,9 @@ public class DelegationTokenCache {
         tokenIdHmacCache.put(tokenId, hmac);
     }
 
+    // SECURITY (MEDIUM): Token revocation -- removes token info and clears SCRAM credentials.
+    // The removeToken->updateCredentials sequence is not atomic; a concurrent SCRAM auth
+    // may still find valid credentials after token info has been removed.
     public void removeCache(String tokenId) {
         removeToken(tokenId);
         updateCredentials(tokenId, new HashMap<>());
@@ -87,6 +114,10 @@ public class DelegationTokenCache {
         return tokenCache.put(tokenId, tokenInfo);
     }
 
+    // DECISION: Removes from tokenCache first, then cascades to hmac maps.
+    // This ordering ensures that tokenId-based lookups fail first, reducing the
+    // window for stale HMAC-based lookups. However, the multi-step removal is
+    // still non-atomic across the three ConcurrentHashMaps.
     public void removeToken(String tokenId) {
         TokenInformation tokenInfo = tokenCache.remove(tokenId);
         if (tokenInfo != null) {
@@ -109,6 +140,9 @@ public class DelegationTokenCache {
         return credentialCache.cache(mechanism, ScramCredential.class);
     }
 
+    // CROSS-CUTTING: Integrates with ScramMechanism.mechanismNames() to update per-mechanism
+    // SCRAM credential caches. Each SCRAM mechanism (SCRAM-SHA-256, SCRAM-SHA-512) maintains
+    // an independent credential cache keyed by tokenId.
     private void updateCredentials(String tokenId, Map<String, ScramCredential> scramCredentialMap) {
         for (String mechanism : ScramMechanism.mechanismNames()) {
             CredentialCache.Cache<ScramCredential> cache = credentialCache.cache(mechanism, ScramCredential.class);
