@@ -27,6 +27,10 @@ import java.util.function.BiConsumer;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
+// DECISION: Static utility class for collection operations not available in JDK Collections
+// or Guava. Alternative: Use Guava's Multimaps.index() and Maps.difference(). Rationale:
+// Kafka avoids Guava dependency in clients/ module to minimize transitive dependency footprint
+// for end users — these handful of utility methods are cheaper than a full Guava dependency.
 public final class CollectionUtils {
 
     private CollectionUtils() {}
@@ -47,6 +51,10 @@ public final class CollectionUtils {
      * @param <T> Partition data type
      * @return partitioned data
      */
+    // DECISION: Groups by TopicPartition.topic() into HashMap — does not preserve input
+    // ordering. Alternative: LinkedHashMap would preserve topic ordering from the input.
+    // Rationale: HashMap chosen for lower overhead; protocol request construction callers
+    // handle topic ordering independently if needed.
     public static <T> Map<String, Map<Integer, T>> groupPartitionDataByTopic(Map<TopicPartition, ? extends T> data) {
         Map<String, Map<Integer, T>> dataByTopic = new HashMap<>();
         for (Map.Entry<TopicPartition, ? extends T> entry : data.entrySet()) {
