@@ -31,6 +31,14 @@ import static java.lang.invoke.MethodType.methodType;
  *
  * The implementation was inspired by the one in Lucene's MMapDirectory.
  */
+// DECISION: Uses reflection/MethodHandle to invoke Unsafe.invokeCleaner() for deterministic
+// MappedByteBuffer unmapping. Alternative: Wait for GC to finalize. Rationale: Kafka maps log
+// segment index files into memory -- without explicit unmapping, file handles are held until GC
+// runs, causing "Too many open files" errors under high segment churn. The reflection approach
+// is necessary because there is no public JDK API for unmapping MappedByteBuffers.
+//
+// CROSS-CUTTING: Called by storage/internals/log/AbstractIndex.java to unmap index files
+// during log segment cleanup. Also used by raft/internals/BatchReader for snapshot unmapping.
 public final class ByteBufferUnmapper {
 
     // null if unmap is not supported
@@ -39,6 +47,9 @@ public final class ByteBufferUnmapper {
     // null if unmap is supported
     private static final RuntimeException UNMAP_NOT_SUPPORTED_EXCEPTION;
 
+    // DECISION: Caches MethodHandle at class load time. Alternative: Lookup on each unmap call.
+    // Rationale: Reflection/MethodHandle lookup is expensive -- caching amortizes the cost across
+    // thousands of unmap operations during log segment cleanup.
     static {
         MethodHandle unmap = null;
         RuntimeException exception = null;
@@ -82,6 +93,12 @@ public final class ByteBufferUnmapper {
     private static MethodHandle lookupUnmapMethodHandle() {
         final MethodHandles.Lookup lookup = lookup();
         try {
+            // SECURITY: Accesses sun.misc.Unsafe via reflection. This bypasses Java module system
+            // encapsulation (requires --add-opens). Risk: If the JVM internalizes Unsafe differently
+            // in future JDK versions, this code will silently fail to unmap. Mitigation: The code
+            // catches all exceptions and stores an explanatory UnsupportedOperationException.
+            // Improvement: Use JEP 471 (Deprecate Memory-Access Methods in sun.misc.Unsafe) when
+            // Kafka's minimum JDK is raised to support the replacement API.
             Class<?> unsafeClass = Class.forName("sun.misc.Unsafe");
             MethodHandle unmapper = lookup.findVirtual(unsafeClass, "invokeCleaner",
                     methodType(void.class, ByteBuffer.class));
