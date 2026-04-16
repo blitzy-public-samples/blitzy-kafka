@@ -18,6 +18,25 @@ package org.apache.kafka.common.network;
 
 import java.io.IOException;
 
+// CROSS-CUTTING: Core send abstraction consumed by Selector.send(), KafkaChannel.setSend(),
+// and all protocol-level send operations. Implementations: ByteBufferSend, NetworkSend,
+// MultiRecordsSend, and RecordsSend (in clients/common/record/). Any change to this interface
+// propagates to all modules that construct or process outgoing Kafka protocol messages,
+// including core/ (RequestChannel, RequestHandlerHelper), clients/ (NetworkClient,
+// SaslServerAuthenticator, SaslClientAuthenticator), and jmh-benchmarks/.
+// Contract: Callers must loop writeTo() until completed() returns true; size() must return
+// the total byte count determined at construction time.
+// Impact: Adding or changing methods here requires updates across all Send implementations
+// and every call site that interacts with outgoing network data.
+
+// DECISION: Minimal interface for outgoing network data. Defines writeTo(TransferableChannel)
+// and completed()/size() for progress tracking. The writeTo() contract allows partial writes
+// — callers must loop until completed() returns true, which matches NIO's non-blocking
+// write semantics where SocketChannel.write() may write fewer bytes than requested.
+// Alternative: Provide a blocking send abstraction — rejected to support the single-threaded
+// non-blocking event loop model in Selector where a single thread services many channels.
+// Risk: Callers that forget to loop until completed() may silently drop data.
+
 /**
  * This interface models the in-progress sending of data.
  */
