@@ -62,8 +62,23 @@ import java.util.function.Supplier;
  * }
  * </pre>
  */
+// DECISION: Thread-safe idempotent close utility using AtomicBoolean.compareAndSet() rather
+// than synchronized blocks or ReentrantLock. Alternative: synchronized close() method with
+// boolean flag. Rationale: CAS-based approach is lock-free and avoids deadlock risk when
+// close() is called from different threads (e.g., application thread + shutdown hook).
+// The atomic guarantees exactly-once initial close semantics — critical for resources like
+// file handles and network connections where double-close causes errors.
+//
+// CROSS-CUTTING: Reusable close-once primitive used by clients/consumer/internals/
+// (ShareConsumeRequestManager, CommitRequestManager), clients/producer/internals/, and
+// connect/runtime/ for resource lifecycle management. Provides assertOpen() guards consumed
+// by any component that needs to reject operations after close. Contract: Thread-safe for
+// all operations; close() is idempotent; assertOpen() throws IllegalStateException if closed.
 public class IdempotentCloser implements AutoCloseable {
 
+    // DECISION: AtomicBoolean rather than volatile boolean. While volatile would suffice for
+    // visibility, AtomicBoolean.compareAndSet() provides the atomic check-and-set needed to
+    // guarantee exactly-once close execution without locks.
     private final AtomicBoolean isClosed;
 
     /**
@@ -82,6 +97,10 @@ public class IdempotentCloser implements AutoCloseable {
         this.isClosed = new AtomicBoolean(isClosed);
     }
 
+    // DECISION: Supplier<String> overload defers message construction until assertion fails.
+    // Alternative: Only String-based assertOpen. Rationale: Message construction may involve
+    // String.format() or concatenation — deferring avoids allocation overhead on the happy path
+    // where the resource is still open (which is the vast majority of calls).
     /**
      * This method serves as an assert that the {@link IdempotentCloser} is still open. If it is open, this method
      * simply returns. If it is closed, a new {@link IllegalStateException} will be thrown using the supplied message.
@@ -155,6 +174,12 @@ public class IdempotentCloser implements AutoCloseable {
      *                          no state will be affected if an exception is thrown during its execution; can be
      *                          {@code null}
      */
+    // DECISION: Two-callback design (onInitialClose, onSubsequentClose) supports distinct
+    // behavior for first vs repeated close. Alternative: Single callback with wasAlreadyClosed
+    // boolean parameter. Rationale: Separate callbacks are more readable at call sites and
+    // enable different strategies — e.g., log a warning on subsequent close without an if/else
+    // branch in the callback. State flip happens BEFORE onInitialClose runs, so the resource
+    // is marked closed even if the cleanup callback throws.
     public void close(final Runnable onInitialClose, final Runnable onSubsequentClose) {
         if (isClosed.compareAndSet(false, true)) {
             if (onInitialClose != null)
