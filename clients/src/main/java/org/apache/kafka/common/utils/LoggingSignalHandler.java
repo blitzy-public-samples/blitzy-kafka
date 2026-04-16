@@ -29,6 +29,15 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
+// DECISION: Signal handler that logs signal receipt before delegating to previous handler.
+// Uses reflection (sun.misc.Signal/SignalHandler) to avoid compile-time dependency on internal
+// JDK API. Alternative: Use ProcessHandle or shutdown hooks only. Rationale: Logging the signal
+// name (SIGTERM, SIGINT, etc.) provides operational visibility into why a broker is shutting down
+// — shutdown hooks alone don't capture the triggering signal.
+
+// CROSS-CUTTING: Registered by Kafka broker (BrokerServer, KafkaRaftServer) during startup.
+// Preserves and chains previous signal handlers to maintain compatibility with external
+// signal-based monitoring tools.
 public class LoggingSignalHandler {
 
     private static final Logger log = LoggerFactory.getLogger(LoggingSignalHandler.class);
@@ -72,6 +81,9 @@ public class LoggingSignalHandler {
         log.info("Registered signal handlers for {}", String.join(", ", SIGNALS));
     }
 
+    // DECISION: Reflection+Proxy approach to avoid importing sun.misc.Signal directly. This keeps
+    // the code compilable on JVMs that don't have sun.misc.Signal (though all supported JVMs do).
+    // The proxy wraps a lambda handler into a SignalHandler interface implementation.
     private Object createSignalHandler(final Map<String, Object> jvmSignalHandlers) {
         InvocationHandler invocationHandler = new InvocationHandler() {
 
@@ -87,6 +99,10 @@ public class LoggingSignalHandler {
                 signalHandlerHandleMethod.invoke(signalHandler, signal);
             }
 
+            // SECURITY: Signal handlers execute in a restricted context — avoid complex operations
+            // (no locks, no I/O beyond logging). Risk: A deadlock in the signal handler would
+            // prevent graceful shutdown. Mitigation: Handler only logs and delegates; actual
+            // cleanup happens in shutdown hooks.
             @Override
             public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
                 Object signal = args[0];
