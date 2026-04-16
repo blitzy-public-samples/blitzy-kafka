@@ -91,6 +91,17 @@ import java.util.stream.Collector;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+// CROSS-CUTTING: The single most widely imported class in the Kafka codebase -- consumed by
+// virtually every module: clients/, core/, streams/, connect/, metadata/, server/, storage/,
+// coordinator-common/, group-coordinator/, transaction-coordinator/, share-coordinator/,
+// raft/, tools/, and generator/. Methods here are foundational infrastructure. Any behavioral
+// change (even in edge cases) can cascade across the entire Kafka ecosystem.
+//
+// DECISION: Monolithic utility class rather than domain-specific utility classes
+// (ByteArrayUtils, ReflectionUtils, IOUtils, etc.). Alternative: Split into focused utility
+// classes. Rationale: Historical convention -- Utils has grown organically since Kafka 0.8.
+// Splitting would break hundreds of import statements across all modules. The class is
+// stateless (all static methods) so the monolithic structure has no runtime cost.
 public final class Utils {
 
     private Utils() {}
@@ -225,6 +236,11 @@ public final class Utils {
         return (short) Math.min(first, second);
     }
 
+    // DECISION: Custom UTF-8 length calculation using codepoint-level byte counting rather
+    // than String.getBytes(UTF_8).length. Alternative: Allocate byte[] and measure. Rationale:
+    // Avoids a temporary byte[] allocation on every call -- critical for message size
+    // pre-computation in RecordAccumulator where utf8Length() is called per-record to
+    // estimate batch sizes before committing to a partition buffer.
     /**
      * Get the length for UTF8-encoding a string without encoding it first
      *
@@ -343,6 +359,14 @@ public final class Utils {
         return Arrays.copyOf(src, src.length);
     }
 
+    // SECURITY: Constant-time character array comparison to prevent timing attacks. The loop
+    // always iterates over all characters in the first array regardless of where mismatches
+    // occur, so execution time is independent of content. Risk: A standard Arrays.equals()
+    // short-circuits on first mismatch, leaking information about how many leading chars
+    // match -- a bad actor could use statistical timing analysis to brute-force SCRAM
+    // passwords or SASL credentials one character at a time. Mitigation: Always compares
+    // all characters. Improvement: Consider using MessageDigest.isEqual() for byte-level
+    // comparisons, which provides the same guarantee with JDK backing.
     /**
      * Compares two character arrays for equality using a constant-time algorithm, which is needed
      * for comparing passwords. Two arrays are equal if they have the same length and all
@@ -379,6 +403,11 @@ public final class Utils {
         return matches;
     }
 
+    // DECISION: Wraps Thread.sleep() to swallow InterruptedException and reset the interrupt
+    // flag. Alternative: Propagate InterruptedException to callers. Rationale: Many Kafka
+    // internal loops (backoff, retry, poll) use sleep where interruption means "stop
+    // gracefully" -- the interrupt flag is preserved for the outer loop to detect and exit
+    // cleanly, avoiding forced exception propagation through dozens of call sites.
     /**
      * Sleep for a bit
      * @param ms The duration of the sleep
@@ -392,6 +421,18 @@ public final class Utils {
         }
     }
 
+    // DECISION: Reflection-based class instantiation for plugin-style extensibility
+    // (Serializer, Deserializer, Partitioner, Interceptor, Authorizer, etc.). Alternative:
+    // Java ServiceLoader. Rationale: Kafka predates Java's modular ServiceLoader conventions
+    // -- the config-driven class name approach (e.g., key.serializer=com.example.MySerializer)
+    // is deeply embedded in the configuration model and provides explicit control over which
+    // class is loaded. See also loadClass() and newParameterizedInstance() below.
+    //
+    // SECURITY: Reflective instantiation from user-configured class names. Risk: A malicious
+    // class name in config (e.g., via AdminClient.alterConfigs()) could load arbitrary code.
+    // Mitigation: Only classes assignable to the expected type (Serializer, Partitioner, etc.)
+    // are usable via loadClass(klass, base).asSubclass(base). Improvement: Consider class
+    // allowlisting for security-critical extension points (e.g., Authorizer, LoginModule).
     /**
      * Instantiate the class
      */
@@ -484,6 +525,17 @@ public final class Utils {
         }
     }
 
+    // DECISION: MurmurHash2 (not MurmurHash3) for default partitioning. This matches the
+    // original Kafka partitioner hash function (DefaultPartitioner) for backward compatibility.
+    // Alternative: MurmurHash3 (better distribution, 128-bit output). Rationale: Changing the
+    // hash function would redistribute messages across partitions, breaking ordering guarantees
+    // for existing topics. The 0x9747b28c seed is hardcoded for deterministic cross-language
+    // compatibility (Java, C++, Python clients must produce identical partition assignments).
+    //
+    // COMPLEXITY: 39 lines -- MurmurHash2 implementation with two phases: (1) 4-byte block
+    // processing loop mixing each 32-bit chunk into hash via multiply-shift-XOR, (2) tail
+    // byte processing for remaining 1-3 bytes with fall-through switch. Single exit path.
+    // The magic constants (0x5bd1e995, shift 24) are from the original MurmurHash2 spec.
     /**
      * Generates 32 bit murmur2 hash from byte array
      * @param data byte array to hash
@@ -530,6 +582,11 @@ public final class Utils {
         return h;
     }
 
+    // DECISION: Custom host:port parsing that handles IPv6 bracket notation ([::1]:9092)
+    // and bare hostnames. Alternative: java.net.URI parsing. Rationale: URI requires a
+    // scheme prefix and rejects some valid Kafka address formats (e.g., bare hostname:port
+    // without scheme). The regex-based approach (HOST_PORT_PATTERN) handles all Kafka
+    // address conventions including protocol-prefixed, bracketed IPv6, and simple host:port.
     /**
      * Extracts the hostname from a "host:port" address string.
      * @param address address string to parse
@@ -924,6 +981,12 @@ public final class Utils {
             return cl;
     }
 
+    // DECISION: Attempt Files.move(ATOMIC_MOVE) first, fall back to non-atomic move on
+    // failure (e.g., AtomicMoveNotSupportedException). Alternative: Always use non-atomic
+    // move. Rationale: Atomic move guarantees crash-safe file replacement (critical for log
+    // segment rotation and checkpoint file updates). The fallback handles filesystems (e.g.,
+    // some NFS mounts, cross-device moves) that don't support atomic operations. The parent
+    // directory flush (flushDir) ensures metadata durability on ext4/XFS.
     /**
      * Attempts to move source to target atomically and falls back to a non-atomic move if it fails.
      * This function also flushes the parent directory to guarantee crash consistency.
@@ -1001,6 +1064,13 @@ public final class Utils {
         }
     }
 
+    // DECISION: Two close patterns: closeAll() collects and rethrows exceptions (for
+    // shutdown paths where all close failures should be reported), while closeQuietly()
+    // swallows exceptions and logs them (for finally blocks where the primary exception
+    // matters). Alternative: Single close method with boolean flag. Rationale: Kafka has
+    // both contexts -- finally blocks during normal operation need swallowing, and shutdown
+    // sequences need all errors to surface via suppressed exceptions. The separation makes
+    // intent explicit at each call site.
     /**
      * Closes all the provided closeables.
      * @throws IOException if any of the close methods throws an IOException.
@@ -1243,6 +1313,10 @@ public final class Utils {
         }
     }
 
+    // DECISION: Loop-based read until buffer is full or EOF. Alternative: Single read() call.
+    // Rationale: FileChannel.read() may return fewer bytes than requested (partial read) on
+    // network filesystems or under I/O pressure. The loop guarantees the buffer is filled
+    // completely, which is required for reading fixed-size index entries and log headers.
     /**
      * Read data from the channel to the given byte buffer until there are no bytes remaining in the buffer or the end
      * of the file has been reached.
@@ -1386,6 +1460,12 @@ public final class Utils {
         return result;
     }
 
+    // DECISION: Custom Collector for stream-to-map conversion that allows specifying the
+    // concrete map type (HashMap, TreeMap, LinkedHashMap). Alternative: Collectors.toMap()
+    // with merge function. Rationale: Collectors.toMap() doesn't allow choosing the map
+    // implementation and requires separate key/value extraction functions even when starting
+    // from Map.Entry streams. This collector simplifies filter-then-collect patterns common
+    // in Kafka's config and metadata processing code.
     /**
      * A Collector that offers two kinds of convenience:
      * 1. You can specify the concrete type of the returned Map
@@ -1434,6 +1514,11 @@ public final class Utils {
         };
     }
 
+    // DECISION: Guava-free set algebra (union, intersection, diff below). Alternative: Guava
+    // Sets.union/intersection/difference. Rationale: clients/ JAR must not depend on Guava
+    // (per project policy to minimize transitive dependencies for downstream applications).
+    // These methods cover the specific set operations needed for ISR management,
+    // topic-partition assignment, and consumer group rebalancing across modules.
     @SafeVarargs
     public static <E> Set<E> union(final Supplier<Set<E>> constructor, final Set<E>... set) {
         final Set<E> result = constructor.get();
