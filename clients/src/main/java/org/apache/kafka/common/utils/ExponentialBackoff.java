@@ -31,6 +31,15 @@ import java.util.concurrent.ThreadLocalRandom;
  * <p>
  * This class is thread-safe.
  */
+// DECISION: Immutable, thread-safe jittered exponential backoff. Alternative: Mutable backoff
+// with internal attempt counter. Rationale: Immutable design allows a single ExponentialBackoff
+// instance to be shared across multiple threads/connections — each caller tracks its own attempt
+// count. The jitter factor prevents thundering herd when multiple clients reconnect simultaneously.
+//
+// CROSS-CUTTING: Used by ClusterConnectionStates for connection retry backoff, by
+// ConsumerCoordinator for rebalance retry, by TransactionManager for transaction retry,
+// and by Metadata for metadata refresh backoff. The same instance is shared across all
+// connections managed by a single NetworkClient.
 public class ExponentialBackoff {
     private final long initialInterval;
     private final int multiplier;
@@ -38,6 +47,9 @@ public class ExponentialBackoff {
     private final double jitter;
     private final double expMax;
 
+    // DECISION: Pre-computes expMax (maximum useful exponent) to avoid expensive Math.pow() for
+    // attempts beyond the cap. When initialInterval * multiplier^attempts >= maxInterval, further
+    // exponentiation is unnecessary — expMax short-circuits the computation.
     public ExponentialBackoff(long initialInterval, int multiplier, long maxInterval, double jitter) {
         this.initialInterval = Math.min(maxInterval, initialInterval);
         this.multiplier = multiplier;
@@ -51,6 +63,10 @@ public class ExponentialBackoff {
         return initialInterval;
     }
 
+    // DECISION: Uses ThreadLocalRandom for jitter instead of Math.random(). Alternative:
+    // SecureRandom. Rationale: Backoff jitter is not security-sensitive — ThreadLocalRandom
+    // provides much lower contention than shared Random/SecureRandom instances, critical when
+    // hundreds of connections compute backoff simultaneously during a broker failure.
     public long backoff(long attempts) {
         if (expMax == 0) {
             return initialInterval;
@@ -60,6 +76,8 @@ public class ExponentialBackoff {
         double randomFactor = jitter < Double.MIN_NORMAL ? 1.0 :
             ThreadLocalRandom.current().nextDouble(1 - jitter, 1 + jitter);
         long backoffValue = (long) (randomFactor * term);
+        // DECISION: Final cap at maxInterval ensures jitter cannot push backoff above the configured
+        // maximum. Without this, a jitter of 1.0+ could produce backoff exceeding maxInterval.
         return Math.min(backoffValue, maxInterval);
     }
 
