@@ -18,6 +18,12 @@ package org.apache.kafka.common.security.kerberos;
 
 import java.io.IOException;
 
+// Package-private exception thrown when no auth_to_local rule matches a Kerberos principal name,
+// or when a rule produces a non-simple name containing '/' or '@' characters.
+// CROSS-CUTTING: Thrown by KerberosShortNamer.shortName() and KerberosRule.apply().
+// Caught by DefaultKafkaPrincipalBuilder (authenticator/) which wraps it in KafkaException.
+// SECURITY (LOW): A NoMatchingRule exception means the principal cannot be mapped to a local
+// identity. The caller should deny access for unmapped principals rather than using a default identity.
 public class NoMatchingRule extends IOException {
     NoMatchingRule(String msg) {
         super(msg);
