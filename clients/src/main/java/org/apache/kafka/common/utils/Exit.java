@@ -22,6 +22,16 @@ package org.apache.kafka.common.utils;
  */
 public class Exit {
 
+    // DECISION: Replaceable exit/halt/shutdown-hook procedures for test injection. Production code
+    // calls Exit.exit() / Exit.halt() instead of System.exit() / Runtime.halt(). Alternative:
+    // SecurityManager-based exit prevention. Rationale: SecurityManager is deprecated (JEP 411);
+    // injectable procedure pattern is simpler, test-friendly, and forward-compatible. Tests can
+    // replace the exit procedure to verify exit codes without actually terminating the JVM.
+    //
+    // CROSS-CUTTING: Called by KafkaServer, ControllerServer, KafkaRaftServer for JVM shutdown,
+    // and by LoggingSignalHandler for signal-initiated shutdown. Test infrastructure replaces
+    // procedures to prevent actual JVM exit during integration tests.
+
     @FunctionalInterface
     public interface Procedure {
         void execute(int statusCode, String message);
@@ -51,6 +61,8 @@ public class Exit {
         throw new IllegalStateException("Exit called after resetting procedures; possible race condition present in test");
     };
 
+    // DECISION: Volatile fields for thread-safe procedure replacement without locks.
+    // Default procedures delegate to System.exit()/Runtime.halt() respectively.
     private static volatile Procedure exitProcedure = DEFAULT_EXIT_PROCEDURE;
     private static volatile Procedure haltProcedure = DEFAULT_HALT_PROCEDURE;
     private static volatile ShutdownHookAdder shutdownHookAdder = DEFAULT_SHUTDOWN_HOOK_ADDER;
@@ -71,6 +83,8 @@ public class Exit {
         haltProcedure.execute(statusCode, message);
     }
 
+    // DECISION: Wraps Runtime.addShutdownHook to enable test replacement. Shutdown hooks run in
+    // undefined order -- Kafka's hooks (log flush, socket close) must be independent.
     public static void addShutdownHook(String name, Runnable runnable) {
         shutdownHookAdder.addShutdownHook(name, runnable);
     }
