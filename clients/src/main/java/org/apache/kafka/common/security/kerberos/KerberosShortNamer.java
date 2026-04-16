@@ -28,11 +28,24 @@ import java.util.regex.Pattern;
  * particular, it splits them apart and translates them down into local
  * operating system names.
  */
+// SECURITY (MEDIUM): Applies auth_to_local rules (similar to Hadoop's) to map Kerberos principals
+// to short names used for authorization. Rules are regex-based.
+// Exploit: A malicious user with a carefully crafted Kerberos principal could exploit regex
+// substitution rules to map their principal to an admin user's short name, gaining elevated privileges.
+// Improvement: Disallow regex backreferences in replacement strings and log all principal-to-shortname
+// mappings at INFO level for audit.
+// CROSS-CUTTING: Consumed by DefaultKafkaPrincipalBuilder (authenticator/) for GSSAPI principal
+// resolution. Changes to rule evaluation order affect all Kerberos-authenticated identities.
 public class KerberosShortNamer {
 
     /**
      * A pattern for parsing a auth_to_local rule.
      */
+    // DECISION: Uses a single complex regex to parse auth_to_local rules in the format
+    // DEFAULT or RULE:[n:template](match)s/from/to/g/L|U. This follows Hadoop's auth_to_local
+    // convention for compatibility with existing Kerberos infrastructure.
+    // Alternative: Recursive descent parser -- rejected for simplicity and Hadoop compatibility.
+    // Risk: Complex regex is hard to maintain; any parsing bug could silently mismap principals.
     private static final Pattern RULE_PARSER = Pattern.compile("((DEFAULT)|((RULE:\\[(\\d*):([^\\]]*)](\\(([^)]*)\\))?(s/([^/]*)/([^/]*)/(g)?)?/?(L|U)?)))");
 
     /* Rules for the translation of the principal name into an operating system name */
@@ -47,6 +60,11 @@ public class KerberosShortNamer {
         return new KerberosShortNamer(parseRules(defaultRealm, rules));
     }
 
+    // SECURITY (MEDIUM): Parses user-configured auth_to_local rules into KerberosRule objects.
+    // Rules containing regex patterns are compiled here. Malformed rules with catastrophic
+    // backtracking patterns could cause ReDoS. Input validation is limited to regex match against
+    // RULE_PARSER; the inner substitution regex (group 10/11) is not complexity-checked.
+    // Improvement: Add regex complexity checks (e.g., reject nested quantifiers) on inner groups.
     private static List<KerberosRule> parseRules(String defaultRealm, List<String> rules) {
         List<KerberosRule> result = new ArrayList<>();
         for (String rule : rules) {
@@ -80,9 +98,14 @@ public class KerberosShortNamer {
      * @return the short name
      * @throws IOException
      */
+    // SECURITY (MEDIUM): First-match-wins rule evaluation. If rules are misconfigured, an earlier
+    // overly broad rule could match before a more specific restrictive rule, mapping unauthorized
+    // principals to privileged short names. Always place DENY/restrictive rules before ALLOW rules.
     public String shortName(KerberosName kerberosName) throws IOException {
         String[] params;
         if (kerberosName.hostName() == null) {
+            // DECISION: Fast-path for simple names (no realm, no host) -- returns serviceName directly
+            // without applying any rules. This preserves identity for non-Kerberos principals.
             // if it is already simple, just return it
             if (kerberosName.realm() == null)
                 return kerberosName.serviceName();
