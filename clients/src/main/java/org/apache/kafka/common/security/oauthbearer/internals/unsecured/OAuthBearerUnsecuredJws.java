@@ -43,6 +43,29 @@ import java.util.Set;
  *
  * @see <a href="https://tools.ietf.org/html/rfc7515">RFC 7515</a>
  */
+// SECURITY: (CRITICAL) DEVELOPMENT ONLY — NO PRODUCTION USE.
+// This unsecured implementation accepts tokens without signature verification.
+// A bad actor can forge any token with arbitrary claims (scope, subject, expiry).
+// Using this in production allows complete authentication bypass.
+// Improvement: Add a runtime check that logs CRITICAL-level warning when
+// unsecured OAUTHBEARER is used in non-test contexts. Consider adding a
+// system property or config flag to explicitly enable unsecured mode.
+//
+// CROSS-CUTTING: Implements OAuthBearerToken interface
+// (org.apache.kafka.common.security.oauthbearer).
+// toMap() static method consumed by ClientJwtValidator.validate() for payload
+// extraction (org.apache.kafka.common.security.oauthbearer — production path).
+// Also consumed by CachedFile (internals/secured) for JWT structural validation.
+// Also consumed by OAuthBearerUnsecuredValidatorCallbackHandler (same package)
+// for token parsing during unsecured SASL validation.
+// Created by OAuthBearerUnsecuredLoginCallbackHandler (same package) during token issuance.
+// Depends on: OAuthBearerValidationResult (validation result DTO),
+// OAuthBearerIllegalTokenException (validation failure exception),
+// Utils (string utility), Jackson ObjectMapper (JSON parsing).
+// Contract: After construction, all OAuthBearerToken interface methods return
+// consistent, validated values. Claims map is immutable. Scope is immutable.
+// Impact: The toMap() method is used by production code (ClientJwtValidator) —
+// changes to its parsing behavior affect secured token validation as well.
 public class OAuthBearerUnsecuredJws implements OAuthBearerToken {
     private final String compactSerialization;
     private final List<String> splits;
@@ -74,6 +97,18 @@ public class OAuthBearerUnsecuredJws implements OAuthBearerToken {
      */
     public OAuthBearerUnsecuredJws(String compactSerialization, String principalClaimName, String scopeClaimName)
             throws OAuthBearerIllegalTokenException {
+        // SECURITY: (CRITICAL) Parses JWT compact serialization WITHOUT any
+        // signature verification. Validates structural integrity only: (1) no
+        // ".." sequences, (2) exactly 3 dot-separated Base64URL segments, (3)
+        // header alg must be "none", (4) signature segment must be empty.
+        // Why: Accepts any 3-part Base64URL string with alg=none as valid.
+        // Exploit: Forging requires ZERO cryptographic knowledge. Steps:
+        // (1) Base64URL-encode {"alg":"none"}, (2) Base64URL-encode arbitrary
+        // claims like {"sub":"admin","exp":9999999999,"scope":["admin"]},
+        // (3) concatenate as header.payload. (empty signature). This token
+        // will be accepted and its claims will be trusted.
+        // Improvement: Log accepted unsecured tokens at WARN level with their
+        // full claim set for audit. Add a static flag to disable acceptance.
         this.compactSerialization = Objects.requireNonNull(compactSerialization);
         if (compactSerialization.contains(".."))
             throw new OAuthBearerIllegalTokenException(
@@ -291,10 +326,29 @@ public class OAuthBearerUnsecuredJws implements OAuthBearerToken {
      * @throws OAuthBearerIllegalTokenException
      *             if the given Base64URL-encoded value cannot be decoded or parsed
      */
+    // SECURITY: (HIGH) Decodes Base64URL segment and parses as JSON via
+    // Jackson ObjectMapper. Processes untrusted input — the Base64URL-encoded
+    // token segments come directly from the network (via the SASL exchange).
+    // Why: This method is public and static, callable from anywhere to decode
+    // token segments without authentication context.
+    // Exploit: Malformed Base64URL triggers IllegalArgumentException (caught).
+    // Deeply nested JSON could consume memory; ObjectMapper defaults provide
+    // basic protection. More concerning: public accessibility allows
+    // unauthenticated callers to invoke JSON parsing.
+    // Improvement: Consider making this method package-private to restrict
+    // access. Add ObjectMapper read constraints (max nesting depth, max
+    // string length) to limit resource consumption from crafted tokens.
     public static Map<String, Object> toMap(String split) throws OAuthBearerIllegalTokenException {
         Map<String, Object> retval = new HashMap<>();
         try {
             byte[] decode = Base64.getUrlDecoder().decode(split);
+            // DECISION: Creates a new ObjectMapper per toMap() call rather
+            // than a shared static instance. Alternative: Static final
+            // ObjectMapper (thread-safe for reads). Rationale: ObjectMapper
+            // is thread-safe for deserialization, so a static instance would
+            // work. Per-call instantiation chosen for simplicity in a
+            // development-only class. Performance is not a concern since
+            // unsecured tokens are for testing only.
             JsonNode jsonNode = new ObjectMapper().readTree(decode);
             if (jsonNode == null)
                 throw new OAuthBearerIllegalTokenException(OAuthBearerValidationResult.newFailure("malformed JSON"));
@@ -311,6 +365,11 @@ public class OAuthBearerUnsecuredJws implements OAuthBearerToken {
         }
     }
 
+    // DECISION: All returned collections (splits, header, claims, scope) are
+    // wrapped in Collections.unmodifiable*() views. Alternative: Return
+    // mutable collections and document "do not modify". Rationale:
+    // Immutability-by-default prevents accidental mutation of parsed token
+    // data — consistent with the security principle of least privilege.
     private List<String> extractCompactSerializationSplits() {
         List<String> tmpSplits = new ArrayList<>(Arrays.asList(compactSerialization.split("\\.")));
         if (compactSerialization.endsWith("."))
@@ -336,10 +395,23 @@ public class OAuthBearerUnsecuredJws implements OAuthBearerToken {
         return issuedAtSeconds == null ? null : convertClaimTimeInSecondsToMs(issuedAtSeconds);
     }
 
+    // DECISION: Converts JWT time claims (epoch seconds as fractional Number)
+    // to milliseconds using Math.round(doubleValue * 1000). Alternative:
+    // Cast to long and multiply (loses sub-second precision). Rationale:
+    // JWT spec (RFC 7519 Section 2) defines NumericDate as seconds with
+    // optional fractional part. Math.round preserves sub-second precision.
+    // Risk: Floating-point rounding may introduce ±1ms error, acceptable
+    // for token lifetime calculations.
     private static long convertClaimTimeInSecondsToMs(Number claimValue) {
         return Math.round(claimValue.doubleValue() * 1000);
     }
 
+    // DECISION: Scope claim supports both String (single scope) and
+    // List<String> (multiple scopes) types. Alternative: Support only
+    // List<String> per OAuth 2.0 convention. Rationale: RFC 6749 Section 3.3
+    // defines scope as space-delimited string, but JWTs commonly represent
+    // scope as either a single string or a JSON array. Supporting both
+    // maximizes compatibility with different token issuers during testing.
     private Set<String> calculateScope() {
         String scopeClaimName = this.scopeClaimName;
         if (isClaimType(scopeClaimName, String.class)) {
