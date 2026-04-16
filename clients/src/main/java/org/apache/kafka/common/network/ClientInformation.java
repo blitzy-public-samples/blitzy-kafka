@@ -19,6 +19,14 @@ package org.apache.kafka.common.network;
 
 import java.util.Objects;
 
+// DECISION: Immutable value type capturing client software name and version, extracted from
+// the ApiVersionsRequest sent by the client during connection establishment. The EMPTY sentinel
+// is used when the ApiVersionsRequest is not received (e.g., older clients that don't send it).
+// Registered with ChannelMetadataRegistry for the connectionsByClient metric gauge in Selector.
+// This enables operators to monitor the distribution of client versions connecting to the
+// broker, which is useful for version compatibility management and deprecation planning.
+// Alternative: Log client info at connect time only — rejected because metrics provide
+// ongoing monitoring and aggregation capabilities.
 public class ClientInformation {
     public static final String UNKNOWN_NAME_OR_VERSION = "unknown";
     public static final ClientInformation EMPTY = new ClientInformation(UNKNOWN_NAME_OR_VERSION, UNKNOWN_NAME_OR_VERSION);
