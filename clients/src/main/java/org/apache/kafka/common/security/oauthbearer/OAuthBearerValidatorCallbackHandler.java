@@ -92,16 +92,63 @@ import static org.apache.kafka.common.security.oauthbearer.internals.secured.Con
  *   <li>{@link org.apache.kafka.common.config.SaslConfigs#SASL_OAUTHBEARER_SUB_CLAIM_NAME}</li>
  * </ul>
  * </p>
+ *
+ * @implNote DECISION: Separates validation (this handler) from login
+ * (OAuthBearerLoginCallbackHandler) rather than combining both in a single
+ * handler. Alternatives: (1) Single unified handler for both client and
+ * broker, (2) Validation logic inline in SaslServerAuthenticator. Rationale:
+ * Separation allows broker-side validation to use heavyweight JWKS-based
+ * verification (jose4j) while client-side login uses lightweight token
+ * retrieval, enabling independent evolution of each concern.
  */
 
+// SECURITY: (CRITICAL) Broker-side JWT validation entry point — validates
+// token signature, claims, expiry for every OAUTHBEARER authentication
+// request. Why: This handler receives raw JWT tokens from untrusted clients
+// and delegates to JwtValidator for cryptographic verification. Failure
+// here = auth bypass. Exploit: Clock skew exploitation — if
+// SASL_OAUTHBEARER_CLOCK_SKEW_SECONDS tolerance is too generous, expired
+// tokens can be replayed within the window. An attacker who captures an
+// expired token (from logs, network sniffing, or memory dump) has a time
+// window equal to the clock skew tolerance to reuse it. Improvement:
+// Consider making clock skew tolerance configurable with a strict default
+// (e.g., 30 seconds rather than unbounded), and log a WARNING when clock
+// skew exceeds a recommended threshold during configure().
+//
+// CROSS-CUTTING: Depends on auth/AuthenticateCallbackHandler (contract
+// interface), internals/secured/CloseableVerificationKeyResolver (JWKS key
+// management), internals/secured/ConfigurationUtils (config resolution),
+// and JwtValidator (validation SPI). Consumed by:
+// authenticator/SaslServerAuthenticator which invokes handle() during
+// the SASL authentication handshake for OAUTHBEARER mechanism. Contract:
+// Must be configured before handle() is called; not thread-safe for
+// configure(). Impact: Changes to JwtValidator contract or
+// CloseableVerificationKeyResolver lifecycle affect broker auth
+// availability.
 public class OAuthBearerValidatorCallbackHandler implements AuthenticateCallbackHandler {
 
     private static final Logger log = LoggerFactory.getLogger(OAuthBearerValidatorCallbackHandler.class);
 
+    // CROSS-CUTTING: Optional JWKS key resolver — when present, enables
+    // cryptographic signature verification. Sourced from
+    // VerificationKeyResolverFactory which manages JWKS endpoint
+    // connectivity and key rotation. Lifecycle: configured in configure(),
+    // closed in close(). Null when using test-injection path.
     private CloseableVerificationKeyResolver verificationKeyResolver;
 
     private JwtValidator jwtValidator;
 
+    // SECURITY: JwtValidator is instantiated via reflection using the
+    // configured class name. The class must implement JwtValidator and be
+    // on the classpath. Malicious configuration could point to an
+    // attacker-controlled class if config write access is compromised.
+    //
+    // DECISION: JwtValidator is loaded via getConfiguredInstance() rather
+    // than directly instantiating BrokerJwtValidator. This enables users
+    // to provide custom JWT validation implementations (e.g., for custom
+    // claim validation or opaque token introspection). Alternative:
+    // Hard-code BrokerJwtValidator. Rationale: Pluggability supports
+    // diverse OAuth provider requirements without code changes.
     @Override
     public void configure(Map<String, ?> configs, String saslMechanism, List<AppConfigurationEntry> jaasConfigEntries) {
         jwtValidator = getConfiguredInstance(
@@ -113,6 +160,11 @@ public class OAuthBearerValidatorCallbackHandler implements AuthenticateCallback
         );
     }
 
+    // DECISION: Package-visible overload accepting explicit
+    // verificationKeyResolver and jwtValidator for testability.
+    // Alternative: Use reflection or PowerMock. Rationale: Direct
+    // dependency injection is simpler, less fragile, and avoids
+    // reflection overhead.
     /*
      * Package-visible for testing.
      */
@@ -128,6 +180,9 @@ public class OAuthBearerValidatorCallbackHandler implements AuthenticateCallback
         this.jwtValidator.configure(configs, saslMechanism, jaasConfigEntries);
     }
 
+    // SECURITY: Uses Utils.closeQuietly to suppress close() exceptions,
+    // preventing resource cleanup failures from leaking internal state
+    // through exception messages.
     @Override
     public void close() {
         Utils.closeQuietly(jwtValidator, "JWT validator");
@@ -149,6 +204,17 @@ public class OAuthBearerValidatorCallbackHandler implements AuthenticateCallback
         }
     }
 
+    // SECURITY: (CRITICAL) Token validation path — delegates to
+    // JwtValidator.validate(). On validation failure, returns generic
+    // "invalid_token" error without exposing the specific failure reason
+    // to the client (defense against information leakage). The exception
+    // is logged server-side at WARN level for audit trail.
+    // Exploit: If the error message were returned to the client, an
+    // attacker could iteratively probe token construction (e.g., learning
+    // which claims are required, what audience values are accepted) to
+    // forge a valid token. Improvement: Consider rate-limiting failed
+    // validation attempts per client IP to mitigate brute-force token
+    // probing.
     private void handleValidatorCallback(OAuthBearerValidatorCallback callback) {
         checkConfigured();
 
@@ -163,6 +229,18 @@ public class OAuthBearerValidatorCallbackHandler implements AuthenticateCallback
         }
     }
 
+    // SECURITY: (MEDIUM) Marks all client-provided SASL extensions as
+    // valid without checking their content. Per RFC 7628, unknown
+    // extensions should be ignored. Why: Extensions are inherently
+    // untrusted — they are sent by the client and can contain arbitrary
+    // key-value pairs. Blindly marking all as "valid" is the correct
+    // default per the RFC but could be a concern if custom authorizers
+    // depend on extension values for access decisions.
+    // Exploit: A malicious client could inject crafted extensions that
+    // downstream components (custom authorizers, audit loggers) trust
+    // without validation. Improvement: Consider providing a hook for
+    // custom extension validation logic via a configurable
+    // ExtensionValidator interface.
     private void handleExtensionsValidatorCallback(OAuthBearerExtensionsValidatorCallback extensionsValidatorCallback) {
         checkConfigured();
 
