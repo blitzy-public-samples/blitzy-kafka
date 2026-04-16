@@ -43,10 +43,34 @@ import javax.security.auth.login.LoginException;
 
 import static java.util.Arrays.asList;
 
+// CROSS-CUTTING: Central lifecycle manager consumed by all SASL mechanism handlers.
+// Depends on: auth/Login, auth/AuthenticateCallbackHandler, JaasContext,
+// oauthbearer/OAuthBearerLoginModule. Consumed by: SaslChannelBuilder.
+// Contract: acquireLoginManager() returns a Login; callers MUST call release() when done.
+/**
+ * Centralized, reference-counted lifecycle manager for {@link Login} and
+ * {@link AuthenticateCallbackHandler} instances.
+ *
+ * @implSpec SECURITY: (HIGH) Reference-counted login lifecycle management.
+ * Caches Login instances (with authenticated JAAS Subjects) in static maps.
+ * Exploit: A double-release would decrement refCount below zero; a subsequent
+ * acquire/release could close the Login while another holder still uses it --
+ * a use-after-close exposing the JAAS Subject in an inconsistent state.
+ * Mitigation: refCount==0 check in release() throws IllegalStateException.
+ * Improvement: Use AtomicInteger with CAS; validate refCount &gt; 0 before decrement.
+ */
 public class LoginManager {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(LoginManager.class);
 
+    // DECISION: Two separate cache maps (static vs. dynamic) rather than a unified cache.
+    // Rationale: Static JAAS configs identified by context name; dynamic configs by Password
+    // value, enabling hot-reload when config changes. Risk: static instances persist until
+    // JVM exit unless explicitly cleared via closeAll().
+    // SECURITY: (HIGH) Caches hold Login instances with authenticated JAAS Subjects.
+    // Exploit: If Password.hashCode/equals leaks timing info (DYNAMIC_INSTANCES keyed by
+    // Password), side-channel attacks could reveal config values. Password.equals() uses
+    // constant-time comparison. Improvement: Consider non-sensitive hash as cache key.
     // static configs (broker or client)
     private static final Map<LoginMetadata<String>, LoginManager> STATIC_INSTANCES = new HashMap<>();
 
@@ -58,6 +82,11 @@ public class LoginManager {
     private final AuthenticateCallbackHandler loginCallbackHandler;
     private int refCount;
 
+    // SECURITY: (MEDIUM) Constructor performs login immediately via reflection-created
+    // Login/CallbackHandler instances (Utils.newInstance). If login fails, closeResources()
+    // cleans up partial state. Exploit: Any class on the classpath matching the Login or
+    // AuthenticateCallbackHandler type could be instantiated via reflection.
+    // Improvement: Add explicit type allowlisting beyond the upstream JAAS module check.
     private LoginManager(JaasContext jaasContext, String saslMechanism, Map<String, ?> configs,
                  LoginMetadata<?> loginMetadata) throws LoginException {
         this.loginMetadata = loginMetadata;
@@ -96,6 +125,12 @@ public class LoginManager {
      * @param configs Config options used to configure `Login` if a new login manager is created.
      *
      */
+    // COMPLEXITY: ~32 lines -- Login instance acquisition with class resolution and
+    // caching. Structure: (1) Resolve loginClass from config or default, (2) Resolve
+    // loginCallbackClass with OAUTHBEARER special-casing, (3) Synchronized block:
+    // branch on dynamic vs static JAAS config, (4) Check cache / create LoginManager
+    // on miss, (5) Add security providers, (6) Return acquired instance.
+    // Key paths: dynamic -> DYNAMIC_INSTANCES cache; static -> STATIC_INSTANCES cache.
     public static LoginManager acquireLoginManager(JaasContext jaasContext, String saslMechanism,
                                                    Class<? extends Login> defaultLoginClass,
                                                    Map<String, ?> configs) throws LoginException {
@@ -106,6 +141,10 @@ public class LoginManager {
                         : AbstractLogin.DefaultLoginCallbackHandler.class;
         Class<? extends AuthenticateCallbackHandler> loginCallbackClass = configuredClassOrDefault(configs, jaasContext,
                 saslMechanism, SaslConfigs.SASL_LOGIN_CALLBACK_HANDLER_CLASS, defaultLoginCallbackHandlerClass);
+        // DECISION: Class-level synchronization rather than per-mechanism or per-cache
+        // locking. Alternative: ConcurrentHashMap.computeIfAbsent. Rationale: Login
+        // creation has side effects (JAAS login, Kerberos TGT) that must not execute
+        // concurrently for the same key. Tradeoff: all mechanisms contend on one lock.
         synchronized (LoginManager.class) {
             LoginManager loginManager;
             Password jaasConfigValue = jaasContext.dynamicJaasConfig();
@@ -124,6 +163,8 @@ public class LoginManager {
                     STATIC_INSTANCES.put(loginMetadata, loginManager);
                 }
             }
+            // CROSS-CUTTING: Registers JDK security providers (e.g., BouncyCastle)
+            // configured via security.providers -- affects the global JVM provider list.
             SecurityUtils.addConfiguredSecurityProviders(configs);
             return loginManager.acquire();
         }
@@ -151,6 +192,11 @@ public class LoginManager {
     /**
      * Decrease the reference count for this instance and release resources if it reaches 0.
      */
+    // SECURITY: (HIGH) Reference-counted lifecycle with synchronized(LoginManager.class).
+    // Why: Last release (refCount==1) closes Login and removes from cache atomically.
+    // Exploit: Without synchronization, a thread could find a cached instance between
+    // the cache removal and login.close(), obtaining a closing/closed Login.
+    // Improvement: Consider ReadWriteLock for concurrent reads with exclusive releases.
     public void release() {
         synchronized (LoginManager.class) {
             if (refCount == 0)
@@ -169,6 +215,9 @@ public class LoginManager {
         }
     }
 
+    // SECURITY: (MEDIUM) toString() avoids Subject.toString() which exposes private
+    // credentials. Exploit: If Subject.toString() were used, passwords/tokens would
+    // appear in log files accessible to operators. Improvement: Consider redaction util.
     @Override
     public String toString() {
         return "LoginManager(serviceName=" + serviceName() +
@@ -209,6 +258,10 @@ public class LoginManager {
         }
     }
 
+    // DECISION: Listener-name prefix (e.g., "sasl_ssl.sasl.") applied only for SERVER
+    // type, not CLIENT. This enables per-listener mechanism configuration on the broker
+    // while keeping client config flat. The multi-module check prevents ambiguity when
+    // overriding classes in multi-entry JAAS configs.
     private static <T> Class<? extends T> configuredClassOrDefault(Map<String, ?> configs,
                                                      JaasContext jaasContext,
                                                      String saslMechanism,
@@ -227,6 +280,10 @@ public class LoginManager {
         return clazz;
     }
 
+    // DECISION: Cache key includes loginClass + loginCallbackClass + saslConfigs (filtered
+    // to sasl.* keys only). Changing ANY sasl.* config creates a new cache entry and Login.
+    // Alternative: key only on configInfo. Rationale: different SASL configs may require
+    // different Login behavior (e.g., different OAuth token endpoints).
     private static class LoginMetadata<T> {
         final T configInfo;
         final Class<? extends Login> loginClass;
