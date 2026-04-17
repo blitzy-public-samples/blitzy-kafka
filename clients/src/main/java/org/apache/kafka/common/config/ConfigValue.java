@@ -20,12 +20,28 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 
+/**
+ * Mutable per-key configuration metadata produced by {@link ConfigDef#validate(java.util.Map)}.
+ * Holds the parsed value, recommended values, error messages, and visibility state for a single
+ * configuration key.
+ *
+ * @implNote DECISION: Mutable class with setter methods (value(), recommendedValues(), visible(),
+ * addErrorMessage()) rather than immutable builder. Alternative: Immutable ConfigValue with builder
+ * pattern. Rationale: ConfigDef.validate() populates ConfigValue incrementally during recursive
+ * dependent-config resolution (parseForValidate &rarr; validate), where each stage may update the value,
+ * add errors, or modify visibility. Mutable design avoids object allocation per update step.
+ *
+ * DECISION: recommendedValues is a List&lt;Object&gt; (not List&lt;String&gt;) to support typed
+ * recommendations matching the config's Type (e.g., Integer for INT configs, Class for CLASS configs).
+ */
 public class ConfigValue {
 
     private final String name;
     private Object value;
     private List<Object> recommendedValues;
     private final List<String> errorMessages;
+    // CROSS-CUTTING: The visible flag is set by ConfigDef.Recommender.visible() and used by
+    // Connect's config validation REST endpoint to hide/show dependent configs in the UI.
     private boolean visible;
 
     public ConfigValue(String name) {
