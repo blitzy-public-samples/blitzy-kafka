@@ -24,9 +24,25 @@ package org.apache.kafka.common.config;
  * <p>The intended pattern is for broker configs to include a <code>log.</code> prefix. For example, to set the default broker
  * cleanup policy, one would set <code>log.cleanup.policy</code> instead of <code>cleanup.policy</code>. Unfortunately, there are many cases
  * where this pattern is not followed.
+ *
+ * @implNote DECISION: Topic-level config keys use unprefixed names (e.g., "cleanup.policy") that differ
+ * from broker-level equivalents (e.g., "log.cleanup.policy"). Alternative: Unified naming with a single
+ * prefix. Rationale: Historical — topic configs were designed as per-topic overrides of broker defaults.
+ * The naming inconsistency is acknowledged in the Javadoc. This class is intended to eventually replace
+ * core/LogConfig.scala as the canonical source of topic config keys (see line 29 comment).
+ *
+ * DECISION: Config key constants include both CONFIG (key name) and DOC (documentation string) fields.
+ * The DOC strings are used by ConfigDef.toHtml() and toRst() for auto-generated documentation.
  */
 // This is a public API, so we should not remove or alter keys without a discussion and a deprecation period.
 // Eventually this should replace LogConfig.scala.
+// CROSS-CUTTING: These config key constants are referenced by:
+// - core/LogConfig.scala for broker-side topic config validation
+// - metadata/controller/ConfigurationControlManager for config storage
+// - clients/admin/Admin.createTopics()/alterConfigs() for client-side config setting
+// - storage/log/UnifiedLog and LogSegment for segment/retention behavior
+// - docs/configuration.html for auto-generated topic configuration documentation
+// Contract: Key names are part of the public API — changes require KIP approval.
 public class TopicConfig {
     public static final String SEGMENT_BYTES_CONFIG = "segment.bytes";
     public static final String SEGMENT_BYTES_DOC = "This configuration controls the segment file size for " +
@@ -80,6 +96,9 @@ public class TopicConfig {
         "operates independently of \"segment.ms\" and \"segment.bytes\" configurations. " +
         "Moreover, it triggers the rolling of new segment if the retention.ms condition is satisfied.";
 
+    // DECISION: Remote log storage configs (KIP-405) added for tiered storage support.
+    // These configs control whether topic data is copied to remote storage and when local
+    // segments are deleted after remote copy. Defaults to disabled (false).
     public static final String REMOTE_LOG_STORAGE_ENABLE_CONFIG = "remote.storage.enable";
     public static final String REMOTE_LOG_STORAGE_ENABLE_DOC = "To enable tiered storage for a topic, set this configuration to true. " +
             "To disable tiered storage for a topic that has it enabled, set this configuration to false. " +
