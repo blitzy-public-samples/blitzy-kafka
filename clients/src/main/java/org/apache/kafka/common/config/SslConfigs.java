@@ -24,6 +24,23 @@ import java.util.Set;
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.TrustManagerFactory;
 
+/**
+ * Centralized SSL/TLS configuration key constants and client-side config registration helper.
+ *
+ * @implNote DECISION: Static constants class rather than enum-based config keys. Alternative: Enum with
+ * metadata (type, default, doc) per constant. Rationale: ConfigDef already provides the metadata layer;
+ * constants class keeps config key strings as compile-time constants usable in annotation contexts
+ * and switch statements. The addClientSslSupport() helper registers all SSL configs into a ConfigDef
+ * with a single method call, ensuring consistent type/default/doc across all client configs.
+ *
+ * DECISION: PASSWORD type used for keystore password, key password, keystore key, certificate chain,
+ * and truststore certificates — these are security-sensitive values that must be masked in logs/toString().
+ * See Password.java for the masking contract.
+ *
+ * DECISION: DEFAULT_SSL_PROTOCOL = "TLSv1.3" — Kafka defaults to TLSv1.3 with automatic fallback to
+ * TLSv1.2 via ssl.enabled.protocols. This provides the strongest available encryption while maintaining
+ * backward compatibility with older JVMs and brokers.
+ */
 public class SslConfigs {
     /*
      * NOTE: DO NOT CHANGE EITHER CONFIG NAMES AS THESE ARE PART OF THE PUBLIC API AND CHANGE WILL BREAK USER CODE.
@@ -123,6 +140,11 @@ public class SslConfigs {
         + "Note that this will cause a tiny delay during establishment of new connections from mTLS clients to brokers due to the extra code for examining the certificate chain provided by the client. "
         + "Note further that the implementation uses a custom truststore based on the standard Java truststore and thus might be considered a security risk due to not being as mature as the standard one.";
 
+    // DECISION: Fluent chained define() calls register all SSL configs in a single method.
+    // Alternative: Per-config static registration. Rationale: Single-method registration ensures
+    // all SSL configs are always registered together — prevents partial SSL config scenarios.
+    // CROSS-CUTTING: Called by ConfigDef.withClientSslSupport() and reused by ProducerConfig,
+    // ConsumerConfig, AdminClientConfig, and ConnectWorkerConfig.
     public static void addClientSslSupport(ConfigDef config) {
         config.define(SslConfigs.SSL_PROTOCOL_CONFIG, ConfigDef.Type.STRING, SslConfigs.DEFAULT_SSL_PROTOCOL, ConfigDef.Importance.MEDIUM, SslConfigs.SSL_PROTOCOL_DOC)
                 .define(SslConfigs.SSL_PROVIDER_CONFIG, ConfigDef.Type.STRING, null, ConfigDef.Importance.MEDIUM, SslConfigs.SSL_PROVIDER_DOC)
@@ -145,6 +167,12 @@ public class SslConfigs {
                 .define(SslConfigs.SSL_ENGINE_FACTORY_CLASS_CONFIG, ConfigDef.Type.CLASS, null, ConfigDef.Importance.LOW, SslConfigs.SSL_ENGINE_FACTORY_CLASS_DOC);
     }
 
+    // DECISION: RECONFIGURABLE_CONFIGS contains only keystore/truststore configs that can be
+    // hot-reloaded for certificate rotation without broker restart (KIP-226). Protocol, cipher,
+    // and algorithm configs are NON_RECONFIGURABLE because changing them mid-connection could
+    // cause TLS handshake failures on existing connections.
+    // CROSS-CUTTING: Consumed by SslFactory.reconfigurableConfigs() and DynamicBrokerConfig
+    // to determine which SSL configs support runtime updates.
     public static final Set<String> RECONFIGURABLE_CONFIGS = Set.of(
             SslConfigs.SSL_KEYSTORE_TYPE_CONFIG,
             SslConfigs.SSL_KEYSTORE_LOCATION_CONFIG,
