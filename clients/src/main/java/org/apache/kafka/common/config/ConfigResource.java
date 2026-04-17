@@ -26,8 +26,18 @@ import java.util.stream.Collectors;
 
 /**
  * A class representing resources that have configs.
+ *
+ * @implNote DECISION: Final class with Type enum using byte IDs (power-of-2 bit flags: GROUP=32,
+ * CLIENT_METRICS=16, BROKER_LOGGER=8, BROKER=4, TOPIC=2, UNKNOWN=0). Alternative: Sequential integer IDs.
+ * Rationale: Power-of-2 IDs enable efficient bitmask-based filtering in IncrementalAlterConfigs requests
+ * where multiple resource types can be specified simultaneously. UNKNOWN=0 is the zero value sentinel.
  */
 public final class ConfigResource {
+
+    // CROSS-CUTTING: Used by clients/admin/Admin.describeConfigs(), alterConfigs(), and
+    // incrementalAlterConfigs() to identify the target resource. Also used by metadata/controller/
+    // ConfigurationControlManager for config storage, and core/DynamicBrokerConfig for per-broker
+    // and per-topic config management.
 
     /**
      * Type of resource.
@@ -40,6 +50,8 @@ public final class ConfigResource {
         TOPIC((byte) 2),
         UNKNOWN((byte) 0);
 
+        // DECISION: Eagerly-built unmodifiable ID→Type lookup map. Uses UNKNOWN as default for
+        // unrecognized IDs (forId returns UNKNOWN) for forward-compatible protocol handling.
         private static final Map<Byte, Type> TYPES = Collections.unmodifiableMap(
             Arrays.stream(values()).collect(Collectors.toMap(Type::id, Function.identity()))
         );
@@ -93,6 +105,8 @@ public final class ConfigResource {
      * Returns true if this is the default resource of a resource type.
      * Resource name is empty for the default resource.
      */
+    // DECISION: Default resource is identified by empty name string rather than a null or sentinel.
+    // Alternative: Null name. Rationale: Empty string is a valid, non-null key for Map operations.
     public boolean isDefault() {
         return name.isEmpty();
     }
