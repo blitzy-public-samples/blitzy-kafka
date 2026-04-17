@@ -51,8 +51,25 @@ import java.util.regex.Pattern;
  * <p>This class only depends on {@link ConfigProvider#get(String, Set)} and does not depend on subscription support
  * in a {@link ConfigProvider}, such as the {@link ConfigProvider#subscribe(String, Set, ConfigChangeCallback)} and
  * {@link ConfigProvider#unsubscribe(String, Set, ConfigChangeCallback)} methods.
+ *
+ * @implNote DECISION: Uses a regex-based variable pattern "${provider:[path:]key}" (KIP-297) rather than
+ * a custom parser. Alternative: Recursive-descent parser for nested variables. Rationale: Regex is simpler
+ * and sufficient — Kafka config values don't require nested variable expansion. The pattern uses non-greedy
+ * matching ([^}]*?) to correctly handle multiple variables in a single value.
+ *
+ * DECISION: Two-phase processing (collect variables → batch lookup → replace) rather than inline resolution.
+ * Alternative: Resolve each variable as encountered. Rationale: Batching lookups by provider+path enables
+ * ConfigProvider.get(path, Set&lt;String&gt;) to fetch multiple keys in a single call, reducing round trips
+ * to external secret stores (e.g., Vault, AWS Secrets Manager).
+ *
+ * DECISION: Unresolved variables (no matching provider) are preserved as-is in the output rather than
+ * throwing. Rationale: Graceful degradation — allows partial resolution when only some providers are
+ * configured. The caller (AbstractConfig) can detect unresolved placeholders if needed.
  */
 public class ConfigTransformer {
+    // CROSS-CUTTING: Used by AbstractConfig.resolveConfigVariables() during config construction.
+    // The pattern is also implicitly consumed by Connect's DistributedHerder which passes
+    // connector configs through AbstractConfig, enabling ${file:/path:key} secret resolution.
     public static final Pattern DEFAULT_PATTERN = Pattern.compile("\\$\\{([^}]*?):(([^}]*?):)?([^}]*?)\\}");
     private static final String EMPTY_PATH = "";
 
@@ -74,6 +91,14 @@ public class ConfigTransformer {
      * @param configs the configuration values to be transformed
      * @return an instance of {@link ConfigTransformerResult}
      */
+    // COMPLEXITY: transform() is ~45 lines — Three-phase pipeline:
+    // Phase 1 (lines 78-91): Collect — scan all config values for ${provider:path:key} variables,
+    //   group by provider name and path for batched lookups.
+    // Phase 2 (lines 93-114): Lookup — for each provider+path, call ConfigProvider.get(path, keys)
+    //   and collect data + TTLs. Null/missing providers are silently skipped.
+    // Phase 3 (lines 117-121): Replace — substitute matched variables with looked-up values using
+    //   the replace() helper. Unmatched variables are preserved as-is.
+    // Key paths: Normal resolution path, provider-not-found path (silent skip), null-value path.
     public ConfigTransformerResult transform(Map<String, String> configs) {
         Map<String, Map<String, Set<String>>> keysByProvider = new HashMap<>();
         Map<String, Map<String, Map<String, String>>> lookupsByProvider = new HashMap<>();
@@ -159,6 +184,10 @@ public class ConfigTransformer {
         return builder.toString();
     }
 
+    // DECISION: Private inner class rather than a record or tuple for regex match groups.
+    // Alternative: Use Matcher groups directly. Rationale: Named fields (providerName, path,
+    // variable) improve readability of the two-phase processing logic. Path defaults to
+    // EMPTY_PATH when the optional middle group is absent.
     private static class ConfigVariable {
         final String providerName;
         final String path;
