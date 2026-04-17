@@ -20,6 +20,11 @@ import org.apache.kafka.common.KafkaException;
 
 /**
  * Thrown if the user supplies an invalid configuration
+ *
+ * @implNote CROSS-CUTTING: Thrown by ConfigDef.parseType(), ConfigDef.parse(), AbstractConfig constructor,
+ * and all ConfigProvider implementations when configuration values are invalid. Caught by config validation
+ * frameworks across all Kafka modules (ProducerConfig, ConsumerConfig, StreamsConfig, etc.).
+ * Extends KafkaException (unchecked) — callers handle via try-catch or let it propagate as a startup failure.
  */
 public class ConfigException extends KafkaException {
 
@@ -33,6 +38,9 @@ public class ConfigException extends KafkaException {
         this(name, value, null);
     }
 
+    // DECISION: Three constructor overloads provide structured error messages with config name+value context.
+    // Alternative: Single constructor with formatted string. Rationale: Structured constructors enforce
+    // consistent error message format "Invalid value X for configuration Y: Z" across all config validation.
     public ConfigException(String name, Object value, String message) {
         super("Invalid value " + value + " for configuration " + name + (message == null ? "" : ": " + message));
     }
