@@ -21,6 +21,12 @@ import java.util.Set;
 
 /**
  * This class holds definitions for log level configurations related to Kafka's application logging. See KIP-412 for additional information
+ *
+ * @implNote DECISION: String constants rather than an enum for log levels. Alternative: Java enum with
+ * ordinal-based severity comparison. Rationale: Log levels must match the underlying logging framework
+ * (Log4j2) string names exactly. Using String constants avoids a mapping layer and ensures the values
+ * passed to IncrementalAlterConfigs/DescribeConfigs API match Log4j2's Level.toLevel() expectations.
+ * The VALID_LOG_LEVELS Set enables validation without enum parsing.
  */
 public class LogLevelConfig {
     /*
@@ -62,6 +68,9 @@ public class LogLevelConfig {
      */
     public static final String TRACE_LOG_LEVEL = "TRACE";
 
+    // CROSS-CUTTING: Used by core/DynamicBrokerConfig.scala for runtime log level changes via
+    // IncrementalAlterConfigs API, and by tools/LogLevelCommand for CLI-based log level management.
+    // Also referenced by clients/admin/KafkaAdminClient for log-level config validation.
     public static final Set<String> VALID_LOG_LEVELS = Set.of(
             FATAL_LOG_LEVEL, ERROR_LOG_LEVEL, WARN_LOG_LEVEL,
             INFO_LOG_LEVEL, DEBUG_LOG_LEVEL, TRACE_LOG_LEVEL
