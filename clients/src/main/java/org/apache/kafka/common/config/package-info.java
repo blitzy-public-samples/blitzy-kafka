@@ -16,5 +16,11 @@
  */
 /**
  * Provides common mechanisms for defining, parsing, validating, and documenting user-configurable parameters.
+ *
+ * <p>CROSS-CUTTING: This package is the foundational configuration framework consumed by ALL Kafka modules:
+ * clients (ProducerConfig, ConsumerConfig, AdminClientConfig), streams (StreamsConfig),
+ * connect (WorkerConfig, ConnectorConfig), core broker (KafkaConfig), metadata (controller configs),
+ * and all coordinator modules. Any change to ConfigDef, AbstractConfig, or ConfigProvider SPI
+ * impacts configuration parsing, validation, and documentation generation across the entire Kafka ecosystem.
  */
 package org.apache.kafka.common.config;
