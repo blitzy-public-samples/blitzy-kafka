@@ -21,6 +21,21 @@ import org.apache.kafka.common.config.ConfigDef.Range;
 
 import java.util.List;
 
+/**
+ * Centralized SASL authentication configuration key constants and client-side config registration.
+ *
+ * @implNote DECISION: Consolidates all SASL mechanism configs (GSSAPI, PLAIN, SCRAM, OAUTHBEARER)
+ * into one class rather than per-mechanism config classes. Alternative: Separate GssapiConfigs,
+ * ScramConfigs, OAuthBearerConfigs. Rationale: SASL mechanism selection is a single config
+ * (sasl.mechanism) — keeping all mechanism-specific configs together simplifies discovery and
+ * ensures consistent registration via addClientSaslSupport().
+ *
+ * DECISION: DEFAULT_SASL_MECHANISM = "GSSAPI" (Kerberos) for backward compatibility with pre-SASL
+ * Kafka deployments. Modern deployments typically override to SCRAM-SHA-256/512 or OAUTHBEARER.
+ *
+ * SECURITY: SASL_JAAS_CONFIG uses PASSWORD type to prevent JAAS credentials from appearing in
+ * logs. The sasl.jaas.config property may contain cleartext passwords for PLAIN/SCRAM mechanisms.
+ */
 public class SaslConfigs {
 
     private static final String OAUTHBEARER_NOTE = " Currently applies only to OAUTHBEARER.";
@@ -34,6 +49,11 @@ public class SaslConfigs {
     public static final String GSSAPI_MECHANISM = "GSSAPI";
     public static final String DEFAULT_SASL_MECHANISM = GSSAPI_MECHANISM;
 
+    // SECURITY: JAAS config is typed as PASSWORD to enable masking. Contains login module class
+    // and credentials — if logged in cleartext, would expose authentication secrets.
+    // DECISION: Inline JAAS config (KIP-85) rather than requiring external jaas.conf file.
+    // Rationale: Simplifies deployment in containerized/cloud environments where mounting
+    // config files is cumbersome. Per-listener prefix support enables multi-mechanism brokers.
     public static final String SASL_JAAS_CONFIG = "sasl.jaas.config";
     public static final String SASL_JAAS_CONFIG_DOC = "JAAS login context parameters for SASL connections in the format used by JAAS configuration files. "
         + "JAAS configuration file format is described <a href=\"https://docs.oracle.com/javase/8/docs/technotes/guides/security/jgss/tutorials/LoginConfigFile.html\">here</a>. "
@@ -77,6 +97,9 @@ public class SaslConfigs {
     public static final String SASL_KERBEROS_MIN_TIME_BEFORE_RELOGIN_DOC = "Login thread sleep time between refresh attempts.";
     public static final long DEFAULT_KERBEROS_MIN_TIME_BEFORE_RELOGIN = 1 * 60 * 1000L;
 
+    // DECISION: Login refresh parameters (window.factor, window.jitter, min.period, buffer)
+    // control credential renewal timing. Factor=0.8 means refresh at 80% of token lifetime.
+    // Jitter prevents thundering-herd token refresh across many clients.
     public static final String SASL_LOGIN_REFRESH_WINDOW_FACTOR = "sasl.login.refresh.window.factor";
     public static final String SASL_LOGIN_REFRESH_WINDOW_FACTOR_DOC = "Login refresh thread will sleep until the specified window factor relative to the"
             + " credential's lifetime has been reached, at which time it will try to refresh the credential."
@@ -366,6 +389,12 @@ public class SaslConfigs {
     public static final boolean DEFAULT_SASL_OAUTHBEARER_HEADER_URLENCODE = false;
     public static final String SASL_OAUTHBEARER_HEADER_URLENCODE_DOC = "The (optional) setting to enable the OAuth client to URL-encode the client_id and client_secret in the authorization header"
             + " in accordance with RFC6749, see <a href=\"https://datatracker.ietf.org/doc/html/rfc6749#section-2.3.1\">here</a> for more details. The default value is set to 'false' for backward compatibility";
+
+    // CROSS-CUTTING: Called by ConfigDef.withClientSaslSupport() and reused by ProducerConfig,
+    // ConsumerConfig, AdminClientConfig, ConnectWorkerConfig, and broker inter-broker config.
+    // Registers all client-facing SASL configs with appropriate types and validators.
+    // DECISION: CaseInsensitiveValidString.in("ES256","RS256") for assertion algorithm — limits
+    // to algorithms with proven security properties for JWT assertion signing.
     public static void addClientSaslSupport(ConfigDef config) {
         config.define(SaslConfigs.SASL_KERBEROS_SERVICE_NAME, ConfigDef.Type.STRING, null, ConfigDef.Importance.MEDIUM, SaslConfigs.SASL_KERBEROS_SERVICE_NAME_DOC)
                 .define(SaslConfigs.SASL_KERBEROS_KINIT_CMD, ConfigDef.Type.STRING, SaslConfigs.DEFAULT_KERBEROS_KINIT_CMD, ConfigDef.Importance.LOW, SaslConfigs.SASL_KERBEROS_KINIT_CMD_DOC)
