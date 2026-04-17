@@ -22,6 +22,16 @@ import java.util.Map;
 
 /**
  * Configuration data from a {@link ConfigProvider}.
+ *
+ * @implNote DECISION: Pairs a data map with an optional TTL (Long, nullable) rather than separate data and
+ * metadata objects. Alternative: Separate ConfigDataPayload and ConfigDataMetadata types. Rationale: TTL is
+ * the only metadata currently needed; a flat structure avoids unnecessary indirection. The nullable Long TTL
+ * (null = no expiry) enables ConfigTransformer to skip TTL tracking for providers that don't support it.
+ *
+ * CROSS-CUTTING: Returned by all ConfigProvider implementations (FileConfigProvider, DirectoryConfigProvider,
+ * EnvVarConfigProvider) and consumed by ConfigTransformer.transform() to resolve ${provider:path:key}
+ * placeholders in AbstractConfig. The TTL field enables Connect's DistributedHerder to schedule config
+ * refresh intervals for secret rotation.
  */
 public class ConfigData {
 
