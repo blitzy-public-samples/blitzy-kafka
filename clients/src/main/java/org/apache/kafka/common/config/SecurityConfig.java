@@ -17,7 +17,17 @@
 package org.apache.kafka.common.config;
 
 /**
- * Contains the common security config for SSL and SASL
+ * Contains the common security config for SSL and SASL.
+ *
+ * @implNote DECISION: Minimal class holding only the security.providers config key. Alternative: Merge into
+ * SslConfigs or SaslConfigs. Rationale: security.providers is orthogonal to both SSL and SASL — it registers
+ * custom java.security.Provider implementations (via SecurityProviderCreator SPI) that may provide algorithms
+ * for either SSL or SASL. Keeping it separate avoids false coupling.
+ *
+ * CROSS-CUTTING: The security.providers config is referenced by BrokerSecurityConfigs.CONFIG_DEF,
+ * AbstractConfig, and SslFactory. SecurityProviderCreator implementations are loaded via reflection
+ * during broker startup (ChannelBuilders.createPrincipalBuilder) to register custom JCA providers
+ * before SSL/SASL subsystems initialize.
  */
 public class SecurityConfig {
 
