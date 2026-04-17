@@ -20,6 +20,14 @@ import org.apache.kafka.common.config.provider.ConfigProvider;
 
 /**
  * A callback passed to {@link ConfigProvider} for subscribing to changes.
+ *
+ * @implNote DECISION: Single-method callback interface for push-based config change notification (KIP-297).
+ * Alternative: Polling-based change detection. Rationale: Push model enables ConfigProvider implementations
+ * to notify consumers immediately when secrets rotate (e.g., Vault, AWS Secrets Manager), reducing the
+ * window where stale credentials are used. Currently a default no-op in ConfigProvider — providers opt in.
+ *
+ * CROSS-CUTTING: Part of the ConfigProvider SPI consumed by AbstractConfig's variable resolution pipeline.
+ * Connect framework (DistributedHerder) uses this for dynamic secret refresh in connector configurations.
  */
 public interface ConfigChangeCallback {
 
