@@ -22,6 +22,12 @@ import java.util.Map;
 
 /**
  * The result of a transformation from {@link ConfigTransformer}.
+ *
+ * @implNote DECISION: Separates transformed data from TTL metadata into two maps rather than a single
+ * composite type. Alternative: Per-key result object with value+ttl. Rationale: TTLs are per-path (not
+ * per-key) as reported by ConfigProvider.get(path, keys) — a flat Map&lt;path, ttl&gt; avoids duplicating
+ * TTL values across keys from the same path. Data map contains only keys that had variable placeholders
+ * resolved; unresolved keys are excluded.
  */
 public class ConfigTransformerResult {
 
@@ -48,6 +54,8 @@ public class ConfigTransformerResult {
      *
      * @return data a Map of key-value pairs
      */
+    // CROSS-CUTTING: Consumed by AbstractConfig.resolveConfigVariables() to merge resolved values
+    // back into the originals map. Also used by Connect's DistributedHerder for TTL-based refresh.
     public Map<String, String> data() {
         return data;
     }
