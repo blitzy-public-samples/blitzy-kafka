@@ -18,6 +18,17 @@ package org.apache.kafka.common.config;
 
 import java.util.List;
 
+/**
+ * An immutable wrapper around a list of {@link ConfigValue} instances representing a validated configuration.
+ *
+ * @implNote CROSS-CUTTING: Returned by ConfigDef.validate() and consumed by Connect framework's
+ * Connector.validate() for configuration validation UI. Also used by broker's DynamicBrokerConfig
+ * for runtime config validation results.
+ *
+ * DECISION: Simple immutable wrapper rather than Map-based structure. Alternative: Map&lt;String, ConfigValue&gt;.
+ * Rationale: List preserves definition order from ConfigDef for consistent UI rendering in Connect's
+ * config validation endpoint. Map-based access is available through ConfigValue.name() if needed.
+ */
 public class Config {
     private final List<ConfigValue> configValues;
 
