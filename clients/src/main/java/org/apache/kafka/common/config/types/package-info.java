@@ -16,6 +16,18 @@
  */
 /**
  * Provides custom non-primitive types of configuration properties.
- * <strong>This package is not a supported Kafka API; the implementation may change without warning between minor or patch releases.</strong>
+ * <strong>This package is not a supported Kafka API; the implementation may change without warning
+ * between minor or patch releases.</strong>
+ *
+ * <p>CROSS-CUTTING: This subpackage provides specialized value wrappers for the
+ * {@link org.apache.kafka.common.config.ConfigDef} type system. Currently contains
+ * {@link Password} &mdash; the security-critical type that prevents credential exposure in log
+ * statements, JMX attributes, {@code toString()} output, and configuration dumps. Every config
+ * key declared with {@link org.apache.kafka.common.config.ConfigDef.Type#PASSWORD} stores its
+ * parsed value as a {@link Password} instance.
+ *
+ * <p>Consumed by: {@code SslConfigs} (keystore/truststore passwords), {@code SaslConfigs}
+ * (JAAS config), {@code BrokerSecurityConfigs}, Connect worker configs, and any custom
+ * connector/client configuration that declares PASSWORD-typed keys.
  */
 package org.apache.kafka.common.config.types;
