@@ -15,7 +15,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-# Finding 05 — Infinite Loop and Recursion Denial-of-Service
+# Finding 05 — Infinite Loop and Recursion DoS
 
 > Navigation: [Audit Overview](../README.md) • [Severity Matrix](../severity-matrix.md) • [Remediation Roadmap](../remediation-roadmap.md) • [Accepted Mitigations](../accepted-mitigations.md) • [Attack Surface Map](../diagrams/attack-surface-map.md) • [Dependency Inventory](../dependency-inventory.md)
 
@@ -188,7 +188,7 @@ The items below are forward-looking guidance for subsequent KIP proposals, opera
 4. **Migrate `SafeObjectInputStream` from a blocklist to an allow-list.** This is recorded in [`../remediation-roadmap.md`](../remediation-roadmap.md) Section 3.3.1 as a Medium-term item under sub-finding 08.3 (the primary owner of the blocklist-architecture concern). It is cross-listed here because a positive allow-list of expected deserialised class names would also make the recursion-graph surface explicit at the point of `resolveClass`, supporting both this finding and Finding 08.
 5. **Document the `JmxReporter` include/exclude regex as operator-only and non-request-path.** A runbook-level note that a pathological include/exclude regex stalls observability rather than availability is low-effort and reduces operator anxiety when tuning the filters. No code changes are required.
 
-**Closing.** No code changes are applied in this audit run, in compliance with the Audit Only rule. Every recommendation above is a forward-looking guidance item for the Kafka community to evaluate in subsequent KIP proposals, operator runbook updates, or code-review exercises.
+**Closing.** No code changes are applied in this audit run per the Audit Only rule. Every recommendation above is a forward-looking guidance item for the Kafka community to evaluate in subsequent KIP proposals, operator runbook updates, or code-review exercises.
 
 ## 10. Cross-References
 
@@ -203,6 +203,30 @@ The items below are forward-looking guidance for subsequent KIP proposals, opera
 - **Related finding — Category 08 (Deserialization Attacks):** [`./08-deserialization-attacks.md`](./08-deserialization-attacks.md) — sub-finding 08.3 records the `SafeObjectInputStream` blocklist-versus-allow-list architectural concern. The same file is documented here in Section 4.6 as the recursion/graph-walk mitigation; the two findings are the dual of one another. Sub-finding 08.5 also cites `streams/src/main/java/org/apache/kafka/streams/state/internals/OffsetCheckpoint.java:L58` `WHITESPACE_MINIMUM_ONCE` as evidence that Streams checkpoint parsing is bounded; the same citation appears in Section 4.3 of this document for regex-inventory completeness.
 - **Related finding — Category 09 (Information Leakage):** [`./09-information-leakage.md`](./09-information-leakage.md) — the `JmxReporter` regex surface (05.2) filters metric names that are themselves potentially sensitive observability signals. Finding 09 records the broader JMX exposure story; Category 05 records only the regex-level residual.
 - **Related finding — Category 10 (Public API Developer Misuse):** [`./10-public-api-developer-misuse.md`](./10-public-api-developer-misuse.md) — operator-supplied regex values (`metrics.jmx.include`, `metrics.jmx.exclude`, `sasl.kerberos.principal.to.local.rules`, `allowlist.pattern`) are public configuration keys, and a pathological value is a developer-misuse footgun. Finding 10 records the broader insecure-default posture for operator-facing configuration.
+
+## Validation Checklist
+
+The following checklist items are provided so that a future auditor or reviewer can re-verify this finding against a later Apache Kafka snapshot. Every item is a read-only check that can be performed with `git`, `grep`, or file inspection — no code execution and no modification of source is required, honoring the Audit Only rule.
+
+- [ ] All ten non-test `Pattern.compile` call sites enumerated in Section 4 are still present in the current snapshot: `KerberosRule.java` (4× at L33, L38, L70, L72); `KerberosName.java:L27`; `KerberosShortNamer.java:L36`; `JmxReporter.java` (2× at L308, L309); `ConfigDef.java:L83`; `ConfigTransformer.java:L56`. Use `grep -rn "Pattern.compile" clients/src/main/java/` to verify the census.
+- [ ] Additional pattern sites documented in Section 4.3, 4.4, and 4.5 (`EnvVarConfigProvider`, `ServerConnectionId`, `ApiVersionsRequest`, `OAuthBearerClientInitialResponse`) are still present and unchanged.
+- [ ] `SafeObjectInputStream` at `connect/runtime/src/main/java/org/apache/kafka/connect/runtime/isolation/util/` still uses a suffix-matching blocklist of nine entries as documented in Section 4.6 (cross-referenced to sub-finding 08.3).
+- [ ] Severity assignments in Section 6 agree with the per-row entries for Category 05 in [`../severity-matrix.md`](../severity-matrix.md) Section 3.5 (one Medium, four Low).
+- [ ] The two remediation roadmap entries tagged `[05.1]` (Section 3.3.3) and `[05.*]` (Section 3.4.3) in [`../remediation-roadmap.md`](../remediation-roadmap.md) are the authoritative records for the recommendations in Section 9 above.
+- [ ] The `EnvVarConfigProvider.allowlist.pattern` accepted-mitigation entry #5 in [`../accepted-mitigations.md`](../accepted-mitigations.md) is still present and cross-references the allow-list-over-blocklist property.
+- [ ] The [`../diagrams/attack-surface-map.md`](../diagrams/attack-surface-map.md) Category 05 row intersects the modules enumerated in Section 3 (Clients security/kerberos, metrics, config, network, requests; Streams OffsetCheckpoint; Connect util/SafeObjectInputStream).
+- [ ] The H1 title of this finding ("DoS") aligns with the Category label body text in Section 1 and with the AAP-verbatim category name.
+- [ ] The no-change verification in [`../no-change-verification.md`](../no-change-verification.md) still shows zero modifications to any Kafka source, test, or build file relative to the pre-audit baseline.
+
+## Key Insights
+
+The following plain-language takeaways summarize this finding for operator consumption. They are intended to be read alongside (not in place of) the full finding above.
+
+- **Dominant attack vector:** Two primitives surface here. (1) **ReDoS** — a pathological input evaluated against a regex that contains nested quantifiers or ambiguous alternation can drive matching time from linear to exponential. The only Kafka regex site that accepts operator-supplied pattern shape is `KerberosRule` (`sasl.kerberos.principal.to.local.rules`), and the risk is *operator self-inflicted* rather than externally attacker-controlled. (2) **Deserialization recursion** — a maliciously nested object graph fed to `SafeObjectInputStream` could, in principle, exhaust the stack via unbounded graph-walk.
+- **Strongest existing mitigation:** The ten Pattern.compile sites enumerated here are **all compiled from fixed Kafka-owned literals except `KerberosRule` and the `JmxReporter` include / exclude filters**. Fixed literals are not attacker-controllable. `KerberosRule` patterns are operator-authored and compiled once at `configure` time, so a pathological pattern fails fast rather than accumulating. `SafeObjectInputStream` additionally applies a nine-entry suffix-matching blocklist that rejects known gadget-chain prefixes before the graph-walk begins.
+- **Primary residual risk:** The `KerberosRule` surface accepts operator-supplied regex strings without a ReDoS linter; an operator who authors a catastrophic pattern would cause broker-side auth thread exhaustion every time a principal matches the rule. Similarly, `JmxReporter` include / exclude patterns can exhaust the metrics-emission thread under pathological shapes, but that affects observability rather than availability.
+- **Recommended operator posture:** (1) Validate `sasl.kerberos.principal.to.local.rules` patterns against a ReDoS linter before deployment; (2) prefer explicit literal rules over open-ended regex substitutions; (3) treat `metrics.jmx.include` / `metrics.jmx.exclude` patterns as operator-authored configuration subject to the same review process; (4) monitor for sudden CPU pressure on SASL authentication threads as the canonical symptom of a ReDoS-prone rule in production.
+- **Relationship to other categories:** Category 05 is the **dual of Category 08 (deserialization)** at the `SafeObjectInputStream` boundary; overlaps with **Category 04 (module / built-in abuse)** at the operator-privileged configuration trust boundary for Kerberos rule authoring; and with **Category 10 (public API developer misuse)** for the broader public-config-key misuse posture.
 
 ---
 

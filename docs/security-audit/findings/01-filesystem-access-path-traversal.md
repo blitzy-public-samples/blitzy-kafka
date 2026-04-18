@@ -233,7 +233,7 @@ Consolidated catalogue: see [`../accepted-mitigations.md`](../accepted-mitigatio
 
 ---
 
-## Recommended Future Remediation (no changes in this run)
+## Recommended Future Remediation (No Changes in This Run)
 
 All items below are framed as **suggestions for future work**. Consistent with the audit-only rule, no code change is proposed, applied, or required in this run. Each item uses "consider", "could", or "may" language per the remediation-roadmap convention.
 
@@ -244,11 +244,11 @@ All items below are framed as **suggestions for future work**. Consistent with t
 5. **Operator runbook — document `kafka.csv.metrics.dir` dedicated-directory convention.** Documentation could explicitly state that `kafka.csv.metrics.dir` must be a dedicated, operator-owned directory that contains no other files, given the recursive-delete semantics at `KafkaCSVMetricsReporter.scala:L53`. Related: Finding 01.5.
 6. **Operator runbook — cross-reference `BrokerSecurityConfigs.ALLOWED_SASL_OAUTHBEARER_FILES_CONFIG`.** The Kafka security documentation may cross-reference this configuration key in the OAuth section so that operators who enable `FileJwtRetriever` or `JwtBearerJwtRetriever` know to populate the allow-list. Related: Finding 01.6.
 
-**No code changes are applied in this audit run per the Audit Only rule.** The items above are proposals for future consideration by the Apache Kafka community via the KIP process.
+**Closing.** No code changes are applied in this audit run per the Audit Only rule. Every recommendation above is a forward-looking guidance item for the Kafka community to evaluate in subsequent KIP proposals, operator runbook updates, or code-review exercises.
 
 ---
 
-## References and Cross-Links
+## Cross-References
 
 - **Audit Navigation**
   - [`../README.md`](../README.md) — Audit overview, ten-category enumeration, navigation index.
@@ -275,6 +275,30 @@ All items below are framed as **suggestions for future work**. Consistent with t
   - `clients/src/main/java/org/apache/kafka/common/security/oauthbearer/JwtBearerJwtRetriever.java` — Finding 01.6.
   - `clients/src/main/java/org/apache/kafka/common/config/internals/BrokerSecurityConfigs.java` — Finding 01.6 (cross-reference for broker-side allow-list).
 
+## Validation Checklist
+
+The following checklist items are provided so that a future auditor or reviewer can re-verify this finding against a later Apache Kafka snapshot. Every item is a read-only check that can be performed with `git`, `grep`, or file inspection — no code execution and no modification of source is required, honoring the Audit Only rule.
+
+- [ ] Each cited file path under the **Cross-References → Source Code Citations** list resolves in the current snapshot (`test -f <path>` or equivalent).
+- [ ] Every line range cited in **Evidence 01.1 through 01.6** still points to the same semantic code element in the current snapshot (e.g., `FileConfigProvider.get(String path)` at the line cited, `DirectoryConfigProvider.ALLOWED_PATHS_CONFIG` constant at the line cited, `AllowedPaths.parseUrisSafely` at the line cited, `PluginUtils.pluginUrls` at the line cited, `KafkaCSVMetricsReporter.init` at the line cited, `FileJwtRetriever.retrieve` at the line cited).
+- [ ] The `DirectoryConfigProvider.ALLOWED_PATHS_CONFIG` constant name and default value are unchanged from what is documented in **Evidence 01.2**.
+- [ ] The `EnvVarConfigProvider.ALLOWLIST_PATTERN_CONFIG` constant name and default value are unchanged from what is documented in **Evidence 01.3**.
+- [ ] Severity assignments in the **Severity** section agree with the per-row entries for Category 01 in [`../severity-matrix.md`](../severity-matrix.md) at section 3.1.
+- [ ] The six accepted mitigations referenced in **Accepted Mitigations Already Present** map to entries 4 and 5 (and any additional relevant entries) in [`../accepted-mitigations.md`](../accepted-mitigations.md).
+- [ ] The six numbered recommendations in **Recommended Future Remediation** are represented in the phased horizons of [`../remediation-roadmap.md`](../remediation-roadmap.md) under the Category 01 tag prefix.
+- [ ] The two referenced diagrams ([`../diagrams/attack-surface-map.md`](../diagrams/attack-surface-map.md) and [`../diagrams/threat-model-overview.md`](../diagrams/threat-model-overview.md)) depict the Category 01 surfaces named in the **Kafka Surface Inventory** section.
+- [ ] The no-change verification in [`../no-change-verification.md`](../no-change-verification.md) still shows zero modifications to any Kafka source, test, or build file relative to the pre-audit baseline.
+
+## Key Insights
+
+The following plain-language takeaways summarize this finding for operator consumption. They are intended to be read alongside (not in place of) the full finding above.
+
+- **Dominant attack vector:** The configuration-plane trust boundary is the primary Category 01 surface. A broker or Connect worker that reads secrets via `FileConfigProvider`, `DirectoryConfigProvider`, or `EnvVarConfigProvider` under a **mis-configured `allowed.paths` or `allowlist.pattern`** — or from a filesystem writable by a non-operator account — can be induced to disclose secrets outside the intended scope. The risk is *configuration hygiene*, not a code defect.
+- **Strongest existing mitigation:** `DirectoryConfigProvider.ALLOWED_PATHS_CONFIG` (empty default → deny-by-default) and `EnvVarConfigProvider.ALLOWLIST_PATTERN_CONFIG` (default matches all env vars but is narrow-able) together with `AllowedPaths.parseUrisSafely` (normalizes path prefixes and rejects unresolved symlinks) provide a defensible operator-controlled allow-list. See [`../accepted-mitigations.md`](../accepted-mitigations.md) entries 4 and 5.
+- **Primary residual risk:** Operators who leave `allowed.paths` unset, or who set it to a directory that also contains non-intended secrets, retain unrestricted filesystem reads. Additionally, `KafkaCSVMetricsReporter` performs a `Utils.delete` on its configured output directory on startup — a misconfiguration of this path against a shared filesystem would cause operator-triggered data loss, not an external-attacker vulnerability.
+- **Recommended operator posture:** (1) Set `DirectoryConfigProvider.allowed.paths` explicitly; (2) pin `EnvVarConfigProvider.allowlist.pattern` to a specific prefix; (3) audit the Connect `plugin.path` directory against a CODEOWNERS-style allow-list before deployment; (4) validate that the directory configured for `KafkaCSVMetricsReporter` is dedicated and writable only by the broker user.
+- **Relationship to other categories:** Category 01 overlaps with **Category 10 (public API developer misuse)** for the config-provider default-posture discussion and with **Category 04 (module system / built-in abuse)** for the `plugin.path` traversal surface — cross-reference those categories when reviewing Connect deployments in particular.
+
 ---
 
-_End of Finding 01 — Filesystem Access and Path Traversal._
+> **End of Finding 01.** For the next category, see [Finding 02 — Low-Level Code Safety](./02-low-level-code-safety.md). For the audit overview, see [`../README.md`](../README.md), which indexes every finding in the canonical enumeration order.

@@ -206,7 +206,7 @@ The items below are forward-looking guidance for subsequent KIP proposals, opera
 5. **Audit-log hook for plugin instantiation.** A future enhancement could emit an INFO-level log entry for every plugin instantiation (Connect REST extensions, connectors, transforms, converters, tiered-storage plugins, metrics reporters, authorizers, OAuth retrievers and validators, SSL engine factories) recording the class FQCN, classloader identity (e.g. classloader hash or plugin archive path), and Kafka version. Such a hook would provide forensic-grade evidence of plugin-load events for post-compromise investigation. No design is prescribed here; the hook's scope would be the subject of a future KIP.
 6. **Document the `kafka.metrics.reporters` / `metric.reporters` telemetry-exfiltration risk (04.6).** A runbook-level note that a compromised reporter observes every registered metric — including per-topic and per-consumer-group counters that collectively fingerprint cluster topology — would elevate operator awareness of the read-mostly confidentiality risk. The note would reference this Finding 04 Section 5.6 and the `Monitorable` integration hook documented in `ConnectRestExtension.java:L47-L49` as the prior art for auto-tagged metric provenance.
 
-**Closing.** No code changes are applied in this audit run, in compliance with the Audit Only rule. Every recommendation above is a forward-looking guidance item for the Kafka community to evaluate in subsequent KIP proposals, operator runbook updates, or code-review exercises.
+**Closing.** No code changes are applied in this audit run per the Audit Only rule. Every recommendation above is a forward-looking guidance item for the Kafka community to evaluate in subsequent KIP proposals, operator runbook updates, or code-review exercises.
 
 ## 10. Cross-References
 
@@ -221,6 +221,31 @@ The items below are forward-looking guidance for subsequent KIP proposals, opera
 - **Related finding — Category 09 (Information Leakage):** [`./09-information-leakage.md`](./09-information-leakage.md) — the metrics-reporter surface (04.6) intersects the broader JMX exposure story documented in Finding 09. The exception message in `MirrorClientConfig.java:L91` that echoes the operator-supplied class name is also in scope for the information-leakage review.
 - **Related finding — Category 10 (Public API Developer Misuse):** [`./10-public-api-developer-misuse.md`](./10-public-api-developer-misuse.md) — the `ALLOW_EVERYONE_IF_NO_ACL_IS_FOUND_CONFIG` key cited here in Section 4.7 is also in scope for the public-API-developer-misuse review; its secure-by-default value `false` is recorded in Finding 10 as one of the positive-security postures.
 
+## Validation Checklist
+
+The following checklist items are provided so that a future auditor or reviewer can re-verify this finding against a later Apache Kafka snapshot. Every item is a read-only check that can be performed with `git`, `grep`, or file inspection — no code execution and no modification of source is required, honoring the Audit Only rule.
+
+- [ ] Each of the seven pluggable-SPI surfaces inventoried in Section 3 (Connect REST extensions; Connect connector / transform / converter plugins; MirrorMaker 2 `FORWARDING_ADMIN_CLASS`; metrics reporters; Tiered Storage RSM / RLMM; OAuth `JwtRetriever` / `JwtValidator`; KRaft `Authorizer` and `AclMutator`) is still discovered via `java.util.ServiceLoader` or `Utils.newInstance` in the current snapshot.
+- [ ] `PluginUtils` in `connect/runtime/src/main/java/org/apache/kafka/connect/runtime/isolation/` still applies the documented `EXCLUDE` / `INCLUDE` classloader partition.
+- [ ] The `MAX_RECORDS_PER_USER_OP` bounded-list guard in `AclControlManager.java:L60/L95-L99/L206-L210` remains the accepted-mitigation cited in sub-finding 04.7.
+- [ ] The `KafkaException` error-path at `MirrorClientConfig.java:L91` that echoes the class-load failure diagnostic cited in sub-finding 04.3 and recommendation 4 is unchanged.
+- [ ] The `SslFactory.java:L137-L146` `SSL_ENGINE_FACTORY_CLASS_CONFIG` fallthrough to `Utils.newInstance` documented in recommendation 3 is unchanged.
+- [ ] Severity assignments in Section 6 agree with the per-row entries for Category 04 in [`../severity-matrix.md`](../severity-matrix.md) (four Medium, two Low).
+- [ ] The three remediation roadmap entries tagged `[04.*]` (Sections 3.3.4, 3.3.5, and 3.4.2 of [`../remediation-roadmap.md`](../remediation-roadmap.md)) remain the authoritative records for the recommendations in Section 9 above.
+- [ ] Accepted-mitigation entry #15 (`MAX_RECORDS_PER_USER_OP`) is present in [`../accepted-mitigations.md`](../accepted-mitigations.md) and cross-references this finding's Section 4.7.
+- [ ] The [`../diagrams/attack-surface-map.md`](../diagrams/attack-surface-map.md) Category 04 row intersects the modules enumerated in Section 3 (Connect runtime, MirrorMaker 2 client, Tiered Storage API, Metadata controller, Clients OAuth / SSL).
+- [ ] The no-change verification in [`../no-change-verification.md`](../no-change-verification.md) still shows zero modifications to any Kafka source, test, or build file relative to the pre-audit baseline.
+
+## Key Insights
+
+The following plain-language takeaways summarize this finding for operator consumption. They are intended to be read alongside (not in place of) the full finding above.
+
+- **Dominant attack vector:** An adversary with write access to any directory on the Connect `plugin.path`, or who can substitute a class name on an authorizer / metrics-reporter / OAuth validator configuration key, can **execute code inside the broker or Connect worker JVM** at plugin-load time. Discovery is automatic via `java.util.ServiceLoader`, so a malicious plugin does not require operator opt-in — only that the JAR be present on the discovery path.
+- **Strongest existing mitigation:** The Connect classloader-isolation model (`PluginClassLoader` + `DelegatingClassLoader` + `PluginUtils.EXCLUDE`/`INCLUDE` partition) prevents plugins from accidentally shadowing broker classes; the `MAX_RECORDS_PER_USER_OP` bounded-list guard in `AclControlManager` prevents a malicious authorizer mutation from causing unbounded controller-record emission. These are recorded as accepted mitigations.
+- **Primary residual risk:** There is **no signature verification** on the plugin directory; there is **no ServiceLoader allow-list** for REST extensions or metrics reporters. Any operator who relies on filesystem-level controls (permissions, CODEOWNERS, deployment pipelines) as the sole integrity defence retains full classloader-load-time code-execution exposure if those controls are circumvented.
+- **Recommended operator posture:** (1) Treat the Connect `plugin.path` as code — apply CODEOWNERS review, deployment-pipeline gating, and filesystem immutability; (2) pin `FORWARDING_ADMIN_CLASS` only when strictly required and document the class FQCN in the operator runbook; (3) audit every metrics reporter's FQCN and classloader-load path at deploy time because reporters observe every registered metric; (4) monitor for the `KafkaException` diagnostic at `MirrorClientConfig.java:L91` as the canonical indicator of a class-load misconfiguration.
+- **Relationship to other categories:** Category 04 is tightly coupled to **Category 01 (filesystem access)** — filesystem controls are the precondition for classloader controls — and to **Category 07 (external function / callback misuse)**, which covers the same `Utils.newInstance` seam from the caller side. Cross-reference **Category 09 (information leakage)** when reviewing metrics-reporter exposures.
+
 ---
 
-> **End of Finding 04.** For the next category, see [Finding 05 — Infinite Loop and Recursion Denial-of-Service](./05-infinite-loop-recursion-dos.md). For the preceding categories (01 through 03), see the [Audit Overview](../README.md), which indexes every finding in the canonical enumeration order.
+> **End of Finding 04.** For the next category, see [Finding 05 — Infinite Loop and Recursion DoS](./05-infinite-loop-recursion-dos.md). For the preceding categories (01 through 03), see the [Audit Overview](../README.md), which indexes every finding in the canonical enumeration order.

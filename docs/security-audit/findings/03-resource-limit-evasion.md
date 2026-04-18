@@ -219,7 +219,7 @@ The items below are forward-looking guidance for subsequent KIP proposals, opera
 7. **(Observability — short-term.)** Operators of multi-tenant shared-ingress deployments should configure `max.connections.per.ip.overrides` explicitly for every intermediary address they are aware of, even if the override is `Integer.MAX_VALUE`. The act of enumerating the intermediaries in the override map is a documentation artefact that preserves institutional knowledge of which `InetAddress` values are shared and therefore exempt from per-client-cap interpretation.
 8. **(Metric additions — medium-term.)** Consider a future KIP to emit a per-listener connection-cap-saturation JMX metric that fires even when the broker-wide aggregate is not saturated. This would surface sub-finding 03.1 scenarios in standard dashboards without requiring operators to reconstruct the per-listener view from raw gauges.
 
-**Closing.** No code changes are applied in this audit run, in compliance with the Audit Only rule. Every recommendation above is a forward-looking guidance item for the Kafka community to evaluate in subsequent KIP proposals, operator runbook updates, or code-review exercises.
+**Closing.** No code changes are applied in this audit run per the Audit Only rule. Every recommendation above is a forward-looking guidance item for the Kafka community to evaluate in subsequent KIP proposals, operator runbook updates, or code-review exercises.
 
 ## 10. Cross-References
 
@@ -233,6 +233,31 @@ The items below are forward-looking guidance for subsequent KIP proposals, opera
 - **Related finding — Category 02 (Low-Level Code Safety):** [`./02-low-level-code-safety.md`](./02-low-level-code-safety.md) (see Section 02.5 for the full `SimpleMemoryPool` non-strict allocation characterisation referenced at Section 4.4 above)
 - **Related finding — Category 06 (Network and Subprocess Access):** [`./06-network-subprocess-access.md`](./06-network-subprocess-access.md) (for the upstream Connect-REST and KRaft network-exposure surfaces that interact with the per-listener cap model documented here)
 - **Related finding — Category 10 (Public API Developer Misuse):** [`./10-public-api-developer-misuse.md`](./10-public-api-developer-misuse.md) (for the broader pattern of platform-default configurations that are functionally unbounded until operators make explicit choices)
+
+## Validation Checklist
+
+The following checklist items are provided so that a future auditor or reviewer can re-verify this finding against a later Apache Kafka snapshot. Every item is a read-only check that can be performed with `git`, `grep`, or file inspection — no code execution and no modification of source is required, honoring the Audit Only rule.
+
+- [ ] `ConnectionQuotas` is still an inner class of `SocketServer.scala` in `core/src/main/scala/kafka/network/` (the path used throughout Section 4) — verify with `grep -n "class ConnectionQuotas" core/src/main/scala/kafka/network/SocketServer.scala`.
+- [ ] The `protectedListener` formula at `SocketServer.scala:L1486-L1487` (REPLICATION listener exemption from broker-wide connection caps) is unchanged in the current snapshot, as documented in sub-finding 03.1.
+- [ ] `ClientRequestQuotaManager.java` is still located at `core/src/main/java/kafka/server/` (Java, not Scala) and still implements the percentage-based request-quota model documented in sub-finding 03.2.
+- [ ] The `quota.window.size.seconds` default of 1 second and `num.quota.samples` default of 11 samples remain the platform defaults referenced in sub-findings 03.2 and recommendation 6.
+- [ ] `SimpleMemoryPool` at `clients/src/main/java/org/apache/kafka/common/memory/SimpleMemoryPool.java` still exposes both strict and non-strict allocation modes as documented in sub-finding 03.4 (shared with Category 02 Section 02.5).
+- [ ] Severity assignments in Section 6 agree with the per-row entries for Category 03 in [`../severity-matrix.md`](../severity-matrix.md) at Section 3.3.
+- [ ] The accepted mitigation cross-reference ("entry 7 — REPLICATION listener exemption") exists in [`../accepted-mitigations.md`](../accepted-mitigations.md) and its `M3 ↔ C3` association is depicted in the Mermaid diagram therein.
+- [ ] The remediation roadmap entry tagged `[03.1]` at Section 3.1.6 of [`../remediation-roadmap.md`](../remediation-roadmap.md) covers the network-layer-constraint recommendation from Section 9 above.
+- [ ] The per-listener connection-count gauge `kafka.network:type=ConnectionQuotas,name=ConnectionCount,listener=*` documented in recommendation 3 is still emitted by the current broker runtime (confirmed via `grep -rn "ConnectionCount" core/src/main/scala/kafka/network/`).
+- [ ] The no-change verification in [`../no-change-verification.md`](../no-change-verification.md) still shows zero modifications to any Kafka source, test, or build file relative to the pre-audit baseline.
+
+## Key Insights
+
+The following plain-language takeaways summarize this finding for operator consumption. They are intended to be read alongside (not in place of) the full finding above.
+
+- **Dominant attack vector:** A connected client whose source IP is not covered by a per-IP override can evade request throttling by distributing load across many TCP connections; additionally, the REPLICATION listener is exempt from the broker-wide connection cap by design, which means an attacker who can reach the inter-broker listener directly is not subject to the same envelope as client-facing listeners.
+- **Strongest existing mitigation:** The percentage-based request-quota model with an 11-second sliding window, the 1000 ms maximum throttle response, and the `ConnectionQuotas` per-IP / per-listener / broker-wide three-tier cap structure provide a defensible throttle-first posture for client-facing listeners. The REPLICATION listener exemption is a **deliberate availability trade-off** documented in [`../accepted-mitigations.md`](../accepted-mitigations.md) entry 7 — not an oversight.
+- **Primary residual risk:** Operators who fail to apply `max.connections.per.ip.overrides` to intermediary addresses (load balancers, NAT gateways, ingress proxies) can inadvertently under-cap legitimate traffic while still leaving an unrestricted REPLICATION listener. The non-strict `SimpleMemoryPool` default also allows temporary over-allocation; an adversary who can trigger allocation spikes at the exact rate of garbage collection can sustain memory pressure.
+- **Recommended operator posture:** (1) Enumerate every intermediary address in `max.connections.per.ip.overrides` — even with `Integer.MAX_VALUE` — to preserve institutional knowledge; (2) constrain inter-broker listener reachability at the network layer (security groups, firewall rules) because the broker does not self-constrain it; (3) monitor the per-listener `ConnectionCount` gauge rather than the broker-wide aggregate for saturation alerts; (4) consider switching `SimpleMemoryPool` to strict mode in memory-constrained deployments.
+- **Relationship to other categories:** Category 03 overlaps with **Category 02 (low-level code safety)** at the `SimpleMemoryPool` seam where non-strict allocation interacts with native-compression buffer ownership, and with **Category 06 (network and subprocess access)** because Connect-REST and KRaft listeners share the per-listener cap model. Cross-reference those categories when tuning multi-listener deployments.
 
 ---
 

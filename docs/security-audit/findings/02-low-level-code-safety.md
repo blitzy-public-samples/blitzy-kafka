@@ -208,6 +208,31 @@ The items below are forward-looking guidance for subsequent KIP proposals, opera
 - **Related finding — Category 08 (Deserialization Attacks):** [`./08-deserialization-attacks.md`](./08-deserialization-attacks.md) (for the broader surface of parsing-layer defects that compression sits upstream of)
 - **Related finding — Category 10 (Public API Developer Misuse):** [`./10-public-api-developer-misuse.md`](./10-public-api-developer-misuse.md) (for the broader pattern of platform defaults that require explicit operator choice — the `SimpleMemoryPool` non-strict default is a related property)
 
+## Validation Checklist
+
+The following checklist items are provided so that a future auditor or reviewer can re-verify this finding against a later Apache Kafka snapshot. Every item is a read-only check that can be performed with `git`, `grep`, or file inspection — no code execution and no modification of source is required, honoring the Audit Only rule.
+
+- [ ] Each cited file path under Section 4 "Evidence" resolves in the current snapshot (`clients/src/main/java/org/apache/kafka/common/compress/ZstdCompression.java`, `SnappyCompression.java`, `Lz4Compression.java`; `streams/src/main/java/org/apache/kafka/streams/state/internals/RocksDBStore.java`; `clients/src/main/java/org/apache/kafka/common/memory/SimpleMemoryPool.java`).
+- [ ] The 16 KB `CHUNK_SIZE` constant and `RecyclingBufferPool.INSTANCE` reference in `ZstdCompression` are unchanged from what is documented in Section 4.1.
+- [ ] The `SimpleMemoryPool` strict / non-strict constructor semantics and `oomTimeSensor` wiring are unchanged from what is documented in Section 4.5.
+- [ ] The RocksDB JNI boundary at `RocksDBStore.openRocksDB` remains the designated entry-point into native code for Streams state stores as documented in Section 4.4.
+- [ ] The four native-library versions cited in Section 4 (`zstd-jni 1.5.6-10`, `snappy-java 1.1.10.7`, `lz4-java 1.8.0`, `rocksdbjni 10.1.3`) match the current `gradle/dependencies.gradle` entries on lines 131, 125, 110, and 118 respectively.
+- [ ] Severity assignments in Section 6 agree with the per-row entries for Category 02 in [`../severity-matrix.md`](../severity-matrix.md) at Section 3.2.
+- [ ] The accepted mitigation cross-reference ("entry 6 — 16 KB bounded decompression chunk in `ZstdCompression`") exists in [`../accepted-mitigations.md`](../accepted-mitigations.md) Section 3.4.
+- [ ] The remediation roadmap entries tagged `[02.*]` in Sections 3.2.6 and 3.4.4 of [`../remediation-roadmap.md`](../remediation-roadmap.md) cover the advisory-cadence and monitoring-programme recommendations from Section 9 above.
+- [ ] The [`../diagrams/native-compression-boundary.md`](../diagrams/native-compression-boundary.md) diagram depicts the `BufferSupplier` / `ChunkedBytesStream` / `RecyclingBufferPool` relationships as documented in Sections 4.1 and 4.2.
+- [ ] The no-change verification in [`../no-change-verification.md`](../no-change-verification.md) still shows zero modifications to any Kafka source, test, or build file relative to the pre-audit baseline.
+
+## Key Insights
+
+The following plain-language takeaways summarize this finding for operator consumption. They are intended to be read alongside (not in place of) the full finding above.
+
+- **Dominant attack vector:** An adversary who produces maliciously-crafted compressed records (zstd, snappy, or lz4) can probe the native-decompression path for CPU or memory exhaustion. The risk is **supply-chain and native-library defect exposure** rather than a Kafka code defect — Kafka correctly wraps the native boundary but relies on the upstream JNI library for safety.
+- **Strongest existing mitigation:** The **16 KB bounded decompression chunk in `ZstdCompression`** (via `ChunkedBytesStream` plus Kafka-owned `BufferSupplier` instead of zstd-jni's global soft-reference pools) prevents a single malformed record from exhausting heap through over-allocation. The `SimpleMemoryPool` + `KafkaException` wrapping pattern also isolates native failures from crashing the broker.
+- **Primary residual risk:** Any CVE discovered upstream in `zstd-jni`, `snappy-java`, `lz4-java`, or `rocksdbjni` propagates directly to Kafka because these libraries execute inside the broker JVM. Operators must track the OWASP Dependency Check and Trivy pipelines that Kafka already wires into its CI to detect advisory updates promptly.
+- **Recommended operator posture:** (1) Subscribe to security-advisory feeds for the four native libraries pinned in `gradle/dependencies.gradle`; (2) monitor the `io.bytes-allocated-rate` and `memorypool.oom-time-sensor` metrics for early signs of allocation anomalies; (3) treat any broker OOM or native crash in the decompression hot path as a candidate producer-side malicious payload and preserve the offending segment for forensic review.
+- **Relationship to other categories:** Category 02 overlaps with **Category 03 (resource-limit evasion)** because native-library defects often manifest as resource exhaustion, and with **Category 08 (deserialization attacks)** because compression sits immediately upstream of the parsing pipeline. Cross-reference those categories when investigating any native-boundary anomaly.
+
 ---
 
 > **End of Finding 02.** For the next category, see [Finding 03 — Resource Limit Evasion](./03-resource-limit-evasion.md). For the audit overview, see [`../README.md`](../README.md), which indexes every finding in the canonical enumeration order.
