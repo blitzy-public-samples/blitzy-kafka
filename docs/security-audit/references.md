@@ -170,6 +170,15 @@ Module root: `clients/src/main/java/org/apache/kafka/`
   - Directory-based config reader with an `allowed.paths` allow-list that restricts the
   filesystem sub-tree permitted for resolution. Referenced by: Finding 01 and
   [`./accepted-mitigations.md`](./accepted-mitigations.md).
+- `clients/src/main/java/org/apache/kafka/common/config/internals/AllowedPaths.java` -
+  Internal helper that implements the `allowed.paths` allow-list enforcement consumed by
+  `DirectoryConfigProvider`. Parses the comma-separated allowed-paths list into a set of
+  absolute `java.nio.file.Path` roots and exposes an `isPathAllowed` check that rejects any
+  resolution whose normalized absolute path does not fall under one of the configured
+  roots. This is the canonical chokepoint that prevents a Connect or broker
+  `ConfigProvider` from reading files outside the operator-sanctioned sub-tree. Referenced
+  by: Finding 01 (filesystem access and path traversal) and
+  [`./accepted-mitigations.md`](./accepted-mitigations.md) (accepted mitigation entry 4).
 - `clients/src/main/java/org/apache/kafka/common/config/provider/EnvVarConfigProvider.java` -
   Environment-variable reader with an `allowlist.pattern` regex for filtering which variable
   names may be resolved. `Pattern.compile` site. Referenced by: Finding 01, Finding 05, and
@@ -409,6 +418,17 @@ Module root: `server/src/main/java/org/apache/kafka/server/`
 - `server/src/main/java/org/apache/kafka/server/config/ReplicationConfigs.java` -
   Replication-related configuration keys including follower-fetch defaults. Referenced by:
   Finding 10.
+- `server/src/main/java/org/apache/kafka/network/SocketServerConfigs.java` - Canonical
+  socket-server and connection-quota configuration keys for the broker network layer.
+  Declares the constants for `max.connections`, `max.connections.per.ip`,
+  `max.connections.per.ip.overrides`, `max.connections.creation.rate`, connection-quota
+  filter keys, and the broker-wide listener cap that is enforced by `ConnectionQuotas`.
+  Although the file lives under the `org.apache.kafka.network` package within the `server`
+  module (not under `org.apache.kafka.server.config`), it is the socket-layer counterpart
+  to the server-common broker config classes and is the authoritative source for every
+  connection-quota knob cited in the audit. Referenced by: Finding 03 (resource-limit
+  evasion via connection quotas) and Finding 10 (public API developer misuse for quota
+  defaults and per-listener overrides).
 
 ---
 

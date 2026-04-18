@@ -23,7 +23,7 @@
 
 ---
 
-## Category
+## 1. Category
 
 **Public API developer misuse** (enumeration position 10 of 10 in the user-specified vulnerability taxonomy).
 
@@ -31,7 +31,7 @@ This category covers security-relevant *defaults* in the public Kafka API surfac
 
 ---
 
-## Definition
+## 2. Definition
 
 Kafka exposes hundreds of configuration keys across `KafkaConfig`, `ConnectConfig`, client configs, `SaslConfigs`, `SslConfigs`, and per-module config classes. A subset of those defaults has direct security implications:
 
@@ -43,7 +43,7 @@ This finding is the consolidated watchlist across all three directions. It is pa
 
 ---
 
-## Kafka Surface Inventory
+## 3. Kafka Surface Inventory
 
 The finding enumerates **nine sub-findings** across four postures: four INSECURE defaults (or production-unsuitable reference implementations), four SECURE defaults (accepted mitigations), and one operator-confusion surface. Each sub-finding is tagged inline so a reviewer can distinguish regression-risk items from positive-posture items at a glance.
 
@@ -61,7 +61,7 @@ The finding enumerates **nine sub-findings** across four postures: four INSECURE
 
 ---
 
-## Evidence
+## 4. Evidence
 
 Every citation below was verified against the live repository files during Phase 3 reconnaissance. All paths are absolute from the Kafka repository root; all line ranges correspond to the Apache Kafka 4.2.0-SNAPSHOT snapshot.
 
@@ -190,7 +190,7 @@ Narrative: With the default `true`, any producer or consumer able to clear the a
 
 ---
 
-## Attack Vector
+## 5. Attack Vector
 
 For each sub-finding, the attack vector is characterized below. Severity distinguishes whether the vector is reachable from a network attacker (`External`), requires operator misconfiguration (`Op-Mis`), or is purely a regression-risk (`Reg-Risk` — a future code change would introduce the vulnerability).
 
@@ -206,7 +206,7 @@ For each sub-finding, the attack vector is characterized below. Severity disting
 
 ---
 
-## Severity
+## 6. Severity
 
 | Sub-finding | Severity | Rationale |
 | --- | --- | --- |
@@ -224,7 +224,7 @@ Severity classifications follow the four-tier model defined in [`../README.md`](
 
 ---
 
-## Business Impact
+## 7. Business Impact
 
 The insecure-default half of this watchlist translates directly into operational risk categories a non-technical audience can evaluate:
 
@@ -237,7 +237,7 @@ The non-technical takeaway: today's Kafka deployment is exposed mainly through *
 
 ---
 
-## Accepted Mitigations Already Present
+## 8. Accepted Mitigations Already Present
 
 The following SECURE defaults and existing Javadoc warnings are mitigations already encoded in the codebase. They are catalogued in depth in [`../accepted-mitigations.md`](../accepted-mitigations.md); the cross-references below tie them back to the sub-finding they protect.
 
@@ -261,7 +261,7 @@ These mitigations are the reason none of the Medium/Low sub-findings above escal
 
 ---
 
-## Recommended Future Remediation (No Changes in This Run)
+## 9. Recommended Future Remediation (No Changes in This Run)
 
 > The items below are future-state suggestions. The audit proposes NO code, configuration, or documentation change against the existing Kafka repository in this run. Every item requires formal engineering review — typically a Kafka Improvement Proposal (KIP) — before any action. Reviewers MUST verify the "No Changes" clause via [`../no-change-verification.md`](../no-change-verification.md) before considering any recommendation for implementation.
 
@@ -276,7 +276,7 @@ These mitigations are the reason none of the Medium/Low sub-findings above escal
 
 ---
 
-## Cross-References
+## 10. Cross-References
 
 - [`../accepted-mitigations.md`](../accepted-mitigations.md) — full catalog of secure defaults, including 10.5, 10.6, 10.7, 10.8 and the `ssl.endpoint.identification.algorithm = "https"` mitigation paired with 10.1.
 - [`../remediation-roadmap.md`](../remediation-roadmap.md) — suggested hardening order across the four phases (Immediate / Short-term / Medium-term / Long-term), with every item here echoed in the roadmap's future-state Gantt chart.
@@ -295,11 +295,11 @@ The following checklist items are provided so that a future auditor or reviewer 
 - [ ] **10.1 PLAINTEXT listener default:** confirm that `clients/src/main/java/org/apache/kafka/common/security/auth/SecurityProtocol.java` still declares `PLAINTEXT` as a first-class protocol and that no broker-side config in `core/src/main/scala/kafka/server/KafkaConfig.scala` or `server-common/src/main/java/org/apache/kafka/server/config/` mandates a non-PLAINTEXT default for `listeners` or `advertised.listeners`. Re-read the `ssl.endpoint.identification.algorithm = "https"` default to confirm the host-identification mitigation is still present.
 - [ ] **10.2 GSSAPI-only default mechanism:** verify that `clients/src/main/java/org/apache/kafka/common/config/SaslConfigs.java` still documents `GSSAPI` as the default for `sasl.mechanism` and that the broker config in `core/src/main/scala/kafka/server/KafkaConfig.scala` still lists only `GSSAPI` as the enabled mechanism unless the operator overrides `sasl.enabled.mechanisms`.
 - [ ] **10.3 `PropertyFileLoginModule` Javadoc warning:** open `connect/basic-auth-extension/src/main/java/org/apache/kafka/connect/rest/basic/auth/extension/PropertyFileLoginModule.java` and confirm the class-level Javadoc still contains the literal phrase warning that the module is "NOT intended to be used in production since credentials are stored in PLAINTEXT." Re-read the companion `JaasBasicAuthFilter` class to confirm no in-product default makes `PropertyFileLoginModule` automatically active.
-- [ ] **10.4 `OAuthBearerUnsecuredValidatorCallbackHandler` availability:** confirm that `clients/src/main/java/org/apache/kafka/common/security/oauthbearer/internals/unsecured/OAuthBearerUnsecuredValidatorCallbackHandler.java` still exists as a shipping class and that no opt-in flag gates its instantiation. Cross-verify that `BrokerJwtValidator` at `clients/src/main/java/org/apache/kafka/common/security/oauthbearer/internals/secured/BrokerJwtValidator.java:L131` still enforces `DISALLOW_NONE` for jose4j JWT validation when the secured handler is in use (counter-mitigation also cited in accepted-mitigations Entry 3).
+- [ ] **10.4 `OAuthBearerUnsecuredValidatorCallbackHandler` availability:** confirm that `clients/src/main/java/org/apache/kafka/common/security/oauthbearer/internals/unsecured/OAuthBearerUnsecuredValidatorCallbackHandler.java` still exists as a shipping class and that no opt-in flag gates its instantiation. Cross-verify that `BrokerJwtValidator` at `clients/src/main/java/org/apache/kafka/common/security/oauthbearer/BrokerJwtValidator.java:L131` still enforces `DISALLOW_NONE` for jose4j JWT validation when the secured handler is in use (counter-mitigation also cited in accepted-mitigations Entry 3). (Note: `BrokerJwtValidator` was reorganized out of the `internals/secured/` sub-package in a prior Kafka refactor; the current canonical path is the one shown here. The Source-cited evidence entries above already use the current path — only this reviewer-facing checklist item was affected.)
 - [ ] **10.5 `ssl.allow.dn.changes` / `ssl.allow.san.changes` defaults:** inspect `clients/src/main/java/org/apache/kafka/common/config/SslConfigs.java` and confirm both `SSL_ALLOW_DN_CHANGES_CONFIG` and `SSL_ALLOW_SAN_CHANGES_CONFIG` still default to `false`. The SECURE default posture is the reason sub-finding 10.5 is rated Medium rather than High.
 - [ ] **10.6 `access.control.allow.origin` empty default:** re-read `connect/runtime/src/main/java/org/apache/kafka/connect/runtime/rest/RestServerConfig.java` and confirm the `ACCESS_CONTROL_ALLOW_ORIGIN_CONFIG` default is the empty string (`""`). Cross-check against `RestServer.java` `CrossOriginHandler` instantiation to confirm the default behavior is no CORS headers emitted.
 - [ ] **10.7 `allow.everyone.if.no.acl.found = false`:** confirm via `metadata/src/main/java/org/apache/kafka/metadata/authorizer/StandardAuthorizer.java` (and supporting `StandardAuthorizerData`) that the SECURE default is preserved. Cross-reference `../diagrams/authorization-decision-flow.md` to verify the Mermaid flowchart still depicts the `allow.everyone.if.no.acl.found` branch as a terminal secure-deny by default.
-- [ ] **10.8 `unclean.leader.election.enable = false`:** inspect the replication config definitions in `server-common/src/main/java/org/apache/kafka/server/config/ReplicationConfigs.java` and `core/src/main/scala/kafka/server/KafkaConfig.scala` to confirm the broker-wide default remains `false`. This default is the reason transactional topics remain durable under the current posture.
+- [ ] **10.8 `unclean.leader.election.enable = false`:** inspect the replication config definitions in `server/src/main/java/org/apache/kafka/server/config/ReplicationConfigs.java` and `core/src/main/scala/kafka/server/KafkaConfig.scala` to confirm the broker-wide default remains `false`. This default is the reason transactional topics remain durable under the current posture. (Note: `ReplicationConfigs.java` was relocated from the `server-common` module to the `server` module in a prior Kafka refactor; the current canonical path is the one shown here. The Source-cited evidence entries above already use the current path — only this reviewer-facing checklist item was affected.)
 - [ ] **10.9 `auto.create.topics.enable = true`:** confirm that `core/src/main/scala/kafka/server/KafkaConfig.scala` still declares the default as `true`. Sub-finding 10.9 is rated Medium specifically because of the interaction with sub-finding 10.1 (PLAINTEXT) and sub-finding 10.7 (when `allow.everyone.if.no.acl.found` is overridden to `true`).
 - [ ] **Severity alignment:** verify that the five SECURE defaults (10.5, 10.6, 10.7, 10.8, plus the `ssl.endpoint.identification.algorithm = "https"` companion) and the four INSECURE/UNSUITABLE defaults (10.1, 10.2, 10.3, 10.4, 10.9) match the per-row severity assigned in [`../severity-matrix.md`](../severity-matrix.md) under the Category 10 sub-table, including the three High-rated entries (10.1, 10.3, 10.4).
 - [ ] **Accepted-mitigation cross-references:** confirm that [`../accepted-mitigations.md`](../accepted-mitigations.md) still catalogues each SECURE default referenced above (10.5, 10.6, 10.7, 10.8) and that every entry's Cross-Reference block points back to this finding for the watchlist framing.

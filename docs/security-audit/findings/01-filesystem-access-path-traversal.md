@@ -23,19 +23,19 @@
 
 ---
 
-## Category
+## 1. Category
 
 **Filesystem access and path traversal** (canonical user-supplied label, enumeration position 1 of 10).
 
 ---
 
-## Definition
+## 2. Definition
 
 This category covers any Kafka code path that accepts a filesystem path, directory, or file URL from configuration — whether supplied statically at broker / Connect-worker startup, dynamically via broker reconfiguration, or through connector-configuration submission — and subsequently opens, reads, writes, or deletes a file or directory at that path. The attack vector is a **configuration-level injection** rather than a client-session injection: the adversary's primary prerequisite is a privilege to write (or substitute) a configuration value that reaches one of these resolvers. Path traversal inside a Kafka wire protocol message is not in scope because Kafka does not expose any filesystem read/write primitive to unauthenticated network clients — the on-disk surface is reachable only through configuration plumbing (`ConfigProvider` plug-ins, connector properties, OAuth JAAS configuration, Connect `plugin.path`, broker `kafka.csv.metrics.dir`). The finding documents each such resolver, the allow-list (if any) that mitigates it, and the residual exposure in a default-configuration deployment.
 
 ---
 
-## Kafka Surface Inventory
+## 3. Kafka Surface Inventory
 
 Six sub-findings, enumerated in the order of increasing specificity (generic on-disk resolvers first, single-call-site surfaces last):
 
@@ -82,7 +82,7 @@ File-path validation is delegated to `ConfigurationUtils.validateFile` / `valida
 
 ---
 
-## Evidence
+## 4. Evidence
 
 Each citation below references the exact file-path and line-range of the surface under analysis. Code excerpts are kept to 2-3 lines each to minimize copy-verbatim and to preserve clarity.
 
@@ -162,7 +162,7 @@ Cross-reference (broker-side allow-list):
 
 ---
 
-## Attack Vector
+## 5. Attack Vector
 
 Each sub-finding has a distinct attack precondition. The common theme is that the adversary requires a foothold at the configuration plane rather than at the network plane.
 
@@ -192,7 +192,7 @@ For clients, an adversary who can author the Kafka client's JAAS configuration c
 
 ---
 
-## Severity
+## 6. Severity
 
 Severities are assigned on the scale used across this audit: `[Critical]`, `[High]`, `[Medium]`, `[Low]`. The rationale column documents the CVSS-style reasoning without computing a numeric score.
 
@@ -209,7 +209,7 @@ No sub-finding in this category rises to `[High]` or `[Critical]` because every 
 
 ---
 
-## Business Impact
+## 7. Business Impact
 
 - **Secret disclosure**: Sub-findings 01.1, 01.2, 01.3, and 01.6 can leak TLS private keys, SCRAM passphrases, OAuth client secrets, delegation-token HMAC keys, AWS / cloud-provider credentials inherited in environment variables, and Connect-connector secrets. In regulated environments (SOC 2, ISO 27001, PCI-DSS, HIPAA), these are Tier-1 data-classification incidents and typically trigger a customer-notification obligation.
 - **Code execution and supply-chain compromise**: Sub-finding 01.4 (`plugin.path`) is the category's only code-execution vector. A single successful write to a plugin directory survives worker restarts and typically persists until the plugin directory is re-imaged. Detection is difficult because the worker registers the malicious plugin as a legitimate connector class.
@@ -218,7 +218,7 @@ No sub-finding in this category rises to `[High]` or `[Critical]` because every 
 
 ---
 
-## Accepted Mitigations Already Present
+## 8. Accepted Mitigations Already Present
 
 The following mitigations are implemented in the current codebase. They are documented here so that a future maintainer who re-reads this finding does not regress them. Cross-references link to the consolidated accepted-mitigations catalogue.
 
@@ -233,7 +233,7 @@ Consolidated catalogue: see [`../accepted-mitigations.md`](../accepted-mitigatio
 
 ---
 
-## Recommended Future Remediation (No Changes in This Run)
+## 9. Recommended Future Remediation (No Changes in This Run)
 
 All items below are framed as **suggestions for future work**. Consistent with the audit-only rule, no code change is proposed, applied, or required in this run. Each item uses "consider", "could", or "may" language per the remediation-roadmap convention.
 
@@ -248,7 +248,7 @@ All items below are framed as **suggestions for future work**. Consistent with t
 
 ---
 
-## Cross-References
+## 10. Cross-References
 
 - **Audit Navigation**
   - [`../README.md`](../README.md) — Audit overview, ten-category enumeration, navigation index.
