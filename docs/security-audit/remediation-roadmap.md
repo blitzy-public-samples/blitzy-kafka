@@ -83,31 +83,38 @@ gantt
     title Remediation Roadmap - Future State (no changes applied in this run)
     dateFormat  YYYY-MM-DD
     axisFormat  %Y-%m
-    section Immediate (operator action)
-    Harden Connect REST basic-auth (06.1)            :done,   imm1, 2026-04-17, 30d
-    Disable OAuthBearerUnsecured in prod (07.1,10.4) :done,   imm2, 2026-04-17, 30d
-    Replace PropertyFileLoginModule (10.3)           :active, imm3, after imm1, 45d
-    Enforce TLS on all listeners (10.1)              :active, imm4, after imm2, 45d
-    section Short-term (1-3 months)
-    Document INTERNAL_REQUEST_MATCHERS (06.1)        :        st1,  after imm3, 30d
-    Audit OAuth dual-validator posture (08.4)        :        st2,  after imm4, 30d
-    section Medium-term (3-6 months)
-    Convert SafeObjectInputStream to allow-list (08.3) :      mt1,  2026-08-01, 60d
-    Constrain release.py shell=True calls (06.4)       :      mt2,  2026-08-15, 30d
-    section Long-term (6+ months)
-    ReDoS backstop via timeout-aware matcher (05.*)    :      lt1,  2026-11-01, 90d
-    Consolidate redaction markers (09.1)               :      lt2,  2027-01-01, 60d
+    section Proposed - Immediate (operator action)
+    Harden Connect REST basic-auth (06.1)            :crit, imm1, 2026-04-17, 30d
+    Disable OAuthBearerUnsecured in prod (07.1,10.4) :crit, imm2, 2026-04-17, 30d
+    Replace PropertyFileLoginModule (10.3)           :crit, imm3, after imm1, 45d
+    Enforce TLS on all listeners (10.1)              :crit, imm4, after imm2, 45d
+    section Proposed - Short-term (1-3 months)
+    Document INTERNAL_REQUEST_MATCHERS (06.1)        :       st1,  after imm3, 30d
+    Audit OAuth dual-validator posture (08.4)        :       st2,  after imm4, 30d
+    section Proposed - Medium-term (3-6 months)
+    Convert SafeObjectInputStream to allow-list (08.3) :     mt1,  2026-08-01, 60d
+    Constrain release.py shell=True calls (06.4)       :     mt2,  2026-08-15, 30d
+    section Proposed - Long-term (6+ months)
+    ReDoS backstop via timeout-aware matcher (05.*)    :     lt1,  2026-11-01, 90d
+    Consolidate redaction markers (09.1)               :     lt2,  2027-01-01, 60d
 ```
 
 ### 2.1 Gantt Legend
 
+> **Important — Illustrative Emphasis Only**: The Gantt bars use the `:crit` marker for **visual
+> emphasis only**. The marker does **NOT** mean the task is critical-path, in-progress, completed,
+> or otherwise engaged. Every task in this chart is **proposed future work** that has not been
+> started and will not be started by this audit. The `:crit` marker was chosen because alternative
+> Mermaid Gantt markers such as `:done` and `:active` carry "completed" and "in-progress" semantics
+> that would falsely imply the audit has applied changes.
+
 | Marker                     | Meaning in this chart                                                                                        |
 |----------------------------|--------------------------------------------------------------------------------------------------------------|
-| `:done,`                   | Represents a class of change that is already **actionable today** by an operator without any code change.    |
-| `:active,`                 | Represents a class of change that is **actionable today** but typically requires coordination (TLS rollout). |
+| `:crit,`                   | **Visual emphasis only** — this audit recommends operator-actionable phases highlighted; NOT critical-path, NOT engaged, NOT in progress. |
 | (no marker)                | Represents a class of change that is **proposed** and requires a KIP or equivalent engineering review.       |
 | Dates                      | Illustrative only. The audit recommends no binding schedule. ASF governance determines real timing.          |
 | Finding ID in parentheses  | The originating finding ID as enumerated in [`./severity-matrix.md`](./severity-matrix.md).                  |
+| "Proposed -" section prefix | Reinforces that every phase is a recommendation, not an activity engaged by this audit.                     |
 
 ### 2.2 Phase Summary
 

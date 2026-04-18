@@ -459,9 +459,13 @@ Module root: `connect/runtime/src/main/java/org/apache/kafka/connect/runtime/iso
 
 ### 8.3 Connect Util - Safe Deserialization
 
-- `connect/runtime/src/main/java/org/apache/kafka/connect/util/SafeObjectInputStream.java:L17-L25`
+- `connect/runtime/src/main/java/org/apache/kafka/connect/util/SafeObjectInputStream.java:L25-L62`
   - `ObjectInputStream` subclass that enforces a suffix-matching blocklist of disallowed
-  class-name patterns during Java Serialisation deserialisation. Referenced by: Finding 08
+  class-name patterns during Java Serialisation deserialisation. Key content spans:
+  the `DEFAULT_NO_DESERIALIZE_CLASS_NAMES` blocklist at **L27-L37**, the overridden
+  `resolveClass(ObjectStreamClass)` gate at **L43-L52** which throws `SecurityException`
+  for any blocked class, and the private `isBlocked(String name)` helper at **L54-L62**
+  which performs the `endsWith(...)` suffix match. Referenced by: Finding 08
   (deserialization attacks).
 
 ### 8.4 Connect JSON Converter
@@ -488,9 +492,11 @@ Module root:
 - `.../BasicAuthSecurityRestExtension.java` - `ConnectRestExtension` implementation that
   registers `JaasBasicAuthFilter` with the Jersey container. Discovered through
   `ServiceLoader`. Referenced by: Finding 04 and Finding 06.
-- `.../PropertyFileLoginModule.java:L49-L50` - Simple JAAS `LoginModule` that reads
-  username/password entries from a properties file. The class comment explicitly states it
-  is "NOT intended to be used in production". Referenced by: Finding 10.
+- `.../PropertyFileLoginModule.java:L42-L50` - Simple JAAS `LoginModule` that reads
+  username/password entries from a properties file. The class-level Javadoc at **L42-L49**
+  explicitly states at **L47-L48** that this implementation is "NOT intended to be used in
+  production since the credentials are stored in PLAINTEXT in the properties file"; the
+  class declaration follows at **L50**. Referenced by: Finding 10.
 
 ### 8.6 Connect API
 

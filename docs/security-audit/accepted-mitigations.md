@@ -310,39 +310,49 @@ in **How to Read an Entry** above. Numbering is contiguous across subsystems to 
 
 #### 6. 16 KB bounded decompression chunk in `ZstdCompression` `[Accepted]`
 
-- **Source**: `clients/src/main/java/org/apache/kafka/common/compress/ZstdCompression.java:L40-L80,L108`
+- **Source**: `clients/src/main/java/org/apache/kafka/common/compress/ZstdCompression.java:L55-L63,L65-L75,L77-L98,L105-L109`
 - **Threat Defended**: Compression-bomb DoS against brokers and consumers — crafted
   zstd streams with extreme compression ratios could otherwise force a single-iteration
   allocation large enough to OOM the JVM.
 - **Mechanism**:
-  - **Bounded output buffer on compression**: at lines 59–65 the compression path wraps
-    the native `ZstdOutputStreamNoFinalizer` in a `BufferedOutputStream` with a
-    **16 KB** buffer, so writes to native code occur in fixed-size chunks.
-  - **Bounded input streaming on decompression**: at lines 66–75 the decompression path
-    uses `ChunkedBytesStream` which reads from the native zstd input stream through
-    Kafka-supplied buffers rather than directly draining into a caller-sized array.
-  - **Kafka-owned pooling**: lines 78–98 use `RecyclingBufferPool` instances provided by
-    the Kafka-side `BufferSupplier` interface, rather than zstd-jni's default
-    `NoPool`/`RecyclingBufferPool` with JVM-global soft references. Kafka owns the
-    buffer lifecycle.
-  - **Decompression output size constant**: line 108 declares a
-    `decompressionOutputSize()` of **16 KB** that callers use to size downstream record
-    readers, preventing single-read amplification.
+  - **Bounded output buffer on compression (wrap-for-output path)**: at lines **L55–L63**
+    the `wrapForOutput` method wraps the native `ZstdOutputStreamNoFinalizer` in a
+    `BufferedOutputStream` with a **16 KB** buffer (L59), so writes to native code occur
+    in fixed-size chunks. The output path uses **zstd-jni's built-in
+    `RecyclingBufferPool.INSTANCE`** (also at L59) for the output side, which is
+    acceptable because the producer fully controls its own output buffers.
+  - **Bounded input streaming on decompression (wrap-for-input path)**: at lines **L65–L75**
+    the `wrapForInput` method uses `ChunkedBytesStream` to read from the native zstd
+    input stream through Kafka-supplied buffers rather than directly draining into a
+    caller-sized array.
+  - **Kafka-owned pooling on decompression (wrap-for-zstd-input path)**: at lines
+    **L77–L98** the `wrapForZstdInput` helper constructs an **anonymous Kafka-owned
+    `BufferPool`** (L83–L93) whose `get(int)` and `release(ByteBuffer)` callbacks
+    delegate to Kafka's own `BufferSupplier` (supplied by the caller). Kafka deliberately
+    does **not** reuse `com.github.luben.zstd.RecyclingBufferPool` on the input side
+    because that pool requires JVM-wide synchronization and relies on soft references
+    that the GC may retain indefinitely — the file's inline comment at L79–L82 documents
+    this rationale. Kafka owns the decompression buffer lifecycle end-to-end.
+  - **Decompression output size constant**: at lines **L105–L109** the
+    `decompressionOutputSize()` method returns **16 * 1024** (L108) that callers use to
+    size downstream record readers, preventing single-read amplification.
 - **Why It Is Effective**:
   - A 16 KB chunk boundary caps the amount of work performed per decompression iteration.
     A compression bomb cannot allocate more than one chunk's worth in a single syscall
     into the native library; the broker's `MemoryPool` governs subsequent allocations.
-  - Kafka-owned buffers prevent cross-session buffer retention: when a connection closes,
-    the pool reclaims its buffers rather than leaking them to a soft-reference cache
-    that only the GC can clear.
-  - `KafkaException` wrapping of any `Throwable` from the native layer prevents
-    unchecked exceptions from escaping the compression boundary.
+  - Kafka-owned input-side buffers prevent cross-session buffer retention: when a
+    connection closes, the `BufferSupplier` reclaims its buffers rather than leaking
+    them to a soft-reference cache that only the GC can clear.
+  - `KafkaException` wrapping of any `Throwable` from the native layer (at L60–L62 for
+    output and L72–L74 for input) prevents unchecked exceptions from escaping the
+    compression boundary.
 - **Regression Risk**:
   - Removing the `BufferedOutputStream` wrapper, raising the chunk size without
     re-evaluating the memory ceiling, or allowing callers to inject an unbounded
     `BufferSupplier` would reopen the compression-bomb vector.
-  - Replacing `RecyclingBufferPool` with `NoPool` would force per-request native
-    allocation and undo the pool's protection against buffer-churn DoS.
+  - Replacing the Kafka-owned anonymous `BufferPool` on the input side with zstd-jni's
+    `NoPool` or `RecyclingBufferPool` would force JVM-global locking, reintroduce
+    soft-reference retention semantics, and undo the per-caller lifecycle guarantees.
 - **Cross-references**: [`./findings/02-low-level-code-safety.md`](./findings/02-low-level-code-safety.md)
   (entry 02.1), [`./findings/03-resource-limit-evasion.md`](./findings/03-resource-limit-evasion.md),
   [`./diagrams/native-compression-boundary.md`](./diagrams/native-compression-boundary.md).
@@ -428,7 +438,7 @@ in **How to Read an Entry** above. Numbering is contiguous across subsystems to 
 
 #### 9. Copy-on-write `AclCache` preserves ACL consistency during mutations `[Accepted]`
 
-- **Source**: `metadata/src/main/java/org/apache/kafka/metadata/authorizer/AclCache.java:L23-L24,L32,L36-L41,L75-L106`;
+- **Source**: `metadata/src/main/java/org/apache/kafka/metadata/authorizer/AclCache.java:L23-L24,L32,L36-L41,L74-L103`;
   `metadata/src/main/java/org/apache/kafka/metadata/authorizer/StandardAcl.java:L34-L36`
 - **Threat Defended**: Authorization decisions made against a partially-mutated cache.
   A naive concurrent-mutable cache permits readers to observe an intermediate state
@@ -436,12 +446,18 @@ in **How to Read an Entry** above. Numbering is contiguous across subsystems to 
   from an index) and produce inconsistent authorization outcomes.
 - **Mechanism**:
   - `AclCache` holds its state in two `ImmutableMap` / `ImmutableNavigableSet` fields
-    declared `final` at `L36-L41` (imports from `com.google.common.collect` at
-    `L23-L24`). The cache object itself is **immutable** once constructed.
-  - Mutations (`addAcl(Uuid, StandardAcl)` at `L75+` and
-    `removeAcl(Uuid)` at `L89+`) return a **new** `AclCache` instance built from the
-    existing immutable collections via `ImmutableMap.builder()` / `ImmutableNavigableSet`
-    factory operations. The current instance is never mutated.
+    declared `final` at `L36-L41`. The types are imported at `L23-L24` from Kafka's own
+    immutable-collections package **`org.apache.kafka.server.immutable`** (a
+    PCollections-backed, Kafka-internal library) — **not** from any third-party library
+    such as Guava's `com.google.common.collect`. The cache object itself is
+    **immutable** once constructed.
+  - Mutations (`addAcl(Uuid, StandardAcl)` at `L74-L88` and
+    `removeAcl(Uuid)` at `L91-L103`) return a **new** `AclCache` instance produced via
+    the `org.apache.kafka.server.immutable` **structural-sharing** operations
+    `.updated(key, value)`, `.added(element)`, and `.removed(element/key)` — which
+    create a new collection that shares most of its internal nodes with the prior
+    collection. No builder pattern and no wholesale rebuild are used; the current
+    instance is never mutated.
   - `StandardAcl` is declared as a Java `record` at `L34-L36`, making individual ACL
     entries immutable and safe to share across the old and new cache instances.
   - Readers hold a reference to the current cache. When the controller swaps a new
@@ -456,11 +472,14 @@ in **How to Read an Entry** above. Numbering is contiguous across subsystems to 
     `ConcurrentHashMap`-based caches can have under contention (e.g., iterator
     invalidation, intermediate index updates).
 - **Regression Risk**:
-  - Replacing `ImmutableMap` / `ImmutableNavigableSet` with `ConcurrentHashMap` or
-    `ConcurrentSkipListSet` for "performance" would re-expose readers to mid-mutation
-    state.
+  - Replacing the `org.apache.kafka.server.immutable.ImmutableMap` /
+    `ImmutableNavigableSet` pair with `ConcurrentHashMap` or `ConcurrentSkipListSet`
+    for "performance" would re-expose readers to mid-mutation state.
   - Adding a mutable field to `AclCache` (even as a cache-of-caches optimization) would
     break the single-snapshot property.
+  - Replacing the structural-sharing `.updated()` / `.added()` / `.removed()` calls
+    with a full-rebuild pattern (for example a Guava `ImmutableMap.builder()`-style
+    builder) would increase GC pressure and defeat the copy-on-write latency guarantees.
 - **Cross-references**: [`./findings/04-module-system-builtin-abuse.md`](./findings/04-module-system-builtin-abuse.md),
   [`./diagrams/authorization-decision-flow.md`](./diagrams/authorization-decision-flow.md).
 
@@ -644,23 +663,26 @@ in **How to Read an Entry** above. Numbering is contiguous across subsystems to 
 
 #### 15. `MAX_RECORDS_PER_USER_OP` bounded-list guard in `AclControlManager` `[Accepted]`
 
-- **Source**: `metadata/src/main/java/org/apache/kafka/controller/AclControlManager.java:L52,L99,L207-L209`
+- **Source**: `metadata/src/main/java/org/apache/kafka/controller/AclControlManager.java:L52,L99,L207-L209`;
+  `metadata/src/main/java/org/apache/kafka/controller/QuorumController.java:L185`
 - **Threat Defended**: Controller memory blow-up via pathological bulk ACL operations.
   Without a per-operation record-count bound, an operator or a compromised client
   could submit a `CreateAcls` or `DeleteAcls` request that produces millions of
   metadata records in a single controller operation, exhausting heap.
 - **Mechanism**:
-  - The constant `MAX_RECORDS_PER_USER_OP` is declared at `L52` of
-    `AclControlManager`. It caps the total number of metadata records generated for
-    a single user-visible ACL operation.
-  - At `L99` the controller allocates the record accumulator with
-    `BoundedList.newArrayBacked(MAX_RECORDS_PER_USER_OP, ...)` rather than a plain
+  - The constant `MAX_RECORDS_PER_USER_OP` is **declared** at
+    `QuorumController.java:L185` (it resolves to `DEFAULT_MAX_RECORDS_PER_BATCH`) and
+    is **imported** into `AclControlManager` via the `import static` at
+    `AclControlManager.java:L52`. It caps the total number of metadata records
+    generated for a single user-visible ACL operation.
+  - At `AclControlManager.java:L99` the controller allocates the record accumulator
+    with `BoundedList.newArrayBacked(MAX_RECORDS_PER_USER_OP)` rather than a plain
     `ArrayList` — the bounded list rejects subsequent additions once the cap is
     reached.
-  - At `L207-L209`, the overflow behaviour is a thrown
-    `BoundedListTooLongException` (or the `IllegalArgumentException` family
-    propagated through the controller's event loop), which the controller returns to
-    the caller as a retryable/rejectable error rather than silently truncating.
+  - At `AclControlManager.java:L207-L209`, the delete path performs an explicit
+    size-check before adding each record and throws `BoundedListTooLongException`
+    when the cap is reached. This exception is returned to the caller as a
+    rejectable error rather than silently truncating.
 - **Why It Is Effective**:
   - The memory ceiling is deterministic: a single bulk operation cannot allocate more
     than `MAX_RECORDS_PER_USER_OP` records' worth of accumulator space, regardless of

@@ -19,7 +19,7 @@
 
 # Apache Kafka Security Audit - Top-Level Navigation Index
 
-(Audit performed against Apache Kafka 4.2.0-SNAPSHOT, HEAD commit: `8a99096de23820e868b238fbfa747b29887d72e2`, snapshot date 2026-04-18, branch `blitzy-4bdad1ad-dc01-4556-9ef0-4c760b777d5a`.)
+(Audit performed against Apache Kafka 4.2.0-SNAPSHOT, pre-audit baseline commit: `6d16f687aa1a0df26f2f665436b7efaf0aec0c56`, snapshot date 2026-04-17, branch `blitzy-4bdad1ad-dc01-4556-9ef0-4c760b777d5a`. The pre-audit baseline is the Kafka `HEAD` immediately before the audit began; the "Zero modifications" attestation is meaningful only against this reference.)
 
 ## `[Audit Only]` Callout - Zero Code Changes Applied
 
@@ -160,8 +160,9 @@ The audit is performed **entirely through static code review**. The auditor did 
 
 Evidence in every finding is derived from reading the repository and citing file paths and
 line ranges in the format `Source: <path>:L<start>-L<end>`. Reviewers can re-verify any claim
-by opening the cited file at the cited line range in the snapshot commit
-(`8a99096de23820e868b238fbfa747b29887d72e2`).
+by opening the cited file at the cited line range in the pre-audit baseline commit
+(`6d16f687aa1a0df26f2f665436b7efaf0aec0c56`) — the exact Kafka tree this audit was performed
+against.
 
 ### 2.2 Finding Structure
 
@@ -362,21 +363,26 @@ Audit Snapshot
   Audit name                : Apache Kafka 4.2.0-SNAPSHOT - Static Security Audit
   Kafka version             : 4.2.0-SNAPSHOT
   Dependency manifest       : gradle/dependencies.gradle
-  Snapshot HEAD commit      : 8a99096de23820e868b238fbfa747b29887d72e2
-  Short HEAD                : 8a99096de2
-  Snapshot date             : 2026-04-18
+  Pre-audit baseline commit : 6d16f687aa1a0df26f2f665436b7efaf0aec0c56
+  Short baseline            : 6d16f687aa
+  Snapshot date             : 2026-04-17
   Git branch                : blitzy-4bdad1ad-dc01-4556-9ef0-4c760b777d5a
   Audit scope               : Read-only static code reconnaissance
-  Modifications to codebase : ZERO
+  Modifications to codebase : ZERO (against the pre-audit baseline above)
   Analysis output           : docs/security-audit/ (new tree, isolated)
-  Total artifacts delivered : 1 README + 1 reveal.js HTML + 6 core markdowns
-                              + 10 findings + 7 diagrams = 25 files
+  Total artifacts (planned) : 1 README + 1 reveal.js HTML + 6 core markdowns
+                              + 10 findings + 7 diagrams = 25 files at project
+                              completion
+  Delivered at this         : 15 files (1 README + 1 reveal.js HTML +
+  checkpoint                  6 core markdowns + 7 diagrams); the 10 per-
+                              category findings/NN-<category>.md files are
+                              scheduled for the subsequent checkpoint
 ```
 
-If any field above cannot be reproduced by a reviewer (for example, the HEAD commit is
-different, the branch name has changed, or the dependency manifest has been modified), the
-audit snapshot has drifted and the reviewer must treat the findings as stale until a fresh
-audit is run.
+If any field above cannot be reproduced by a reviewer (for example, the pre-audit baseline
+commit is different, the branch name has changed, or the dependency manifest has been
+modified), the audit snapshot has drifted and the reviewer must treat the findings as stale
+until a fresh audit is run.
 
 ---
 
