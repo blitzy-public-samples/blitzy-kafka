@@ -39,6 +39,7 @@
             --blue: #2563EB;
             --green: #16A34A;
             --amber: #D97706;
+            --orange: #EA580C;
             --red: #DC2626;
             --grey: #64748B;
             --light: #F1F5F9;
@@ -156,10 +157,11 @@
             margin-right: 0.35em;
         }
 
-        .icon-green { color: var(--green); }
-        .icon-amber { color: var(--amber); }
-        .icon-red   { color: var(--red); }
-        .icon-blue  { color: var(--blue); }
+        .icon-green  { color: var(--green); }
+        .icon-amber  { color: var(--amber); }
+        .icon-orange { color: var(--orange); }
+        .icon-red    { color: var(--red); }
+        .icon-blue   { color: var(--blue); }
         .icon-grey  { color: var(--grey); }
 
         .badge {
@@ -175,8 +177,8 @@
         }
 
         .badge-critical { background: var(--red); }
-        .badge-high     { background: var(--amber); }
-        .badge-medium   { background: var(--blue); }
+        .badge-high     { background: var(--orange); }
+        .badge-medium   { background: var(--amber); }
         .badge-low      { background: var(--green); }
         .badge-info     { background: var(--grey); }
 
@@ -222,6 +224,12 @@
             border-color: var(--amber);
         }
         .icon-card.accent-amber .fa-solid { color: var(--amber); }
+
+        .icon-card.accent-orange {
+            background: rgba(234, 88, 12, 0.12);
+            border-color: var(--orange);
+        }
+        .icon-card.accent-orange .fa-solid { color: var(--orange); }
 
         .icon-card.accent-red {
             background: rgba(220, 38, 38, 0.12);
@@ -291,6 +299,46 @@
             color: var(--dim);
             margin-top: 0.2em !important;
             line-height: 1.2;
+        }
+
+        /* Slide 8 (High Severity) 5-card single-row override.
+           Slide 16 uses icon-grid-dense for an 8-card 4x2 layout with max-width 240px.
+           Slide 8 needs 5 cards in a single row at 1280 px — so we narrow per-card
+           width and tighten padding exclusively for #slide-high-findings without
+           affecting slide 16's dense grid. */
+        #slide-high-findings .icon-grid-dense .icon-card {
+            flex: 1 1 200px;
+            max-width: 215px;
+            min-width: 170px;
+            padding: 0.35em 0.4em;
+            margin: 0.15em;
+        }
+        #slide-high-findings .icon-grid-dense .icon-card .fa-solid,
+        #slide-high-findings .icon-grid-dense .icon-card .fa-regular {
+            font-size: 1.2em;
+            margin-bottom: 0.1em;
+        }
+        #slide-high-findings .icon-grid-dense .icon-card h3 {
+            font-size: 0.65em;
+            margin: 0.1em 0 0.1em;
+            line-height: 1.15;
+        }
+        #slide-high-findings .icon-grid-dense .icon-card p {
+            font-size: 0.5em;
+            line-height: 1.2;
+            margin: 0.08em 0;
+        }
+
+        /* Compact citation marker used inside icon-cards on slides 8 / 14
+           where the finding-ID plus file:line fits in a single muted line.
+           Tighter than the mitigation-ref to keep the 5-card icon-grid
+           within the 800 px Reveal internal viewport budget. */
+        .icon-card .card-cite {
+            font-size: 0.5em !important;
+            color: var(--dim);
+            margin: 0.15em 0 0 !important;
+            line-height: 1.2;
+            font-family: monospace;
         }
 
         /* Compact variant for slide 22 (4 cards with link-buttons).  The
@@ -571,8 +619,8 @@
         }
         .heatmap-0 { background: rgba(100, 116, 139, 0.25); color: var(--dim); }
         .heatmap-low { background: rgba(22, 163, 74, 0.35); color: #fff; }
-        .heatmap-med { background: rgba(37, 99, 235, 0.45); color: #fff; }
-        .heatmap-high { background: rgba(217, 119, 6, 0.55); color: #fff; }
+        .heatmap-med { background: rgba(217, 119, 6, 0.45); color: #fff; }
+        .heatmap-high { background: rgba(234, 88, 12, 0.55); color: #fff; }
         .heatmap-crit { background: rgba(220, 38, 38, 0.75); color: #fff; }
 
         /* Timeline phases color coding */
@@ -760,7 +808,7 @@ flowchart LR
             <p class="slide-meta"><i class="fa-solid fa-map" aria-hidden="true"></i>Slide 6 &#8212; Attack Surface</p>
             <h2><i class="fa-solid fa-table slide-icon" aria-hidden="true"></i>Attack Surface &times; Module Matrix</h2>
             <div class="diagram-title">Figure 6.1 &#8212; Category-to-Module Attack Surface Map</div>
-            <table style="font-size:0.55em; margin:0 auto;">
+            <table style="font-size:0.5em; margin:0 auto;">
                 <thead>
                     <tr>
                         <th>Category</th>
@@ -771,25 +819,29 @@ flowchart LR
                         <th>metadata</th>
                         <th>storage</th>
                         <th>streams</th>
+                        <th>coordinator</th>
+                        <th>server-common</th>
+                        <th>tools</th>
                         <th>trogdor</th>
                         <th>release</th>
                     </tr>
                 </thead>
                 <tbody>
-                    <tr><td>(1) Filesystem</td><td class="heatmap-cell heatmap-med">&#8226;</td><td class="heatmap-cell heatmap-med">&#8226;</td><td class="heatmap-cell heatmap-med">&#8226;</td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
-                    <tr><td>(2) Native Code</td><td class="heatmap-cell heatmap-low">&#8226;</td><td></td><td></td><td></td><td></td><td></td><td class="heatmap-cell heatmap-low">&#8226;</td><td></td><td></td></tr>
-                    <tr><td>(3) Resource Limits</td><td class="heatmap-cell heatmap-med">&#8226;</td><td class="heatmap-cell heatmap-med">&#8226;</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
-                    <tr><td>(4) Module System</td><td class="heatmap-cell heatmap-med">&#8226;</td><td></td><td class="heatmap-cell heatmap-med">&#8226;</td><td></td><td class="heatmap-cell heatmap-med">&#8226;</td><td class="heatmap-cell heatmap-med">&#8226;</td><td></td><td></td><td></td></tr>
-                    <tr><td>(5) ReDoS</td><td class="heatmap-cell heatmap-low">&#8226;</td><td></td><td class="heatmap-cell heatmap-low">&#8226;</td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
-                    <tr><td>(6) Net/Subprocess</td><td></td><td></td><td class="heatmap-cell heatmap-high">&#8226;</td><td class="heatmap-cell heatmap-med">&#8226;</td><td></td><td></td><td></td><td></td><td class="heatmap-cell heatmap-med">&#8226;</td></tr>
-                    <tr><td>(7) Callback Misuse</td><td class="heatmap-cell heatmap-high">&#8226;</td><td></td><td class="heatmap-cell heatmap-high">&#8226;</td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
-                    <tr><td>(8) Deserialization</td><td class="heatmap-cell heatmap-low">&#8226;</td><td></td><td class="heatmap-cell heatmap-low">&#8226;</td><td class="heatmap-cell heatmap-low">&#8226;</td><td></td><td></td><td class="heatmap-cell heatmap-low">&#8226;</td><td class="heatmap-cell heatmap-low">&#8226;</td><td></td></tr>
-                    <tr><td>(9) Info Leakage</td><td class="heatmap-cell heatmap-low">&#8226;</td><td class="heatmap-cell heatmap-low">&#8226;</td><td class="heatmap-cell heatmap-low">&#8226;</td><td></td><td class="heatmap-cell heatmap-low">&#8226;</td><td></td><td></td><td></td><td></td></tr>
-                    <tr><td>(10) Dev Misuse</td><td class="heatmap-cell heatmap-high">&#8226;</td><td class="heatmap-cell heatmap-high">&#8226;</td><td class="heatmap-cell heatmap-high">&#8226;</td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+                    <tr><td>(1) Filesystem</td><td class="heatmap-cell heatmap-med">&#8226;</td><td class="heatmap-cell heatmap-med">&#8226;</td><td class="heatmap-cell heatmap-med">&#8226;</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+                    <tr><td>(2) Native Code</td><td class="heatmap-cell heatmap-low">&#8226;</td><td></td><td></td><td></td><td></td><td></td><td class="heatmap-cell heatmap-low">&#8226;</td><td></td><td></td><td></td><td></td><td></td></tr>
+                    <tr><td>(3) Resource Limits</td><td class="heatmap-cell heatmap-med">&#8226;</td><td class="heatmap-cell heatmap-med">&#8226;</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+                    <tr><td>(4) Module System</td><td class="heatmap-cell heatmap-med">&#8226;</td><td></td><td class="heatmap-cell heatmap-med">&#8226;</td><td></td><td class="heatmap-cell heatmap-med">&#8226;</td><td class="heatmap-cell heatmap-med">&#8226;</td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+                    <tr><td>(5) ReDoS</td><td class="heatmap-cell heatmap-low">&#8226;</td><td></td><td class="heatmap-cell heatmap-low">&#8226;</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+                    <tr><td>(6) Net/Subprocess</td><td></td><td></td><td class="heatmap-cell heatmap-high">&#8226;</td><td class="heatmap-cell heatmap-med">&#8226;</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td class="heatmap-cell heatmap-med">&#8226;</td></tr>
+                    <tr><td>(7) Callback Misuse</td><td class="heatmap-cell heatmap-high">&#8226;</td><td></td><td class="heatmap-cell heatmap-high">&#8226;</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+                    <tr><td>(8) Deserialization</td><td class="heatmap-cell heatmap-low">&#8226;</td><td></td><td class="heatmap-cell heatmap-low">&#8226;</td><td class="heatmap-cell heatmap-low">&#8226;</td><td></td><td></td><td class="heatmap-cell heatmap-low">&#8226;</td><td></td><td></td><td></td><td class="heatmap-cell heatmap-low">&#8226;</td><td></td></tr>
+                    <tr><td>(9) Info Leakage</td><td class="heatmap-cell heatmap-low">&#8226;</td><td class="heatmap-cell heatmap-low">&#8226;</td><td class="heatmap-cell heatmap-low">&#8226;</td><td></td><td class="heatmap-cell heatmap-low">&#8226;</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+                    <tr><td>(10) Dev Misuse</td><td class="heatmap-cell heatmap-high">&#8226;</td><td class="heatmap-cell heatmap-high">&#8226;</td><td class="heatmap-cell heatmap-high">&#8226;</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
                 </tbody>
             </table>
-            <p style="font-size:0.58em; text-align:center; color:var(--dim); margin-top:0.4em;">
+            <p style="font-size:0.55em; text-align:center; color:var(--dim); margin-top:0.4em;">
                 Cell color encodes maximum severity of findings located in that module for that category.
+                Coordinator / server-common / tools have no direct category attributions (Tools is aggregated under Clients via JmxReporter).
                 <span class="badge badge-high">High</span> <span class="badge badge-medium">Medium</span> <span class="badge badge-low">Low</span>
             </p>
         </section>
@@ -844,37 +896,37 @@ pie showData title Finding Severity Distribution
         <!-- ========================================================= -->
         <section id="slide-high-findings">
             <p class="slide-meta"><i class="fa-solid fa-fire" aria-hidden="true"></i>Slide 8 &#8212; High Severity</p>
-            <h2><i class="fa-solid fa-triangle-exclamation slide-icon icon-amber" aria-hidden="true"></i>Findings Requiring Priority Attention</h2>
-            <div class="icon-grid">
-                <div class="icon-card accent-amber">
-                    <i class="fa-solid fa-lock-open icon-amber" aria-hidden="true"></i>
+            <h2><i class="fa-solid fa-triangle-exclamation slide-icon icon-orange" aria-hidden="true"></i>Findings Requiring Priority Attention</h2>
+            <div class="icon-grid icon-grid-dense">
+                <div class="icon-card accent-orange">
+                    <i class="fa-solid fa-lock-open icon-orange" aria-hidden="true"></i>
                     <h3>Connect REST Bypass</h3>
-                    <p><span class="badge badge-high">High</span> <code>JaasBasicAuthFilter</code> <code>INTERNAL_REQUEST_MATCHERS</code> permits unauthenticated <code>POST&nbsp;/connectors/{n}/tasks</code> and <code>PUT&nbsp;/connectors/{n}/fence</code>.</p>
-                    <p style="font-size:0.6em; color:var(--dim);">F-06.1 &#8226; JaasBasicAuthFilter.java:L55-L58</p>
+                    <p><span class="badge badge-high">High</span> <code>JaasBasicAuthFilter.INTERNAL_REQUEST_MATCHERS</code> permits unauthenticated internal tasks and fence calls.</p>
+                    <p class="card-cite">F-06.1 &#8226; JaasBasicAuthFilter.java:L55-L58</p>
                 </div>
-                <div class="icon-card accent-amber">
-                    <i class="fa-solid fa-triangle-exclamation icon-amber" aria-hidden="true"></i>
+                <div class="icon-card accent-orange">
+                    <i class="fa-solid fa-triangle-exclamation icon-orange" aria-hidden="true"></i>
                     <h3>OAuth Unsecured Validator</h3>
-                    <p><span class="badge badge-high">High</span> <code>OAuthBearerUnsecuredValidatorCallbackHandler</code> accepts <code>alg:none</code> &#8212; NOT intended for production.</p>
-                    <p style="font-size:0.6em; color:var(--dim);">F-07.1 / F-10.4 &#8226; OAuthBearerUnsecuredValidatorCallbackHandler.java</p>
+                    <p><span class="badge badge-high">High</span> <code>OAuthBearerUnsecuredValidatorCallbackHandler</code> accepts <code>alg:none</code> &#8212; not intended for production.</p>
+                    <p class="card-cite">F-07.1 / F-10.4 &#8226; OAuthBearerUnsecuredValidatorCallbackHandler.java</p>
                 </div>
-                <div class="icon-card accent-amber">
-                    <i class="fa-solid fa-file-lines icon-amber" aria-hidden="true"></i>
+                <div class="icon-card accent-orange">
+                    <i class="fa-solid fa-file-lines icon-orange" aria-hidden="true"></i>
                     <h3>Plaintext Credentials</h3>
                     <p><span class="badge badge-high">High</span> <code>PropertyFileLoginModule</code> ships plaintext credential store; self-documented as not for production.</p>
-                    <p style="font-size:0.6em; color:var(--dim);">F-10.3 &#8226; PropertyFileLoginModule.java</p>
+                    <p class="card-cite">F-10.3 &#8226; PropertyFileLoginModule.java</p>
+                </div>
+                <div class="icon-card accent-orange">
+                    <i class="fa-solid fa-plug-circle-xmark icon-orange" aria-hidden="true"></i>
+                    <h3>PLAINTEXT Default Listener</h3>
+                    <p><span class="badge badge-high">High</span> Out-of-the-box broker listener is unencrypted and unauthenticated. Operators must harden explicitly.</p>
+                    <p class="card-cite">F-10.1 &#8226; KafkaConfig.scala / ListenerName.java</p>
                 </div>
                 <div class="icon-card accent-amber">
-                    <i class="fa-solid fa-plug-circle-xmark icon-amber" aria-hidden="true"></i>
-                    <h3>PLAINTEXT Default Listener</h3>
-                    <p><span class="badge badge-high">High</span> Out-of-the-box broker listener is unencrypted and unauthenticated. Operators must explicitly harden.</p>
-                    <p style="font-size:0.6em; color:var(--dim);">F-10.1 &#8226; KafkaConfig.scala / ListenerName.java</p>
-                </div>
-                <div class="icon-card accent-blue">
-                    <i class="fa-solid fa-terminal icon-blue" aria-hidden="true"></i>
+                    <i class="fa-solid fa-terminal icon-amber" aria-hidden="true"></i>
                     <h3>Release Tooling Subprocess</h3>
-                    <p><span class="badge badge-medium">Medium</span> <code>release/release.py</code> L334-L362 uses <code>shell=True</code> with f-string interpolation. Release-engineer privilege context only &#8212; not a runtime surface.</p>
-                    <p style="font-size:0.6em; color:var(--dim);">F-06.4 &#8226; release/release.py:L334-L362</p>
+                    <p><span class="badge badge-medium">Medium</span> <code>release/release.py</code> L334-L362 uses <code>shell=True</code> with f-string interpolation &#8212; release-engineer privilege only.</p>
+                    <p class="card-cite">F-06.4 &#8226; release/release.py:L334-L362</p>
                 </div>
             </div>
         </section>
@@ -888,33 +940,32 @@ pie showData title Finding Severity Distribution
             <h2><i class="fa-solid fa-shield-halved slide-icon" aria-hidden="true"></i>Connect REST Trust Boundary</h2>
             <div class="diagram-title">Figure 9.1 &#8212; Connect REST Trust Boundary &#8212; current state</div>
             <pre class="mermaid">
-%%{init: {'theme':'neutral'}}%%
+%%{init: {'theme':'neutral', 'themeVariables': {'fontSize': '11px'}, 'sequence': {'actorMargin': 50, 'messageMargin': 18, 'boxMargin': 3, 'noteMargin': 2, 'mirrorActors': false, 'useMaxWidth': true}}}%%
 sequenceDiagram
     autonumber
-    participant CL as Client / Peer Worker
+    participant CL as Client / Peer
     participant CO as CrossOriginHandler
     participant JF as JaasBasicAuthFilter
     participant RH as Resource Handler
-    participant RC as RestClient (outbound)
+    participant RC as RestClient
     participant DS as Downstream Worker
     CL->>CO: HTTP request
-    Note over CO: access.control.allow.origin=""<br/>(secure default)
-    CO->>JF: pass-through
+    CO->>JF: pass-through (origin="" default)
     alt path matches INTERNAL_REQUEST_MATCHERS
-        JF-->>RH: BYPASS auth (high-severity)
-        Note over JF,RH: POST /connectors/{n}/tasks<br/>PUT /connectors/{n}/fence
+        JF-->>RH: BYPASS auth (high)
+        Note over JF,RH: POST /connectors/{n}/tasks + PUT /connectors/{n}/fence
     else other paths
         JF->>JF: check Basic-Auth JAAS login
         JF->>RH: authenticated
     end
     RH->>RC: forward request (internal)
-    RC->>DS: HTTP + "Authorization" header (SSRF vector)
-    Note over RC,DS: RestClient propagates inbound<br/>Authorization header to outbound peer
+    RC->>DS: HTTP + Authorization header (SSRF vector)
+    Note over RC,DS: RestClient forwards inbound Authorization to outbound peer
     DS-->>RC: response
     RC-->>RH: response
     RH-->>CL: HTTP 200
             </pre>
-            <p style="font-size:0.68em; margin-top:0.2em;">
+            <p style="font-size:0.62em; margin:0.15em 0 0;">
                 <span class="badge badge-high">High</span> F-06.1 Bypass path.
                 <span class="badge badge-medium">Medium</span> F-06.2 Authorization forwarding.
             </p>
