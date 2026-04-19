@@ -34,13 +34,32 @@
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.6.0/css/all.min.css">
 
     <style>
+        /*
+         * Severity Color Palette — canonical across the audit tree.
+         * This palette is intentionally reproduced in the Mermaid diagrams
+         * under `docs/security-audit/diagrams/` (attack-surface-map.md,
+         * authorization-decision-flow.md, threat-model-overview.md,
+         * oauth-jwt-validation-paths.md, connect-rest-trust-boundary.md).
+         * Keep the mapping below IDENTICAL to those diagrams so that a
+         * reviewer moving between the reveal.js deck and a standalone diagram
+         * sees the same color for the same severity class:
+         *
+         *   Critical = #DC2626 (red)    — reserved; no audit finding rates Critical
+         *   High     = #EA580C (orange) — remote-auth or operator-reachable surfaces
+         *   Medium   = #D97706 (amber)  — contextual or configuration-dependent surfaces
+         *   Low      = #16A34A (green)  — defense-in-depth or informational surfaces
+         *
+         * Rationale: High (#EA580C) and Medium (#D97706) intentionally use
+         * adjacent-but-distinct warm tones so the two severity tiers remain
+         * visually separable in the badge, icon, and diagram renderings.
+         */
         :root {
             --navy: #0F172A;
             --blue: #2563EB;
-            --green: #16A34A;
-            --amber: #D97706;
-            --orange: #EA580C;
-            --red: #DC2626;
+            --green: #16A34A;   /* Low     — matches classDef allow/low in diagrams */
+            --amber: #D97706;   /* Medium  — matches classDef medium/warn/operator/audit */
+            --orange: #EA580C;  /* High    — matches classDef high in attack-surface-map.md */
+            --red: #DC2626;     /* Critical — matches classDef critical/deny/danger/untrusted */
             --grey: #64748B;
             --light: #F1F5F9;
             --dim: #94A3B8;
@@ -176,11 +195,13 @@
             margin-right: 4px;
         }
 
-        .badge-critical { background: var(--red); }
-        .badge-high     { background: var(--orange); }
-        .badge-medium   { background: var(--amber); }
-        .badge-low      { background: var(--green); }
-        .badge-info     { background: var(--grey); }
+        /* Severity badges — colors MUST remain aligned with the Mermaid diagram
+         * classDef mappings under ../diagrams/*.md (see :root comment above). */
+        .badge-critical { background: var(--red);    } /* #DC2626 — Critical */
+        .badge-high     { background: var(--orange); } /* #EA580C — High; intentionally distinct from Medium */
+        .badge-medium   { background: var(--amber);  } /* #D97706 — Medium */
+        .badge-low      { background: var(--green);  } /* #16A34A — Low */
+        .badge-info     { background: var(--grey);   } /* #64748B — Informational */
 
         .icon-grid {
             display: flex;
@@ -640,6 +661,55 @@
 
         .slide-meta .fa-solid {
             margin-right: 0.3em;
+        }
+
+        /*
+         * Responsive Polish — Mobile Breakpoint (≤ 480 px viewport width)
+         *
+         * The executive deck is primarily authored for desktop / tablet
+         * presentation contexts (intended audience: non-technical leadership
+         * per AAP §0.1.1). Reveal.js (width:1280, height:800, margin:0.04)
+         * auto-scales the base slide canvas to the viewport, so content
+         * remains functional and legible at narrow widths WITHOUT media
+         * queries — verified during QA #2 across all 22 slides at 375 × 812.
+         *
+         * The rules below provide NON-INVASIVE mobile polish for the two
+         * layout patterns that visibly compress at 375 px width (QA Issues
+         * 2-11 MINOR observations):
+         *
+         *   1. `.two-col` flex row (slide 18 supply-chain dual dependency
+         *      tables, slide 3 methodology): stack to single column for
+         *      easier reading on narrow viewports.
+         *   2. `.icon-grid-links` 4-card row (slide 22 NEXT STEPS cards:
+         *      Drill Down, Severity & Roadmap, Positive Posture,
+         *      Bibliography): allow wrapping to 2-per-row so the link
+         *      buttons remain tappable and their labels remain legible.
+         *
+         * These rules are SCOPED to `max-width: 480px` and do NOT affect
+         * desktop (1280) or tablet (768) rendering which are the primary
+         * presentation targets. The supply-chain and watchlist data tables
+         * remain visible and readable via Reveal.js auto-scaling at 375 px;
+         * no table font-size override is required.
+         */
+        @media (max-width: 480px) {
+            /* Stack two-column flex containers on ultra-narrow viewports. */
+            .two-col {
+                flex-direction: column;
+                gap: 0.4em;
+            }
+
+            /* Let slide-22 link-button cards wrap to 2-per-row at mobile
+             * so each card receives ~50 % of the slide width rather than
+             * ~25 %.  This keeps the card titles and link-button labels
+             * readable without changing the desktop 4-per-row layout. */
+            .icon-grid-links {
+                flex-wrap: wrap;
+                justify-content: center;
+            }
+            .icon-grid-links .icon-card {
+                flex: 1 1 calc(50% - 0.6em);
+                max-width: calc(50% - 0.6em);
+            }
         }
     </style>
 </head>
@@ -1393,11 +1463,11 @@ flowchart LR
                             <tr><th>Dependency</th><th>Version</th><th>Category</th></tr>
                         </thead>
                         <tbody>
-                            <tr><td><i class="fa-solid fa-file-code icon-blue"></i> <code>jackson-databind</code></td><td>2.19.0</td><td>08 Deserialization</td></tr>
-                            <tr><td><i class="fa-solid fa-key icon-blue"></i> <code>jose4j</code></td><td>0.9.6</td><td>07 Callback / 08 Deserial</td></tr>
-                            <tr><td><i class="fa-solid fa-server icon-blue"></i> <code>jetty-server</code></td><td>12.0.22</td><td>06 Network</td></tr>
-                            <tr><td><i class="fa-solid fa-plug icon-blue"></i> <code>jersey</code></td><td>3.1.10</td><td>06 Network</td></tr>
-                            <tr><td><i class="fa-solid fa-file-lines icon-blue"></i> <code>log4j2</code></td><td>2.25.1</td><td>09 Info Leakage</td></tr>
+                            <tr><td><i class="fa-solid fa-file-code icon-blue" aria-hidden="true"></i> <code>jackson-databind</code></td><td>2.19.0</td><td>08 Deserialization</td></tr>
+                            <tr><td><i class="fa-solid fa-key icon-blue" aria-hidden="true"></i> <code>jose4j</code></td><td>0.9.6</td><td>07 Callback / 08 Deserial</td></tr>
+                            <tr><td><i class="fa-solid fa-server icon-blue" aria-hidden="true"></i> <code>jetty-server</code></td><td>12.0.22</td><td>06 Network</td></tr>
+                            <tr><td><i class="fa-solid fa-plug icon-blue" aria-hidden="true"></i> <code>jersey</code></td><td>3.1.10</td><td>06 Network</td></tr>
+                            <tr><td><i class="fa-solid fa-file-lines icon-blue" aria-hidden="true"></i> <code>log4j2</code></td><td>2.25.1</td><td>09 Info Leakage</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -1407,13 +1477,13 @@ flowchart LR
                             <tr><th>Dependency</th><th>Version</th><th>Category</th></tr>
                         </thead>
                         <tbody>
-                            <tr><td><i class="fa-solid fa-file-zipper icon-grey"></i> <code>zstd-jni</code></td><td>1.5.6-10</td><td>02 Native</td></tr>
-                            <tr><td><i class="fa-solid fa-file-zipper icon-grey"></i> <code>snappy-java</code></td><td>1.1.10.7</td><td>02 Native</td></tr>
-                            <tr><td><i class="fa-solid fa-file-zipper icon-grey"></i> <code>lz4-java</code></td><td>1.8.0</td><td>02 Native</td></tr>
-                            <tr><td><i class="fa-solid fa-database icon-grey"></i> <code>rocksdbjni</code></td><td>10.1.3</td><td>02 Native</td></tr>
-                            <tr><td><i class="fa-solid fa-certificate icon-blue"></i> <code>bcpkix-jdk18on</code></td><td>1.80</td><td>07 Callback</td></tr>
-                            <tr><td><i class="fa-solid fa-scroll icon-blue"></i> <code>scala-library</code></td><td>2.13.17</td><td>Runtime</td></tr>
-                            <tr><td><i class="fa-solid fa-screwdriver-wrench icon-blue"></i> <code>Gradle</code></td><td>9.1.0</td><td>Toolchain</td></tr>
+                            <tr><td><i class="fa-solid fa-file-zipper icon-grey" aria-hidden="true"></i> <code>zstd-jni</code></td><td>1.5.6-10</td><td>02 Native</td></tr>
+                            <tr><td><i class="fa-solid fa-file-zipper icon-grey" aria-hidden="true"></i> <code>snappy-java</code></td><td>1.1.10.7</td><td>02 Native</td></tr>
+                            <tr><td><i class="fa-solid fa-file-zipper icon-grey" aria-hidden="true"></i> <code>lz4-java</code></td><td>1.8.0</td><td>02 Native</td></tr>
+                            <tr><td><i class="fa-solid fa-database icon-grey" aria-hidden="true"></i> <code>rocksdbjni</code></td><td>10.1.3</td><td>02 Native</td></tr>
+                            <tr><td><i class="fa-solid fa-certificate icon-blue" aria-hidden="true"></i> <code>bcpkix-jdk18on</code></td><td>1.80</td><td>07 Callback</td></tr>
+                            <tr><td><i class="fa-solid fa-scroll icon-blue" aria-hidden="true"></i> <code>scala-library</code></td><td>2.13.17</td><td>Runtime</td></tr>
+                            <tr><td><i class="fa-solid fa-screwdriver-wrench icon-blue" aria-hidden="true"></i> <code>Gradle</code></td><td>9.1.0</td><td>Toolchain</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -1556,34 +1626,34 @@ flowchart LR
                     <i class="fa-solid fa-table-list icon-blue" aria-hidden="true"></i>
                     <h3>Drill Down</h3>
                     <p>
-                        <a class="link-button" href="findings/01-filesystem-access-path-traversal.md"><i class="fa-solid fa-file-lines"></i>01 Filesystem</a>
-                        <a class="link-button" href="findings/06-network-subprocess-access.md"><i class="fa-solid fa-network-wired"></i>06 Network</a>
-                        <a class="link-button" href="findings/10-public-api-developer-misuse.md"><i class="fa-solid fa-user-gear"></i>10 API Misuse</a>
+                        <a class="link-button" href="findings/01-filesystem-access-path-traversal.md"><i class="fa-solid fa-file-lines" aria-hidden="true"></i>01 Filesystem</a>
+                        <a class="link-button" href="findings/06-network-subprocess-access.md"><i class="fa-solid fa-network-wired" aria-hidden="true"></i>06 Network</a>
+                        <a class="link-button" href="findings/10-public-api-developer-misuse.md"><i class="fa-solid fa-user-gear" aria-hidden="true"></i>10 API Misuse</a>
                     </p>
                 </div>
                 <div class="icon-card">
                     <i class="fa-solid fa-scale-balanced icon-blue" aria-hidden="true"></i>
                     <h3>Severity &amp; Roadmap</h3>
                     <p>
-                        <a class="link-button" href="severity-matrix.md"><i class="fa-solid fa-chart-simple"></i>Severity Matrix</a>
-                        <a class="link-button" href="remediation-roadmap.md"><i class="fa-solid fa-road"></i>Roadmap</a>
+                        <a class="link-button" href="severity-matrix.md"><i class="fa-solid fa-chart-simple" aria-hidden="true"></i>Severity Matrix</a>
+                        <a class="link-button" href="remediation-roadmap.md"><i class="fa-solid fa-road" aria-hidden="true"></i>Roadmap</a>
                     </p>
                 </div>
                 <div class="icon-card">
                     <i class="fa-solid fa-shield-halved icon-green" aria-hidden="true"></i>
                     <h3>Positive Posture</h3>
                     <p>
-                        <a class="link-button" href="accepted-mitigations.md"><i class="fa-solid fa-circle-check"></i>Accepted Mitigations</a>
-                        <a class="link-button" href="no-change-verification.md"><i class="fa-solid fa-lock"></i>No-Change Verification</a>
+                        <a class="link-button" href="accepted-mitigations.md"><i class="fa-solid fa-circle-check" aria-hidden="true"></i>Accepted Mitigations</a>
+                        <a class="link-button" href="no-change-verification.md"><i class="fa-solid fa-lock" aria-hidden="true"></i>No-Change Verification</a>
                     </p>
                 </div>
                 <div class="icon-card">
                     <i class="fa-solid fa-book icon-blue" aria-hidden="true"></i>
                     <h3>Bibliography</h3>
                     <p>
-                        <a class="link-button" href="references.md"><i class="fa-solid fa-bookmark"></i>references.md</a>
-                        <a class="link-button" href="dependency-inventory.md"><i class="fa-solid fa-cubes"></i>Dependencies</a>
-                        <a class="link-button" href="README.md"><i class="fa-solid fa-house"></i>README</a>
+                        <a class="link-button" href="references.md"><i class="fa-solid fa-bookmark" aria-hidden="true"></i>references.md</a>
+                        <a class="link-button" href="dependency-inventory.md"><i class="fa-solid fa-cubes" aria-hidden="true"></i>Dependencies</a>
+                        <a class="link-button" href="README.md"><i class="fa-solid fa-house" aria-hidden="true"></i>README</a>
                     </p>
                 </div>
             </div>

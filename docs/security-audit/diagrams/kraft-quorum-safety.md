@@ -101,10 +101,10 @@ sequenceDiagram
         Leader->>Handler: handleUpdateVoterRequest()
         Handler->>VSet: updateVoter(updatedVoter)<br/>OR addVoter / removeVoter
         VSet->>VSet: Build candidate VoterSet (copy-on-write)
-        VSet->>VSet: hasOverlappingMajority(newSet)<br/>symmetric set-difference &lt;= 1
+        VSet->>VSet: hasOverlappingMajority(newSet)<br/>symmetric set-difference <= 1
 
         alt Overlapping majority preserved
-            VSet-->>Handler: Optional&lt;VoterSet&gt; present
+            VSet-->>Handler: Optional[VoterSet] present
             Handler->>Log: Append ControlRecord<br/>(durable commit)
             Log-->>Handler: Commit OK at next HW
             Handler-->>Leader: Success
