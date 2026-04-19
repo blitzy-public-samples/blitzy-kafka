@@ -124,24 +124,29 @@ The audit target is **Apache Kafka 4.2.0-SNAPSHOT**. The dependency baseline bel
 directly from `gradle/dependencies.gradle` at the audit snapshot commit. No value is
 paraphrased; every line-citation is verifiable by opening the manifest at the cited line.
 
-| Dependency | Version | Source Citation |
-| ---------- | ------- | --------------- |
-| Jackson (JSON library family) | 2.19.0 | `gradle/dependencies.gradle:L66` |
-| Jose4j (JWT/JOSE library) | 0.9.6 | `gradle/dependencies.gradle:L81` |
-| Jetty (HTTP server/client/servlet) | 12.0.22 | `gradle/dependencies.gradle:L69` |
-| Jersey (JAX-RS implementation) | 3.1.10 | `gradle/dependencies.gradle:L70` |
-| Log4j2 (logging facade + bridge) | 2.25.1 | `gradle/dependencies.gradle:L108` |
-| lz4-java (native compression) | 1.8.0 | `gradle/dependencies.gradle:L110` |
-| RocksDB JNI (state store) | 10.1.3 | `gradle/dependencies.gradle:L118` |
-| snappy-java (native compression) | 1.1.10.7 | `gradle/dependencies.gradle:L125` |
-| zstd-jni (native compression) | 1.5.6-10 | `gradle/dependencies.gradle:L131` |
-| Bouncy Castle (bcpkix-jdk18on) | 1.80 | `gradle/dependencies.gradle:L56` |
-| Scala (default 2.13 line) | 2.13.17 | `gradle/dependencies.gradle:L26` |
-| Gradle (build tool) | 9.1.0 | `gradle/dependencies.gradle:L63` |
+| Dependency | Version | Source Citation | CVE Snapshot |
+| ---------- | ------- | --------------- | ------------ |
+| Jackson (JSON library family) | 2.19.0 | `gradle/dependencies.gradle:L66` | Clean |
+| Jose4j (JWT/JOSE library) | 0.9.6 | `gradle/dependencies.gradle:L81` | Clean |
+| Jetty (HTTP server/client/servlet) | 12.0.22 | `gradle/dependencies.gradle:L69` | **CVE-2026-1605 [High]** + Medium informational (see [`./cve-snapshot.md`](./cve-snapshot.md)) |
+| Jersey (JAX-RS implementation) | 3.1.10 | `gradle/dependencies.gradle:L70` | Clean |
+| Log4j2 (logging facade + bridge) | 2.25.1 | `gradle/dependencies.gradle:L108` | Medium informational (operator-configuration-dependent; see [`./cve-snapshot.md`](./cve-snapshot.md)) |
+| lz4-java (native compression) | 1.8.0 | `gradle/dependencies.gradle:L110` | **CVE-2025-12183 [Critical]** + **CVE-2025-66566 [Critical]** (see [`./cve-snapshot.md`](./cve-snapshot.md)) |
+| RocksDB JNI (state store) | 10.1.3 | `gradle/dependencies.gradle:L118` | Clean |
+| snappy-java (native compression) | 1.1.10.7 | `gradle/dependencies.gradle:L125` | Clean |
+| zstd-jni (native compression) | 1.5.6-10 | `gradle/dependencies.gradle:L131` | Clean |
+| Bouncy Castle (bcpkix-jdk18on) | 1.80 | `gradle/dependencies.gradle:L56` | Low informational (non-exploitable in Kafka use pattern; see [`./cve-snapshot.md`](./cve-snapshot.md)) |
+| Scala (default 2.13 line) | 2.13.17 | `gradle/dependencies.gradle:L26` | Clean |
+| Gradle (build tool) | 9.1.0 | `gradle/dependencies.gradle:L63` | Build-time only (non-runtime; preconditions absent from Kafka build config) |
 
 The comprehensive dependency inventory, supply-chain narrative, and Maven coordinate lines
 are in [`./dependency-inventory.md`](./dependency-inventory.md). The audit applies **no**
-changes to the manifest.
+changes to the manifest. A consolidated advisory hub aggregating the three gating
+dependency-scan findings (lz4-java Critical × 2 and Jetty High × 1) together with the
+Medium/Low informational entries is in [`./cve-snapshot.md`](./cve-snapshot.md); all
+recommended version bumps are staged as **future-state** engagements in
+[`./remediation-roadmap.md`](./remediation-roadmap.md) Section 3.2.7 and Section 3.4.4,
+consistent with the Audit Only rule.
 
 ---
 
@@ -240,6 +245,7 @@ disk at the expected path.
 | [`./remediation-roadmap.md`](./remediation-roadmap.md)         | Phased list of **future-state** remediation actions. No code changes are applied in this run; the roadmap is strictly a proposal for a subsequent engagement, consistent with the Audit Only rule. |
 | [`./accepted-mitigations.md`](./accepted-mitigations.md)       | Catalog of **existing** positive-security controls already implemented in the codebase (for example, `MessageDigest.isEqual` constant-time comparison, `DISALLOW_NONE` JWS enforcement, REPLICATION-listener exemption, DENY-over-ALLOW ACL precedence). These are NOT re-reported as vulnerabilities. |
 | [`./dependency-inventory.md`](./dependency-inventory.md)       | Supply-chain surface inventory with every dependency version read directly from `gradle/dependencies.gradle`, plus Maven coordinate lines, findings cross-reference, and already-configured supply-chain tooling posture (OWASP Dependency-Check, Trivy). |
+| [`./cve-snapshot.md`](./cve-snapshot.md)                       | Consolidated CVE advisory hub aggregating the three gating dependency-scan findings identified at the audit snapshot — **lz4-java CVE-2025-12183 [Critical]** (CVSS 8.8, CWE-125 Out-of-bounds Read), **lz4-java CVE-2025-66566 [Critical]** (CVSS 8.2, CWE-201 Information Leak), and **Jetty CVE-2026-1605 [High]** (CVSS 7.5, GzipHandler native-memory DoS) — together with Medium/Low informational findings (Log4j2 CVE-2025-68161 operator-configuration-dependent; Bouncy Castle CVE-2026-0636 / CVE-2026-5588 non-exploitable in Kafka). Each entry is cross-referenced to its originating finding document ([`./findings/02-low-level-code-safety.md`](./findings/02-low-level-code-safety.md) for the lz4-java entries, [`./findings/06-network-subprocess-access.md`](./findings/06-network-subprocess-access.md) for the Jetty entry) and to the future-state remediation items staged in [`./remediation-roadmap.md`](./remediation-roadmap.md) Section 3.2.7 and Section 3.4.4. |
 | [`./no-change-verification.md`](./no-change-verification.md)   | Evidence artifact proving the audit introduced zero modifications to non-audit paths. Contains the `git diff --name-status` command recipe and the expected empty-output semantics. |
 | [`./references.md`](./references.md)                           | Consolidated bibliography of every source file inspected during reconnaissance, grouped by Kafka module (clients, core, connect, raft, metadata, storage, streams, coordinator, server-common, tools, trogdor, release). |
 
@@ -370,13 +376,19 @@ Audit Snapshot
   Audit scope               : Read-only static code reconnaissance
   Modifications to codebase : ZERO (against the pre-audit baseline above)
   Analysis output           : docs/security-audit/ (new tree, isolated)
-  Total artifacts (planned) : 1 README + 1 reveal.js HTML + 6 core markdowns
-                              + 10 findings + 7 diagrams = 25 files at project
-                              completion
-  Delivered at this         : 15 files (1 README + 1 reveal.js HTML +
-  checkpoint                  6 core markdowns + 7 diagrams); the 10 per-
-                              category findings/NN-<category>.md files are
-                              scheduled for the subsequent checkpoint
+  Total artifacts (planned) : 1 README + 1 reveal.js HTML + 7 core markdowns
+                              + 10 findings + 7 diagrams = 26 files at project
+                              completion (the 7 core markdowns include
+                              severity-matrix.md, remediation-roadmap.md,
+                              accepted-mitigations.md, dependency-inventory.md,
+                              cve-snapshot.md, no-change-verification.md, and
+                              references.md)
+  Delivered at this         : 26 files (1 README + 1 reveal.js HTML +
+  checkpoint                  7 core markdowns + 7 diagrams + 10 per-category
+                              findings). The cve-snapshot.md advisory hub was
+                              added in response to the Final Checkpoint #4 QA
+                              scan that surfaced the gating lz4-java Critical x 2
+                              and Jetty High x 1 supply-chain CVE findings.
 ```
 
 If any field above cannot be reproduced by a reviewer (for example, the pre-audit baseline

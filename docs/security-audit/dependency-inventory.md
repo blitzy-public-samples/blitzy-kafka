@@ -138,7 +138,7 @@ graph TD
     end
 
     subgraph HTTP
-        Jetty[jetty 12.0.22]:::medium
+        Jetty[jetty 12.0.22<br/>CVE-2026-1605 High]:::high
         Jersey[jersey 3.1.10]:::medium
     end
 
@@ -147,7 +147,7 @@ graph TD
     end
 
     subgraph NativeCompression
-        Lz4[lz4-java 1.8.0]:::medium
+        Lz4[lz4-java 1.8.0<br/>CVE-2025-12183 / CVE-2025-66566 Critical]:::critical
         Snappy[snappy-java 1.1.10.7]:::medium
         Zstd[zstd-jni 1.5.6-10]:::medium
     end
@@ -182,18 +182,25 @@ graph TD
 
 **Legend**:
 
-- **Red** (`#DC2626`, `classDef critical`): Critical supply-chain surface. None of the
-  dependencies in the inventory below are colored red in the current snapshot - the Kafka
-  project has kept all runtime dependencies on the upstream-maintained stable lines.
+- **Red** (`#DC2626`, `classDef critical`): Critical supply-chain surface. At the current
+  audit snapshot, `lz4-java 1.8.0` is colored red because it is affected by two Critical-
+  severity advisories (`CVE-2025-12183` CVSS 8.8 out-of-bounds read and `CVE-2025-66566`
+  CVSS 8.2 information leak) that reach Kafka through the default `compression.type=lz4`
+  code path. See [`./cve-snapshot.md`](./cve-snapshot.md) for the consolidated CVE detail
+  and [`./findings/02-low-level-code-safety.md`](./findings/02-low-level-code-safety.md)
+  for the Kafka-internal evidence citations.
 - **Orange** (`#D97706`, `classDef high`): High - actively-deserialized JVM surface with
-  documented historical CVE exposure. The inventory does not currently assign orange; Jackson
-  is treated as Medium because the Kafka-specific deserialization surface (feature flags
-  `ALLOW_LEADING_ZEROS_FOR_NUMBERS`, `ACCEPT_SINGLE_VALUE_AS_ARRAY`, `ALLOW_COMMENTS`) is
-  documented in Finding 08, not as a generic blanket-orange classification of the library.
+  documented historical CVE exposure. At the current audit snapshot, `jetty-server 12.0.22`
+  is colored orange because it is affected by `CVE-2026-1605` (CVSS 7.5) — a native-memory
+  leak in the `GzipHandler` path reachable through Connect REST and MirrorMaker 2 REST.
+  Jackson is **not** colored orange because the Kafka-specific deserialization surface
+  (feature flags `ALLOW_LEADING_ZEROS_FOR_NUMBERS`, `ACCEPT_SINGLE_VALUE_AS_ARRAY`,
+  `ALLOW_COMMENTS`) is documented in Finding 08, not as a generic blanket-orange
+  classification of the library.
 - **Blue** (`#2563EB`, `classDef medium`): Medium - runtime-active surface with direct
-  security relevance. Jackson, jose4j, Jetty, Jersey, the three native compression libraries,
-  and RocksDB JNI all fall here because vulnerabilities in those libraries transfer directly
-  to the Kafka runtime trust surface.
+  security relevance. Jackson, jose4j, Jersey, the remaining native compression libraries
+  (snappy-java, zstd-jni), and RocksDB JNI all fall here because vulnerabilities in those
+  libraries transfer directly to the Kafka runtime trust surface.
 - **Green** (`#16A34A`, `classDef low`): Low - supporting role with indirect or limited
   security relevance. Log4j2 (logging facade - well past the Log4Shell remediation line) and
   bcpkix (PKIX parsing in OAuth/PEM and test scopes) sit here.
@@ -212,21 +219,21 @@ mapping appears in the rightmost column of the inventory table below.
 
 ### 3.1 Dependency Inventory Table
 
-| #  | Dependency                                              | Version                       | Coordinate                                                     | Kafka Role                                                                                          | Security Relevance                         | Findings Referenced                    |
-| -- | ------------------------------------------------------- | ----------------------------- | -------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- | ------------------------------------------ | -------------------------------------- |
-| 1  | Jackson (databind / core / annotations / dataformats)   | 2.19.0                        | `com.fasterxml.jackson.*` (group ids `com.fasterxml.jackson.core`, `com.fasterxml.jackson.dataformat`, `com.fasterxml.jackson.datatype`, `com.fasterxml.jackson.module`, `com.fasterxml.jackson.jakarta.rs`) | JSON (de)serialization in Connect JSON converter, Trogdor, REST responses, and structured logging  | Deserialization surface                    | Finding 08                             |
-| 2  | Jose4j                                                  | 0.9.6                         | `org.bitbucket.b_c:jose4j`                                     | JWT parsing and signature verification in `BrokerJwtValidator`; enforces `DISALLOW_NONE`            | Crypto + JWT verification                  | Finding 07, 08, 10                     |
-| 3  | Jetty Server (ee10-servlet / servlets)                  | 12.0.22                       | `org.eclipse.jetty:jetty-server` (and `org.eclipse.jetty.ee10:jetty-ee10-servlet`, `jetty-ee10-servlets`, `org.eclipse.jetty:jetty-client`) | HTTP transport for Connect REST and MirrorMaker REST                                                 | TLS, CORS, client auth                     | Finding 06                             |
-| 4  | Jersey (containers-servlet / hk2)                       | 3.1.10                        | `org.glassfish.jersey.containers:jersey-container-servlet` (and `org.glassfish.jersey.inject:jersey-hk2`) | JAX-RS implementation for Connect REST                                                              | Request binding, param parsing             | Finding 06                             |
-| 5  | Log4j2                                                  | 2.25.1                        | `org.apache.logging.log4j:log4j-api` and `log4j-1.2-api`       | Logging facade and bridge                                                                           | Log injection / redaction                  | Finding 09                             |
-| 6  | LZ4-java                                                | 1.8.0                         | `org.lz4:lz4-java`                                             | Native LZ4 compression                                                                              | Native JNI surface                         | Finding 02                             |
-| 7  | RocksDB (rocksdbjni)                                    | 10.1.3                        | `org.rocksdb:rocksdbjni`                                       | State-store for Kafka Streams                                                                       | Native JNI surface                         | Finding 02                             |
-| 8  | snappy-java                                             | 1.1.10.7                      | `org.xerial.snappy:snappy-java`                                | Native Snappy compression                                                                           | Native JNI surface                         | Finding 02                             |
-| 9  | zstd-jni                                                | 1.5.6-10                      | `com.github.luben:zstd-jni`                                    | Native Zstandard compression; integrates with Kafka `BufferSupplier` and 16 KB bounded chunk        | Native JNI surface; buffer ownership       | Finding 02, Accepted Mitigation #6     |
-| 10 | Bouncy Castle bcpkix                                    | 1.80                          | `org.bouncycastle:bcpkix-jdk18on`                              | PKIX parsing in OAuth/PEM pathways and test scopes                                                  | Crypto parsing                             | Finding 04                             |
-| 11 | Scala stdlib                                            | 2.13.17 (defaultScala213Version) | `org.scala-lang:scala-library` and `org.scala-lang:scala-reflect` | Broker / core language runtime                                                                      | Language semantics                         | Finding 03, 06                         |
-| 12 | Gradle                                                  | 9.1.0                         | Build system                                                    | Build orchestration                                                                                 | Build-time only                            | N/A (build reference)                  |
-| 13 | Mockito                                                 | 5.20.0                        | `org.mockito:mockito-core`, `org.mockito:mockito-junit-jupiter` | Test mocks                                                                                          | Test-scope only                            | N/A (not runtime)                      |
+| #  | Dependency                                              | Version                       | Coordinate                                                     | Kafka Role                                                                                          | Security Relevance                         | Findings Referenced                    | CVE Snapshot (as of audit date)                                                                           |
+| -- | ------------------------------------------------------- | ----------------------------- | -------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- | ------------------------------------------ | -------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| 1  | Jackson (databind / core / annotations / dataformats)   | 2.19.0                        | `com.fasterxml.jackson.*` (group ids `com.fasterxml.jackson.core`, `com.fasterxml.jackson.dataformat`, `com.fasterxml.jackson.datatype`, `com.fasterxml.jackson.module`, `com.fasterxml.jackson.jakarta.rs`) | JSON (de)serialization in Connect JSON converter, Trogdor, REST responses, and structured logging  | Deserialization surface                    | Finding 08                             | None open at 2.19.0                                                                                        |
+| 2  | Jose4j                                                  | 0.9.6                         | `org.bitbucket.b_c:jose4j`                                     | JWT parsing and signature verification in `BrokerJwtValidator`; enforces `DISALLOW_NONE`            | Crypto + JWT verification                  | Finding 07, 08, 10                     | None open at 0.9.6                                                                                         |
+| 3  | Jetty Server (ee10-servlet / servlets)                  | 12.0.22                       | `org.eclipse.jetty:jetty-server` (and `org.eclipse.jetty.ee10:jetty-ee10-servlet`, `jetty-ee10-servlets`, `org.eclipse.jetty:jetty-client`) | HTTP transport for Connect REST and MirrorMaker REST                                                 | TLS, CORS, client auth; GzipHandler native memory | Finding 06                      | **CVE-2026-1605 (CVSS 7.5 High) GzipHandler native memory leak**; CVE-2026-2332 Medium (HTTP/1.1 chunk-ext); CVE-2026-5795 informational (not reachable in Kafka). See `./cve-snapshot.md` §5, §6.1, §6.2 |
+| 4  | Jersey (containers-servlet / hk2)                       | 3.1.10                        | `org.glassfish.jersey.containers:jersey-container-servlet` (and `org.glassfish.jersey.inject:jersey-hk2`) | JAX-RS implementation for Connect REST                                                              | Request binding, param parsing             | Finding 06                             | None open at 3.1.10                                                                                        |
+| 5  | Log4j2                                                  | 2.25.1                        | `org.apache.logging.log4j:log4j-api` and `log4j-1.2-api`       | Logging facade and bridge                                                                           | Log injection / redaction                  | Finding 09                             | CVE-2025-68161 Medium (Rfc5424Layout CRLF) - non-default layouts only; Kafka default `PatternLayout` is unaffected. See `./cve-snapshot.md` §6.3 |
+| 6  | LZ4-java                                                | 1.8.0                         | `org.lz4:lz4-java`                                             | Native LZ4 compression                                                                              | Native JNI surface; default compression path | Finding 02                           | **CVE-2025-12183 (CVSS 8.8 Critical) OOB read** + **CVE-2025-66566 (CVSS 8.2 Critical) information leak**; original `org.lz4:lz4-java` upstream archived - fix tracked by maintained fork `at.yawk.lz4:lz4-java:1.10.1`. See `./cve-snapshot.md` §3, §4 |
+| 7  | RocksDB (rocksdbjni)                                    | 10.1.3                        | `org.rocksdb:rocksdbjni`                                       | State-store for Kafka Streams                                                                       | Native JNI surface                         | Finding 02                             | None open at 10.1.3                                                                                        |
+| 8  | snappy-java                                             | 1.1.10.7                      | `org.xerial.snappy:snappy-java`                                | Native Snappy compression                                                                           | Native JNI surface                         | Finding 02                             | None open at 1.1.10.7                                                                                      |
+| 9  | zstd-jni                                                | 1.5.6-10                      | `com.github.luben:zstd-jni`                                    | Native Zstandard compression; integrates with Kafka `BufferSupplier` and 16 KB bounded chunk        | Native JNI surface; buffer ownership       | Finding 02, Accepted Mitigation #6     | None open at 1.5.6-10                                                                                      |
+| 10 | Bouncy Castle bcpkix                                    | 1.80                          | `org.bouncycastle:bcpkix-jdk18on`                              | PKIX parsing in OAuth/PEM pathways and test scopes                                                  | Crypto parsing                             | Finding 04                             | CVE-2026-0636 Low (LDAP path - not used by Kafka); CVE-2026-5588 Low (not reachable in Kafka PEM/OAuth pathways). See `./cve-snapshot.md` §6.4 |
+| 11 | Scala stdlib                                            | 2.13.17 (defaultScala213Version) | `org.scala-lang:scala-library` and `org.scala-lang:scala-reflect` | Broker / core language runtime                                                                      | Language semantics                         | Finding 03, 06                         | None open at 2.13.17                                                                                       |
+| 12 | Gradle                                                  | 9.1.0                         | Build system                                                    | Build orchestration                                                                                 | Build-time only                            | N/A (build reference)                  | Advisories exist (GHSA-w78c-w6vf-rw82, CVE-2026-22865) but require multi-repo preconditions absent from Kafka (`mavenCentral()` only per `build.gradle:20-22`) |
+| 13 | Mockito                                                 | 5.20.0                        | `org.mockito:mockito-core`, `org.mockito:mockito-junit-jupiter` | Test mocks                                                                                          | Test-scope only                            | N/A (not runtime)                      | N/A (test + benchmark scope only; excluded from publishing per `build.gradle:322`)                          |
 
 Column definitions:
 
@@ -244,6 +251,13 @@ Column definitions:
   indicates a build-only or test-scope dependency that is intentionally not covered by a
   runtime finding. Where a dependency is called out in an accepted-mitigation entry (for
   example zstd-jni buffer ownership), the mitigation number is cited alongside the finding.
+- **CVE Snapshot (as of audit date)**: Condensed view of upstream CVE advisories discovered
+  for the pinned version during Final Checkpoint #4 dependency scanning. "None open" means
+  no public CVE is listed against that pinned version at audit time. Per the Audit Only
+  rule, this column reports state only - no version bump, filter, or configuration change
+  is applied. Full evidence, CVSS v3.1 / v4.0 vectors, upstream-fix versions, and operator
+  interim-mitigation guidance live in the adjacent document `./cve-snapshot.md`.
+  "See `./cve-snapshot.md` §N" citations point into that hub document's section numbers.
 
 
 ---
@@ -320,10 +334,34 @@ Accepted Mitigation #6 in `accepted-mitigations.md` and as Finding 02 evidence).
 three native libraries (snappy-java, lz4-java, rocksdbjni) do not have an equivalent Kafka-side
 wrapper for buffer ownership; they rely on upstream correctness.
 
+**CVE posture observation (Final Checkpoint #4)**: Upstream CVE scanning of the pinned
+versions identified two open advisories against **lz4-java 1.8.0**:
+- **CVE-2025-12183** (CVSS 8.8 Critical, CWE-125 Out-of-bounds Read) affecting
+  `LZ4Factory.unsafeInstance()` / `.fastestInstance()` / `.fastestJavaInstance()` code paths
+  that Kafka's `Lz4Compression` (clients module) invokes by default when a producer or broker
+  uses `compression.type=lz4`.
+- **CVE-2025-66566** (CVSS 8.2 Critical, CWE-201 Information Leak) affecting `safeInstance()`
+  via insufficient output-buffer clearing.
+
+The original `org.lz4:lz4-java` artifact coordinate (pinned at `gradle/dependencies.gradle:L110`
+with coordinate expansion at L213) is archived upstream; continued maintenance has moved to the
+community fork `at.yawk.lz4:lz4-java` with the CVEs remediated in 1.10.1. This condition also
+intersects with the Kafka-side patch tracked by KAFKA-19951 (PR #21035, merged to the 4.2
+branch as commit `43a6e11f9a8` on December 9 2025), which introduces defensive decompression
+handling; see `./cve-snapshot.md` §9 for the upstream-signal mapping.
+
+Per the Audit-Only rule no version bump or coordinate change is applied in this run. The
+complete CVE detail with CVSS vectors, mechanism descriptions, Kafka code-path citations,
+and operator interim mitigations lives in `./cve-snapshot.md` §3 (CVE-2025-12183) and §4
+(CVE-2025-66566). Finding 02 (`./findings/02-low-level-code-safety.md`) carries the Kafka
+code-path evidence.
+
 Operator action recommended (future-state, not applied now): subscribe to the CVE feeds of
 each upstream project and maintain a quarterly review cadence against the native-image-configs
 in `docker/native/native-image-configs/` which are coupled to the zstd version per the inline
-comment at `gradle/dependencies.gradle:L129-130`.
+comment at `gradle/dependencies.gradle:L129-130`. For lz4-java specifically, the feed of
+interest is the maintained fork `at.yawk.lz4:lz4-java` rather than the archived
+`org.lz4:lz4-java` coordinate.
 
 ### 5.2 OAuth and JWT (jose4j)
 
@@ -351,6 +389,30 @@ with an empty `access.control.allow.origin` default from `RestServerConfig.java`
 implemented on top of Jetty+Jersey request handling. Upstream Jetty or Jersey CVEs
 affecting request routing, header parsing, URL normalization, or multipart handling transfer
 directly to Kafka Connect deployments.
+
+**CVE posture observation (Final Checkpoint #4)**: Upstream CVE scanning of Jetty 12.0.22
+(pinned at `gradle/dependencies.gradle:L69`) identified one High-severity advisory and two
+additional advisories:
+- **CVE-2026-1605** (CVSS 7.5 High, Denial of Service) - `GzipHandler` native-memory leak
+  through the JDK `Inflater` resource when a remote client sends a `Content-Encoding: gzip`
+  request body. Affected version range: 12.0.0-12.0.31 (and 12.1.0-12.1.5). The advisory is
+  remediated upstream in 12.0.32 / 12.1.6; long-term aggregated fix in 12.0.34+ / 12.1.8+.
+  Kafka Connect REST and MirrorMaker REST both instantiate a Jetty server and enable the
+  default handler chain, which includes `GzipHandler` when the servlet wiring in
+  `RestServer.java` is active.
+- **CVE-2026-2332** (Medium, HTTP/1.1 chunk-extension request smuggling) - relevant when a
+  Connect deployment is fronted by an HTTP/1.1-only reverse proxy; the mitigation is
+  operator-side chunked-extension stripping or HTTP/2-only ingress.
+- **CVE-2026-5795** (informational) - `JASPIAuthenticator` ThreadLocal leak. Kafka Connect
+  does not register a JASPI authenticator, so this advisory is **not reachable** in the
+  Connect configuration surface.
+
+Per the Audit-Only rule no version bump is applied in this run. The complete CVE detail
+with CVSS vectors, Kafka code-path citations, and operator interim mitigations
+(e.g., disabling `GzipHandler`, fronting Connect REST with a reverse proxy that strips gzip)
+lives in `./cve-snapshot.md` §5 (CVE-2026-1605), §6.1 (CVE-2026-2332), and §6.2 (CVE-2026-5795).
+Finding 06 (`./findings/06-network-subprocess-access.md`) carries the Connect REST code-path
+evidence for both the affected handler and the unaffected authentication plug-in family.
 
 ### 5.4 Deserialization (Jackson)
 
@@ -400,9 +462,17 @@ Mermaid legend.
 
 The seven categories above (Native / OAuth / Web / Deserialization / Logging / PKIX /
 Language) collectively describe the upstream dependency surfaces that can transfer
-vulnerabilities into Kafka. No CVE number is fabricated in this narrative; any specific CVE
-lookups must be performed by a human reviewer using the upstream advisory feeds listed in
-section 7.
+vulnerabilities into Kafka. Specific CVE identifiers discovered during Final Checkpoint #4
+upstream-advisory scanning and cited by this document - CVE-2025-12183 and CVE-2025-66566
+against lz4-java 1.8.0, CVE-2026-1605 (with additional CVE-2026-2332, CVE-2026-5795) against
+Jetty 12.0.22, CVE-2025-68161 against Log4j2 2.25.1 (non-default layouts only), and
+CVE-2026-0636 / CVE-2026-5588 against Bouncy Castle bcpkix 1.80 (not reachable in Kafka
+PEM/OAuth pathways) - are additionally cataloged in `./cve-snapshot.md`. No CVE number is
+fabricated; every CVE identifier appearing in this audit is traceable to a public upstream
+advisory with a recorded CVSS vector, and each citation also points into the hub
+`./cve-snapshot.md` for the full mechanism, business impact, and operator-interim-mitigation
+narrative. A reviewer who wishes to perform additional CVE lookups can do so via the
+upstream advisory feeds listed in section 7.
 
 ---
 
@@ -453,7 +523,12 @@ may choose to adopt or adjust any of them. None is applied in this run.
   - **zstd-jni** (github.com/luben/zstd-jni and upstream zstd at github.com/facebook/zstd)
   - **snappy-java** (github.com/xerial/snappy-java and upstream snappy at
     github.com/google/snappy)
-  - **lz4-java** (github.com/lz4/lz4-java and upstream LZ4 at github.com/lz4/lz4)
+  - **lz4-java** (github.com/lz4/lz4-java - now archived; active maintenance has moved to
+    the community fork at github.com/yawkat/lz4-java under the coordinate
+    `at.yawk.lz4:lz4-java`; upstream LZ4 native project remains at github.com/lz4/lz4).
+    The coordinate pinned at `gradle/dependencies.gradle:L110` (`org.lz4:lz4-java:1.8.0`)
+    is the archived line; CVE advisories CVE-2025-12183 and CVE-2025-66566 against that
+    coordinate are detailed in `./cve-snapshot.md` §3 and §4.
   - **RocksDB JNI** (github.com/facebook/rocksdb - including Java binding and native
     layer)
   - **Scala** (github.com/scala/scala - 2.13.x branch)
@@ -478,7 +553,12 @@ in this run:
   compression levels in `org.apache.kafka.common.record.CompressionType` remain valid per
   the comment at `gradle/dependencies.gradle:L129-130`.
 - For lz4 specifically, validate the same `CompressionType` compression levels per the
-  comment at `gradle/dependencies.gradle:L109`.
+  comment at `gradle/dependencies.gradle:L109`. Because the `org.lz4:lz4-java` coordinate
+  is archived upstream, a future upgrade must also evaluate migration to the maintained
+  fork coordinate `at.yawk.lz4:lz4-java` (which carries the CVE-2025-12183 and
+  CVE-2025-66566 remediations in 1.10.1+); both the version identifier at L110 and the
+  coordinate expansion at L213 would change in that case. This is a checklist consideration,
+  not a proposed action for this run.
 - For scalafmt specifically, align the configuration in `checkstyle/.scalafmt.conf` per
   the comment at `gradle/dependencies.gradle:L119-121`.
 - Run the full `./gradlew check` suite and the integration test matrix.
@@ -499,10 +579,35 @@ in the inventory table matches the manifest. Each item is a read-only reviewer s
 - [ ] Row 2 (Jose4j): version string `0.9.6` matches `gradle/dependencies.gradle:L81`, and
       coordinate matches `gradle/dependencies.gradle:L179`.
 - [ ] Row 3 (Jetty): version string `12.0.22` matches `gradle/dependencies.gradle:L69`.
+      Final Checkpoint #4 dependency scan flagged this pinned version against advisories
+      CVE-2026-1605 (CVSS 7.5 High, `GzipHandler` native-memory DoS; fixed upstream 12.0.32 /
+      12.1.6, long-term aggregated 12.0.34+ / 12.1.8+), CVE-2026-2332 (Medium, HTTP/1.1
+      chunk-extension request smuggling), and CVE-2026-5795 (informational, `JASPIAuthenticator`
+      ThreadLocal leak - not reachable in Kafka Connect's REST configuration because Connect
+      does not register a JASPI authenticator). Full reproduction, CVSS vectors, upstream-fix
+      versions, and operator interim-mitigation guidance live in `./cve-snapshot.md` sections
+      5, 6.1, and 6.2. Per the Audit Only rule this checklist row remains a pinning
+      verification step only; no upgrade is applied in this audit run.
 - [ ] Row 4 (Jersey): version string `3.1.10` matches `gradle/dependencies.gradle:L70`.
 - [ ] Row 5 (Log4j2): version string `2.25.1` matches `gradle/dependencies.gradle:L108`.
 - [ ] Row 6 (LZ4-java): version string `1.8.0` matches `gradle/dependencies.gradle:L110`,
-      and coordinate matches `gradle/dependencies.gradle:L213`.
+      and coordinate matches `gradle/dependencies.gradle:L213`. Final Checkpoint #4
+      dependency scan flagged this pinned version against two Critical advisories:
+      CVE-2025-12183 (CVSS 8.8 Critical, CWE-125 Out-of-bounds Read affecting
+      `LZ4Factory.unsafeInstance()`, `.fastestInstance()`, and `.fastestJavaInstance()` -
+      the instance factories invoked by `Lz4Compression` in the clients module whenever a
+      producer, broker, or consumer processes a batch with `compression.type=lz4`) and
+      CVE-2025-66566 (CVSS 8.2 Critical, CWE-201 Information Leak via insufficient
+      output-buffer clearing in `safeInstance()`). The pinned coordinate `org.lz4:lz4-java`
+      is itself archived upstream; the maintained community fork carries CVE remediation
+      under the coordinate `at.yawk.lz4:lz4-java` with fixes aggregated in release 1.10.1.
+      The Kafka 4.2 upstream branch has accepted KAFKA-19951 (PR #21035, commit
+      `43a6e11f9a8`, December 9 2025) as a defensive decompression-handling change
+      intersecting this surface. Full reproduction, CVSS vectors, fork-coordinate migration
+      detail, and operator interim-mitigation guidance live in `./cve-snapshot.md`
+      sections 3, 4, and 9. Per the Audit Only rule this checklist row remains a pinning
+      verification step only; no upgrade, coordinate swap, or compression-library
+      migration is applied in this audit run.
 - [ ] Row 7 (RocksDB JNI): version string `10.1.3` matches `gradle/dependencies.gradle:L118`.
 - [ ] Row 8 (snappy-java): version string `1.1.10.7` matches
       `gradle/dependencies.gradle:L125`, and coordinate matches
@@ -530,10 +635,18 @@ in the inventory table matches the manifest. Each item is a read-only reviewer s
       are used.
 - [ ] Zero upgrade, pinning change, or manifest modification is proposed. Section 7 is
       explicitly labeled "Recommended, Future-State" and is not an applied change.
-- [ ] The supply-chain narrative in section 5 does not fabricate CVE numbers or dates. The
-      only specific CVE referenced by identifier is CVE-2021-44228 (Log4Shell), which is
-      cited as the historical context for the currently-deployed Log4j2 2.25.1 line being
-      well past that remediation window - a factual statement, not a fabricated attribution.
+- [ ] The supply-chain narrative in section 5 does not fabricate CVE numbers or dates.
+      Specific CVEs referenced by identifier fall into two classes: (a) historical context
+      CVE-2021-44228 (Log4Shell), cited as the well-past remediation window for the
+      currently-deployed Log4j2 2.25.1 line, and (b) the eight upstream advisories
+      discovered against the currently pinned versions during Final Checkpoint #4
+      dependency scanning - CVE-2025-12183 and CVE-2025-66566 (lz4-java 1.8.0),
+      CVE-2026-1605, CVE-2026-2332, and CVE-2026-5795 (Jetty 12.0.22), CVE-2025-68161
+      (Log4j2 2.25.1, non-default layouts only), and CVE-2026-0636 and CVE-2026-5588
+      (Bouncy Castle bcpkix 1.80, not reachable in Kafka's PEM and OAuth pathways).
+      Every identifier in both classes is traceable to a public upstream advisory with
+      CVSS vector on record; each cross-references `./cve-snapshot.md` for full
+      reproduction evidence. None of these identifiers is a fabricated attribution.
 
 ---
 

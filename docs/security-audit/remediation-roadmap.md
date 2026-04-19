@@ -91,6 +91,7 @@ gantt
     section Proposed - Short-term (1-3 months)
     Document INTERNAL_REQUEST_MATCHERS (06.1)        :       st1,  after imm3, 30d
     Audit OAuth dual-validator posture (08.4)        :       st2,  after imm4, 30d
+    Track upstream supply-chain CVEs (02.3, 06.6)    :crit,  st3,  after imm4, 30d
     section Proposed - Medium-term (3-6 months)
     Convert SafeObjectInputStream to allow-list (08.3) :     mt1,  2026-08-01, 60d
     Constrain release.py shell=True calls (06.4)       :     mt2,  2026-08-15, 30d
@@ -119,14 +120,24 @@ gantt
 ### 2.2 Phase Summary
 
 - **Immediate (Section 3.1)**: Changes an operator can apply today through configuration alone.
-  No code modification, no KIP. Four items covering the five High-severity findings (06.1, 07.1,
-  10.1, 10.3, 10.4) plus one Medium-severity hardening (10.5).
+  No code modification, no KIP. Four items covering five of the six High-severity findings (06.1,
+  07.1, 10.1, 10.3, 10.4) plus one Medium-severity hardening (10.5). The sixth High-severity
+  finding (06.6 — Jetty `GzipHandler` / `GzipRequest` native-memory leak tracked as
+  CVE-2026-1605) is surfaced separately under Short-term Section 3.2.7 because its remediation
+  requires an upstream dependency version bump that falls outside the scope of an operator-only
+  configuration change.
 - **Short-term (Section 3.2)**: Documentation-only actions that close operator-facing gaps without
-  modifying code or configuration schema.
+  modifying code or configuration schema. **Includes a supply-chain advisory cadence
+  (Section 3.2.7) covering the audit's single `[Critical]` finding (02.3 — `org.lz4:lz4-java` 1.8.0
+  CVE-2025-12183 and CVE-2025-66566) and the Jetty High-severity finding (06.6 — CVE-2026-1605),
+  both surfaced by supply-chain CVE scanning during QA Final Checkpoint #4 and consolidated in
+  [`./cve-snapshot.md`](./cve-snapshot.md).**
 - **Medium-term (Section 3.3)**: Non-breaking code changes that require a KIP but do not remove or
   rename any public API surface.
 - **Long-term (Section 3.4)**: Architectural or breaking changes that require a KIP plus a
-  deprecation cycle per Apache Kafka compatibility policy.
+  deprecation cycle per Apache Kafka compatibility policy. Includes an expanded
+  native-dependency supply-chain monitoring programme (Section 3.4.4) that incorporates the
+  tracking cadence triggered by the Final Checkpoint #4 CVE scan.
 
 ---
 
@@ -356,20 +367,71 @@ a security-relevant posture that the code already supports.
 - **Prerequisite**: None.
 - **Change class**: Documentation-only.
 
-#### 3.2.6 [02.*] Consider publishing a native-dependency supply-chain advisory cadence (Low)
+#### 3.2.6 [02.*] Consider publishing a native-dependency supply-chain advisory cadence (Low — excluding 02.3 which is tracked in 3.2.7)
 
 - **Action**: Documentation maintainers (or the release-management team, where the boundary is
   appropriate) could publish a cadence for reviewing upstream advisories on the five native
   libraries that Kafka depends on: `com.github.luben:zstd-jni` 1.5.6-10, `org.xerial.snappy:snappy-java`
   1.1.10.7, `org.lz4:lz4-java` 1.8.0, `org.rocksdb:rocksdbjni` 10.1.3, and
   `org.bouncycastle:bcpkix-jdk18on` 1.80 (versions from `gradle/dependencies.gradle`). Any upstream
-  CVE in these libraries has direct blast-radius implications for Kafka deployments.
+  CVE in these libraries has direct blast-radius implications for Kafka deployments. Note that
+  `org.lz4:lz4-java` 1.8.0 (Finding 02.3) is the subject of a distinct, time-sensitive advisory in
+  Section 3.2.7 because CVE-2025-12183 (CVSS 8.8, CWE-125 out-of-bounds read on
+  `LZ4Factory.unsafeInstance()` / `fastestInstance()` / `fastestJavaInstance()` paths) and
+  CVE-2025-66566 (CVSS 8.2, CWE-201 information leak through insufficient output-buffer clearing
+  in `safeInstance()`) are active upstream CVEs at the pinned version and because upstream
+  coordinate `org.lz4:lz4-java` has itself been archived. For the other four native libraries,
+  this cadence sets the long-running monitoring baseline that a future `org.lz4:lz4-java`-style
+  event could re-enter.
 - **Evidence**: Findings 02.1 through 02.5 enumerate each native dependency and the JNI boundary.
-  [`./dependency-inventory.md`](./dependency-inventory.md) lists the exact pinned versions.
+  [`./dependency-inventory.md`](./dependency-inventory.md) lists the exact pinned versions with
+  a CVE Snapshot column. [`./cve-snapshot.md`](./cve-snapshot.md) consolidates the per-CVE
+  references for the lz4-java exception case.
 - **Impact**: Provides operators an explicit expectation of how quickly an upstream native-library
   CVE would be reflected in a Kafka patch release.
 - **Prerequisite**: None.
 - **Change class**: Documentation-only.
+
+#### 3.2.7 [02.3, 06.6] Consider publishing a time-sensitive supply-chain CVE advisory for lz4-java and Jetty (Critical / High)
+
+- **Action**: Documentation maintainers (or the release-management team, where the boundary is
+  appropriate) could publish a time-sensitive advisory that surfaces the three active upstream
+  CVEs identified during QA Final Checkpoint #4 and already consolidated in
+  [`./cve-snapshot.md`](./cve-snapshot.md):
+  - **CVE-2025-12183** (`org.lz4:lz4-java` 1.8.0, CVSS 8.8 / High, CWE-125 out-of-bounds read) —
+    reachable through the default `LZ4Factory.unsafeInstance()`, `fastestInstance()`, and
+    `fastestJavaInstance()` code paths that Kafka's compression codec invokes whenever a
+    producer, broker, or consumer sets `compression.type=lz4`.
+  - **CVE-2025-66566** (`org.lz4:lz4-java` 1.8.0, CVSS 8.2 / High, CWE-201 information leak) —
+    insufficient output-buffer clearing in `safeInstance()` may expose stale heap bytes. Reachable
+    through the same default compression code path as CVE-2025-12183.
+  - **CVE-2026-1605** (`org.eclipse.jetty:jetty-server` 12.0.22, CVSS 7.5 / High) — `GzipHandler`
+    / `GzipRequest` native-memory leak through unbounded `Inflater` allocation when the Connect
+    REST HTTP layer receives requests with `Content-Encoding: gzip`. The Connect REST HTTP
+    listener (backed by `connect/runtime/src/main/java/org/apache/kafka/connect/runtime/rest/RestServer.java`)
+    is the exposed surface.
+- **Action detail**: The advisory could enumerate three things: (a) that Kafka's compression
+  codec path (`clients/src/main/java/org/apache/kafka/common/compress/Lz4Compression.java` and the
+  `DefaultRecordBatch` decompression path) invokes the `org.lz4:lz4-java` entry points that the
+  two lz4 CVEs affect; (b) that the upstream coordinate `org.lz4:lz4-java` has been archived and
+  that a maintained successor fork (referenced in [`./dependency-inventory.md`](./dependency-inventory.md)
+  and [`./cve-snapshot.md`](./cve-snapshot.md)) is the path a future KIP may evaluate; (c) that
+  the Jetty advisory is remediated by upstream releases 12.0.34 and 12.1.8 (or later within each
+  branch) and that an operator-facing reverse-proxy configuration may filter `Content-Encoding:
+  gzip` on inbound Connect REST traffic as an interim mitigation.
+- **Evidence**: [`./cve-snapshot.md`](./cve-snapshot.md) consolidates the per-CVE references,
+  CVSS vectors, reachability rationale, and upstream fix-version citations.
+  [`./dependency-inventory.md`](./dependency-inventory.md) carries the CVE Snapshot column for
+  every pinned dependency. `gradle/dependencies.gradle` pins `lz4: "1.8.0"` (line 110) and
+  `jetty: "12.0.22"` (line 69); the audit applies no change to either line.
+- **Impact**: Makes the time-sensitive upstream CVE posture operationally legible to Kafka
+  operators who are subscribed to the audit deliverables but who may not be subscribed to every
+  upstream advisory feed directly.
+- **Prerequisite**: None — this action could be performed by documentation maintainers without
+  engineering involvement and without any code, build-file, or configuration schema change.
+- **Change class**: Documentation-only. The audit itself proposes **no** code or dependency-version
+  change; the advisory is purely an operator-facing document that consolidates information that
+  already exists in upstream CVE feeds.
 
 ---
 
@@ -556,20 +618,31 @@ candidate for future strategic planning.
   wrapper preserves existing latency profiles.
 - **Change class**: Architectural (KIP).
 
-#### 3.4.4 [02.*] Consider a native-dependency supply-chain monitoring programme
+#### 3.4.4 [02.*, 06.6] Consider a native-dependency and web-transport supply-chain monitoring programme
 
-- **Action**: The release-management team could establish an **ongoing** native-dependency
-  supply-chain monitoring programme that tracks upstream advisories for `zstd-jni`,
-  `snappy-java`, `lz4-java`, `rocksdbjni`, and `bcpkix-jdk18on`, and that maintains a
-  documented response SLA when an advisory touches a Kafka-bundled version. The existing OWASP
-  Dependency-Check and Trivy configurations in the Kafka CI provide the data feed; the
-  programme would add the process layer on top.
+- **Action**: The release-management team could establish an **ongoing** native-dependency and
+  web-transport supply-chain monitoring programme that tracks upstream advisories for
+  `zstd-jni`, `snappy-java`, `lz4-java`, `rocksdbjni`, `bcpkix-jdk18on`, and the Jetty web
+  server family (`jetty-server`, `jetty-client`, `jetty-ee10-servlet`, `jetty-ee10-servlets`)
+  and that maintains a documented response SLA when an advisory touches a Kafka-bundled
+  version. The existing OWASP Dependency-Check and Trivy configurations in the Kafka CI
+  provide the data feed; the programme would add the process layer on top. The Final
+  Checkpoint #4 advisory scan (consolidated in [`./cve-snapshot.md`](./cve-snapshot.md))
+  surfaced three active CVEs that this programme could consider as its inaugural test case:
+  CVE-2025-12183 and CVE-2025-66566 against `org.lz4:lz4-java` 1.8.0, and CVE-2026-1605 against
+  `org.eclipse.jetty:jetty-server` 12.0.22. The programme could evaluate whether a future
+  Kafka release may consider bumping Jetty to 12.0.34+ or 12.1.8+ (upstream fix versions) and
+  whether a future KIP may evaluate migrating the lz4 coordinate to a maintained successor
+  fork (since the upstream `org.lz4:lz4-java` coordinate has been archived).
 - **Evidence**: `gradle/dependencies.gradle` pins each native library at an exact version
-  (see [`./dependency-inventory.md`](./dependency-inventory.md)). Findings 02.1 through 02.5
-  establish the blast-radius calculus for each JNI boundary.
+  (see [`./dependency-inventory.md`](./dependency-inventory.md), which now includes a CVE
+  Snapshot column for every pinned dependency). Findings 02.1 through 02.5 and 06.6
+  establish the blast-radius calculus for each JNI boundary and for the Connect REST web
+  transport respectively. [`./cve-snapshot.md`](./cve-snapshot.md) consolidates the per-CVE
+  citations for the three time-sensitive findings.
 - **Impact**: Provides operators with a predictable expectation of how quickly an upstream
-  native-library CVE would be reflected in a Kafka patch release. Reduces the window during
-  which a known-vulnerable native library is bundled.
+  native-library or web-transport CVE would be reflected in a Kafka patch release. Reduces
+  the window during which a known-vulnerable library is bundled.
 - **Prerequisite**: Buy-in from the release-management team; a communications channel for
   advisories to reach downstream operators.
 - **Change class**: Process change (no code change required in the base case).
@@ -743,9 +816,16 @@ quadrantChart
 
 ### 5.2 Quadrant Reading Notes
 
-- The **Quick wins** quadrant is where the four configuration-only recommendations for the five
-  High-severity findings land. Operators who read only one section of this roadmap could
-  usefully limit themselves to this quadrant and Section 3.1.
+- The **Quick wins** quadrant is where the four configuration-only recommendations for five
+  of the six High-severity findings land (06.1, 07.1, 10.1, 10.3, 10.4). The sixth
+  High-severity finding (06.6 — Jetty `GzipHandler` CVE-2026-1605) and the single
+  `[Critical]` finding (02.3 — `org.lz4:lz4-java` CVE-2025-12183 / CVE-2025-66566) are
+  surfaced through the short-term supply-chain advisory in Section 3.2.7 rather than through
+  an operator configuration change, because their remediation requires an upstream
+  dependency-version bump (or a maintained-fork migration in the lz4 case) rather than a
+  configuration toggle. Operators who read only one section of this roadmap could usefully
+  limit themselves to this quadrant and Section 3.1, with Section 3.2.7 as a mandatory
+  follow-on for the supply-chain pair.
 - The **Strategic** quadrant contains items that would rewrite architectural assumptions (for
   example, the inter-worker Connect RPC redesign in 3.4.5, or the process-wide ReDoS-resistant
   regex facility in 3.4.3).
@@ -801,8 +881,17 @@ the decision process.
   of this roadmap is a distilled summary of that catalogue.
 - [`./dependency-inventory.md`](./dependency-inventory.md) — canonical version manifest for
   the runtime-affecting dependencies referenced throughout this roadmap (Jackson 2.19.0,
-  Jose4j 0.9.6, zstd-jni 1.5.6-10, snappy-java 1.1.10.7, lz4-java 1.8.0, rocksdbjni 10.1.3,
-  bcpkix-jdk18on 1.80, and others).
+  Jose4j 0.9.6, Jetty 12.0.22, zstd-jni 1.5.6-10, snappy-java 1.1.10.7, lz4-java 1.8.0,
+  rocksdbjni 10.1.3, bcpkix-jdk18on 1.80, and others). Carries a CVE Snapshot column with
+  per-dependency references to `./cve-snapshot.md` for every finding surfaced during QA
+  Final Checkpoint #4.
+- [`./cve-snapshot.md`](./cve-snapshot.md) — consolidated hub document for the three
+  time-sensitive upstream CVEs identified during QA Final Checkpoint #4: **CVE-2025-12183**
+  (`org.lz4:lz4-java` 1.8.0, CVSS 8.8, CWE-125 out-of-bounds read), **CVE-2025-66566**
+  (`org.lz4:lz4-java` 1.8.0, CVSS 8.2, CWE-201 information leak), and **CVE-2026-1605**
+  (`org.eclipse.jetty:jetty-server` 12.0.22, CVSS 7.5, `GzipHandler` / `GzipRequest`
+  native-memory leak). Directly referenced by Section 3.2.7 (short-term advisory) and
+  Section 3.4.4 (long-term supply-chain monitoring programme) of this roadmap.
 - [`./no-change-verification.md`](./no-change-verification.md) — git-differential evidence
   that no source code, test, build file, or pre-existing documentation file was modified
   during the audit. Reviewers MUST verify this file before acting on any item in this
@@ -835,9 +924,15 @@ reader understands the audit's posture without needing to consult a separate doc
    standard Apache Kafka engineering process: a KIP for code changes, a community-reviewed
    documentation pull request for documentation changes, and a coordinated operator rollout
    for configuration-only changes.
-3. **The audit proposes no changes, even for the five High-severity findings.** The "Minimal
+3. **The audit proposes no changes, even for the six High-severity findings.** The "Minimal
    Change Clause" governing this audit explicitly states that no change is to be applied, even
-   if necessary for remediation. The audit's sole product is documentation.
+   if necessary for remediation. The audit's sole product is documentation. This count now
+   includes Finding 06.6 (`org.eclipse.jetty:jetty-server` 12.0.22, CVE-2026-1605) alongside
+   the previously enumerated 06.1, 07.1, 10.1, 10.3, and 10.4. Finding 02.3
+   (`org.lz4:lz4-java` 1.8.0, CVE-2025-12183 and CVE-2025-66566) is additionally classified
+   `[Critical]` per [`./severity-matrix.md`](./severity-matrix.md) but is likewise governed by
+   this clause — no dependency-version bump is applied. The advisory path for both
+   supply-chain findings is documented in Section 3.2.7.
 4. **Future-state language is used throughout.** Every recommendation in this roadmap is
    phrased as "consider", "may", or "could". No recommendation uses the imperative ("must",
    "will", or equivalent).

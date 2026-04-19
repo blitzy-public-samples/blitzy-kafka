@@ -1465,7 +1465,7 @@ flowchart LR
                         <tbody>
                             <tr><td><i class="fa-solid fa-file-code icon-blue" aria-hidden="true"></i> <code>jackson-databind</code></td><td>2.19.0</td><td>08 Deserialization</td></tr>
                             <tr><td><i class="fa-solid fa-key icon-blue" aria-hidden="true"></i> <code>jose4j</code></td><td>0.9.6</td><td>07 Callback / 08 Deserial</td></tr>
-                            <tr><td><i class="fa-solid fa-server icon-blue" aria-hidden="true"></i> <code>jetty-server</code></td><td>12.0.22</td><td>06 Network</td></tr>
+                            <tr><td><i class="fa-solid fa-server icon-blue" aria-hidden="true"></i> <code>jetty-server</code></td><td>12.0.22 <i class="fa-solid fa-triangle-exclamation icon-orange" aria-label="High severity CVE flag" title="CVE-2026-1605 [High] GzipHandler native-memory DoS"></i></td><td>06 Network</td></tr>
                             <tr><td><i class="fa-solid fa-plug icon-blue" aria-hidden="true"></i> <code>jersey</code></td><td>3.1.10</td><td>06 Network</td></tr>
                             <tr><td><i class="fa-solid fa-file-lines icon-blue" aria-hidden="true"></i> <code>log4j2</code></td><td>2.25.1</td><td>09 Info Leakage</td></tr>
                         </tbody>
@@ -1479,7 +1479,7 @@ flowchart LR
                         <tbody>
                             <tr><td><i class="fa-solid fa-file-zipper icon-grey" aria-hidden="true"></i> <code>zstd-jni</code></td><td>1.5.6-10</td><td>02 Native</td></tr>
                             <tr><td><i class="fa-solid fa-file-zipper icon-grey" aria-hidden="true"></i> <code>snappy-java</code></td><td>1.1.10.7</td><td>02 Native</td></tr>
-                            <tr><td><i class="fa-solid fa-file-zipper icon-grey" aria-hidden="true"></i> <code>lz4-java</code></td><td>1.8.0</td><td>02 Native</td></tr>
+                            <tr><td><i class="fa-solid fa-file-zipper icon-red" aria-hidden="true"></i> <code>lz4-java</code></td><td>1.8.0 <i class="fa-solid fa-triangle-exclamation icon-red" aria-label="Critical severity CVE flag" title="CVE-2025-12183 + CVE-2025-66566 [Critical x 2]"></i></td><td>02 Native</td></tr>
                             <tr><td><i class="fa-solid fa-database icon-grey" aria-hidden="true"></i> <code>rocksdbjni</code></td><td>10.1.3</td><td>02 Native</td></tr>
                             <tr><td><i class="fa-solid fa-certificate icon-blue" aria-hidden="true"></i> <code>bcpkix-jdk18on</code></td><td>1.80</td><td>07 Callback</td></tr>
                             <tr><td><i class="fa-solid fa-scroll icon-blue" aria-hidden="true"></i> <code>scala-library</code></td><td>2.13.17</td><td>Runtime</td></tr>
@@ -1490,6 +1490,7 @@ flowchart LR
             </div>
             <p style="font-size:0.62em; text-align:center; color:var(--dim); margin-top:0.3em;">
                 OWASP Dependency-Check and Trivy scanners are configured in the repository's CI pipeline for ongoing supply-chain surveillance.
+                <br/><i class="fa-solid fa-triangle-exclamation icon-orange" aria-hidden="true"></i> <strong style="color:#f1f5f9;">Three active CVEs identified at audit snapshot</strong> &#8212; <code>lz4-java</code> <span class="badge-critical" style="padding:0.1em 0.4em; border-radius:3px; font-size:0.9em; color:#fff;">Critical &times; 2</span> and <code>jetty-server</code> <span class="badge-high" style="padding:0.1em 0.4em; border-radius:3px; font-size:0.9em; color:#fff;">High &times; 1</span>; see <code>cve-snapshot.md</code>. Per the Audit Only rule, remediation is staged as future-state engagements in <code>remediation-roadmap.md</code> Sections 3.2.7 and 3.4.4.
             </p>
             <div class="citation-footer" style="position:static;margin-top:0.4em;">
                 <code>gradle/dependencies.gradle:L56,L63,L66,L69,L70,L81,L108,L110,L113,L118,L125,L131</code>
