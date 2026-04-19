@@ -418,8 +418,11 @@ Compliance with the rule is verifiable in three independent ways:
 
 2. **Full artifact inventory check.** Reviewers may cross-check that every new file is
    accounted for in the [Navigation Map](#4-navigation-map) above and that no new file has
-   been introduced outside `docs/security-audit/`. The total file count is 25 as recorded in
-   the Audit Snapshot block.
+   been introduced outside `docs/security-audit/`. The total file count is 26 as recorded in
+   the Audit Snapshot block (1 README + 1 reveal.js HTML + 7 core markdowns + 7 diagrams +
+   10 per-category findings, where the 7 core markdowns comprise `severity-matrix.md`,
+   `remediation-roadmap.md`, `accepted-mitigations.md`, `dependency-inventory.md`,
+   `cve-snapshot.md`, `no-change-verification.md`, and `references.md`).
 
 3. **Execution log check.** The audit execution log (available to reviewers on request via
    the audit engagement's operational tooling) shows zero invocations of Gradle tasks,

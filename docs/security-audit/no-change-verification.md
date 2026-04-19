@@ -135,19 +135,17 @@ git diff --name-only <pre-audit-sha>..HEAD
 git diff --name-status <pre-audit-sha>..HEAD
 ```
 
-The expected output of `git diff --name-status <pre-audit-sha>..HEAD` is exactly the 25
+The expected output of `git diff --name-status <pre-audit-sha>..HEAD` is exactly the 26
 lines below. Every line MUST begin with the letter `A` (Added) followed by a TAB and a path
-under `docs/security-audit/`:
+under `docs/security-audit/`. (The Mermaid diagram in Section 2 above abbreviates the
+per-line match by requiring each line to match `'A\tdocs/security-audit/'`; the enumeration
+below expands that invariant across every expected artifact.)
 
 ```text
 A	docs/security-audit/README.md
-A	docs/security-audit/executive-summary.html
 A	docs/security-audit/accepted-mitigations.md
+A	docs/security-audit/cve-snapshot.md
 A	docs/security-audit/dependency-inventory.md
-A	docs/security-audit/no-change-verification.md
-A	docs/security-audit/references.md
-A	docs/security-audit/remediation-roadmap.md
-A	docs/security-audit/severity-matrix.md
 A	docs/security-audit/diagrams/attack-surface-map.md
 A	docs/security-audit/diagrams/authorization-decision-flow.md
 A	docs/security-audit/diagrams/connect-rest-trust-boundary.md
@@ -155,6 +153,7 @@ A	docs/security-audit/diagrams/kraft-quorum-safety.md
 A	docs/security-audit/diagrams/native-compression-boundary.md
 A	docs/security-audit/diagrams/oauth-jwt-validation-paths.md
 A	docs/security-audit/diagrams/threat-model-overview.md
+A	docs/security-audit/executive-summary.html
 A	docs/security-audit/findings/01-filesystem-access-path-traversal.md
 A	docs/security-audit/findings/02-low-level-code-safety.md
 A	docs/security-audit/findings/03-resource-limit-evasion.md
@@ -165,16 +164,25 @@ A	docs/security-audit/findings/07-external-function-callback-misuse.md
 A	docs/security-audit/findings/08-deserialization-attacks.md
 A	docs/security-audit/findings/09-information-leakage.md
 A	docs/security-audit/findings/10-public-api-developer-misuse.md
+A	docs/security-audit/no-change-verification.md
+A	docs/security-audit/references.md
+A	docs/security-audit/remediation-roadmap.md
+A	docs/security-audit/severity-matrix.md
 ```
 
-The expected total is exactly 25 lines, comprising:
+Note: the order of the lines produced by `git diff --name-status` follows Git's internal
+sort order (lexicographic by path), which is the order shown above. Reviewer scripts in
+Section 3.3 do not depend on the order; they only depend on the `A` status column and the
+`docs/security-audit/` path prefix.
+
+The expected total is exactly 26 lines, comprising:
 
 | Group | Count | Files |
 |-------|-------|-------|
-| Top-level artifacts | 8 | `README.md`, `executive-summary.html`, `accepted-mitigations.md`, `dependency-inventory.md`, `no-change-verification.md`, `references.md`, `remediation-roadmap.md`, `severity-matrix.md` |
+| Top-level artifacts | 9 | `README.md`, `executive-summary.html`, `accepted-mitigations.md`, `cve-snapshot.md`, `dependency-inventory.md`, `no-change-verification.md`, `references.md`, `remediation-roadmap.md`, `severity-matrix.md` |
 | Mermaid diagram fragments | 7 | `diagrams/attack-surface-map.md`, `diagrams/authorization-decision-flow.md`, `diagrams/connect-rest-trust-boundary.md`, `diagrams/kraft-quorum-safety.md`, `diagrams/native-compression-boundary.md`, `diagrams/oauth-jwt-validation-paths.md`, `diagrams/threat-model-overview.md` |
 | Ten-category findings | 10 | `findings/01-filesystem-access-path-traversal.md` ... `findings/10-public-api-developer-misuse.md` (numbered 01-10 in user-supplied order) |
-| **Total** | **25** | |
+| **Total** | **26** | |
 
 If ANY line lacks the `A` status OR does NOT start with `docs/security-audit/`, the audit has
 violated the Audit-Only rule and corrective action (Section 7) is required.
@@ -213,8 +221,8 @@ A reviewer may additionally cross-check that the audit did not add any file outs
 expected set (for example, accidental `.DS_Store`, editor backup files, or stray binaries):
 
 ```bash
-# Sanity check: confirm the 25-file invariant
-EXPECTED=25
+# Sanity check: confirm the 26-file invariant
+EXPECTED=26
 ACTUAL=$(git diff --name-only ${PRE_AUDIT_SHA}..HEAD | wc -l)
 if [ "${ACTUAL}" -eq "${EXPECTED}" ]; then
   echo "PASS: Exactly ${EXPECTED} files changed as planned."
@@ -376,7 +384,7 @@ product of reading a file and copying the file path plus a line range into the
 corresponding markdown artifact. No source file was opened in write mode at any point.
 
 **Write-scope boundary**: The only writes performed by the audit target paths under
-`docs/security-audit/`. The `create_file` / `write_file` invocations that produced the 25
+`docs/security-audit/`. The `create_file` / `write_file` invocations that produced the 26
 audit artifacts are the sole non-read operations in the entire engagement.
 
 ---
@@ -451,6 +459,7 @@ can follow the chain from rule to evidence and back:
 | [`remediation-roadmap.md`](remediation-roadmap.md) | Proposes future-state actions ONLY; every recommendation is explicitly deferred to a later, non-audit change, per this rule. |
 | [`accepted-mitigations.md`](accepted-mitigations.md) | Catalogs existing protections observed via read-only inspection; no mitigation is added, only documented. |
 | [`dependency-inventory.md`](dependency-inventory.md) | Cites `gradle/dependencies.gradle` read-only; the manifest is not modified. |
+| [`cve-snapshot.md`](cve-snapshot.md) | Surfaces externally-published CVEs affecting pinned dependencies; cites `gradle/dependencies.gradle` read-only and proposes no upgrade in this engagement. |
 | [`severity-matrix.md`](severity-matrix.md) | Severity assignments are derived from static evidence; no triage action mutates code. |
 | [`references.md`](references.md) | Bibliography of file paths; every cited path is confirmed to appear in Section 4 of this document as unmodified. |
 | [`executive-summary.html`](executive-summary.html) | Non-technical leadership briefing; explicitly names the no-change guarantee among its closing slides. |
