@@ -1,0 +1,1772 @@
+<!DOCTYPE html>
+<!--
+  Licensed to the Apache Software Foundation (ASF) under one
+  or more contributor license agreements.  See the NOTICE file
+  distributed with this work for additional information
+  regarding copyright ownership.  The ASF licenses this file
+  to you under the Apache License, Version 2.0 (the
+  "License"); you may not use this file except in compliance
+  with the License.  You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing,
+  software distributed under the License is distributed on an
+  "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+  KIND, either express or implied.  See the License for the
+  specific language governing permissions and limitations
+  under the License.
+-->
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Apache Kafka 4.2 Security Audit - Executive Summary</title>
+    <meta name="description" content="Executive summary of the static, audit-only security vulnerability assessment of Apache Kafka 4.2.0-SNAPSHOT.">
+    <meta name="author" content="Apache Kafka Security Audit">
+
+    <!-- reveal.js 5.1.0 -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reset.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/theme/league.css">
+
+    <!-- Font Awesome 6.6.0 (professional icons; no emojis are used anywhere) -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.6.0/css/all.min.css">
+
+    <style>
+        /*
+         * Severity Color Palette — canonical across the audit tree.
+         * This palette is intentionally reproduced in the Mermaid diagrams
+         * under `docs/security-audit/diagrams/` (attack-surface-map.md,
+         * authorization-decision-flow.md, threat-model-overview.md,
+         * oauth-jwt-validation-paths.md, connect-rest-trust-boundary.md).
+         * Keep the mapping below IDENTICAL to those diagrams so that a
+         * reviewer moving between the reveal.js deck and a standalone diagram
+         * sees the same color for the same severity class:
+         *
+         *   Critical = #DC2626 (red)    — reserved; no audit finding rates Critical
+         *   High     = #EA580C (orange) — remote-auth or operator-reachable surfaces
+         *   Medium   = #D97706 (amber)  — contextual or configuration-dependent surfaces
+         *   Low      = #16A34A (green)  — defense-in-depth or informational surfaces
+         *
+         * Rationale: High (#EA580C) and Medium (#D97706) intentionally use
+         * adjacent-but-distinct warm tones so the two severity tiers remain
+         * visually separable in the badge, icon, and diagram renderings.
+         */
+        :root {
+            --navy: #0F172A;
+            --blue: #2563EB;
+            --green: #16A34A;   /* Low     — matches classDef allow/low in diagrams */
+            --amber: #D97706;   /* Medium  — matches classDef medium/warn/operator/audit */
+            --orange: #EA580C;  /* High    — matches classDef high in attack-surface-map.md */
+            --red: #DC2626;     /* Critical — matches classDef critical/deny/danger/untrusted */
+            --grey: #64748B;
+            --light: #F1F5F9;
+            --dim: #94A3B8;
+        }
+
+        .reveal {
+            background-color: var(--navy);
+        }
+
+        .reveal .slides section {
+            text-align: left;
+            color: var(--light);
+        }
+
+        .reveal h1,
+        .reveal h2,
+        .reveal h3,
+        .reveal h4 {
+            color: #E2E8F0;
+            font-weight: 600;
+            letter-spacing: 0.02em;
+        }
+
+        .reveal h1 {
+            font-size: 2.2em;
+            text-align: center;
+        }
+
+        .reveal h2 {
+            font-size: 1.5em;
+            margin-bottom: 0.5em;
+            border-bottom: 2px solid var(--blue);
+            padding-bottom: 0.2em;
+        }
+
+        .reveal h3 {
+            font-size: 1.15em;
+            color: #CBD5E1;
+        }
+
+        .reveal p,
+        .reveal li {
+            color: var(--light);
+            font-size: 0.78em;
+            line-height: 1.4;
+        }
+
+        .reveal code {
+            background: rgba(15, 23, 42, 0.85);
+            color: #F1F5F9;
+            padding: 0.1em 0.35em;
+            border-radius: 3px;
+            font-size: 0.85em;
+            border: 1px solid var(--grey);
+            /* Long class names such as OAuthBearerUnsecuredValidatorCallbackHandler
+               must wrap inside narrow card columns; allow break-anywhere for inline
+               code fragments so they stay within the container. */
+            overflow-wrap: anywhere;
+            word-break: break-word;
+            max-width: 100%;
+            display: inline;
+        }
+
+        .reveal pre {
+            background: var(--navy);
+            color: var(--light);
+            font-size: 0.65em;
+            border: 1px solid var(--grey);
+            border-radius: 4px;
+            box-shadow: none;
+        }
+
+        .reveal table {
+            font-size: 0.65em;
+            border-collapse: collapse;
+            width: 100%;
+            margin-top: 0.5em;
+        }
+
+        .reveal table th {
+            background: var(--blue);
+            color: #fff;
+            padding: 6px 10px;
+            text-align: left;
+            border: 1px solid var(--navy);
+        }
+
+        .reveal table td {
+            padding: 5px 10px;
+            border: 1px solid var(--grey);
+            color: var(--light);
+        }
+
+        .reveal table tr:nth-child(even) td {
+            background: rgba(100, 116, 139, 0.15);
+        }
+
+        .reveal table.compact-table th,
+        .reveal table.compact-table td {
+            padding: 2px 8px;
+            line-height: 1.2;
+        }
+
+        .title-icon {
+            display: block;
+            font-size: 5em;
+            color: var(--blue);
+            text-align: center;
+            margin: 0.3em auto 0.4em;
+        }
+
+        .slide-icon {
+            color: var(--blue);
+            margin-right: 0.35em;
+        }
+
+        .icon-green  { color: var(--green); }
+        .icon-amber  { color: var(--amber); }
+        .icon-orange { color: var(--orange); }
+        .icon-red    { color: var(--red); }
+        .icon-blue   { color: var(--blue); }
+        .icon-grey  { color: var(--grey); }
+
+        .badge {
+            display: inline-block;
+            padding: 3px 9px;
+            border-radius: 12px;
+            font-size: 0.65em;
+            font-weight: 600;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            color: #fff;
+            margin-right: 4px;
+        }
+
+        /* Severity badges — colors MUST remain aligned with the Mermaid diagram
+         * classDef mappings under ../diagrams/*.md (see :root comment above). */
+        .badge-critical { background: var(--red);    } /* #DC2626 — Critical */
+        .badge-high     { background: var(--orange); } /* #EA580C — High; intentionally distinct from Medium */
+        .badge-medium   { background: var(--amber);  } /* #D97706 — Medium */
+        .badge-low      { background: var(--green);  } /* #16A34A — Low */
+        .badge-info     { background: var(--grey);   } /* #64748B — Informational */
+
+        .icon-grid {
+            display: flex;
+            justify-content: space-around;
+            align-items: stretch;
+            margin: 0.6em 0 0.3em;
+            flex-wrap: wrap;
+        }
+
+        .icon-card {
+            flex: 1 1 170px;
+            max-width: 220px;
+            min-width: 160px;
+            background: rgba(37, 99, 235, 0.12);
+            border: 1px solid var(--blue);
+            border-radius: 6px;
+            padding: 0.6em 0.6em;
+            margin: 0.25em;
+            text-align: center;
+            color: var(--light);
+        }
+
+        .icon-card .fa-solid,
+        .icon-card .fa-regular,
+        .icon-card .fa-brands {
+            display: block;
+            font-size: 1.7em;
+            color: var(--blue);
+            margin-bottom: 0.2em;
+        }
+
+        .icon-card.accent-green {
+            background: rgba(22, 163, 74, 0.12);
+            border-color: var(--green);
+        }
+        .icon-card.accent-green .fa-solid,
+        .icon-card.accent-green .fa-regular { color: var(--green); }
+
+        .icon-card.accent-amber {
+            background: rgba(217, 119, 6, 0.12);
+            border-color: var(--amber);
+        }
+        .icon-card.accent-amber .fa-solid { color: var(--amber); }
+
+        .icon-card.accent-orange {
+            background: rgba(234, 88, 12, 0.12);
+            border-color: var(--orange);
+        }
+        .icon-card.accent-orange .fa-solid { color: var(--orange); }
+
+        .icon-card.accent-red {
+            background: rgba(220, 38, 38, 0.12);
+            border-color: var(--red);
+        }
+        .icon-card.accent-red .fa-solid { color: var(--red); }
+
+        .icon-card h3 {
+            font-size: 0.8em;
+            margin: 0.25em 0;
+            color: #E2E8F0;
+        }
+
+        .icon-card p {
+            font-size: 0.62em;
+            margin: 0;
+            color: var(--light);
+            line-height: 1.3;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+        }
+
+        .icon-card code {
+            font-size: 0.75em;
+            display: inline;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+            max-width: 100%;
+            padding: 0.05em 0.2em;
+        }
+
+        /* Dense variant for slide 16 (8 mitigation cards) — forces 4x2 grid
+           with smaller cards and shorter content so all 8 fit in the
+           1280x800 reveal.js internal viewport. */
+        .icon-grid-dense {
+            gap: 0.3em;
+            margin: 0.4em 0 0.2em;
+        }
+        .icon-grid-dense .icon-card {
+            flex: 1 1 220px;
+            max-width: 240px;
+            min-width: 200px;
+            padding: 0.5em 0.6em;
+            margin: 0.2em;
+        }
+        .icon-grid-dense .icon-card .fa-solid,
+        .icon-grid-dense .icon-card .fa-regular {
+            font-size: 1.4em;
+            margin-bottom: 0.15em;
+        }
+        .icon-grid-dense .icon-card h3 {
+            font-size: 0.7em;
+            margin: 0.2em 0 0.15em;
+        }
+        .icon-grid-dense .icon-card p {
+            font-size: 0.55em;
+            line-height: 1.25;
+            margin: 0.1em 0;
+        }
+        .icon-grid-dense .icon-card code {
+            font-size: 0.9em;
+        }
+
+        /* Muted citation footer used inside icon-cards on slide 16 */
+        .icon-card .mitigation-ref {
+            font-size: 0.5em !important;
+            color: var(--dim);
+            margin-top: 0.2em !important;
+            line-height: 1.2;
+        }
+
+        /* Slide 8 (High Severity) 5-card single-row override.
+           Slide 16 uses icon-grid-dense for an 8-card 4x2 layout with max-width 240px.
+           Slide 8 needs 5 cards in a single row at 1280 px — so we narrow per-card
+           width and tighten padding exclusively for #slide-high-findings without
+           affecting slide 16's dense grid. */
+        #slide-high-findings .icon-grid-dense .icon-card {
+            flex: 1 1 200px;
+            max-width: 215px;
+            min-width: 170px;
+            padding: 0.35em 0.4em;
+            margin: 0.15em;
+        }
+        #slide-high-findings .icon-grid-dense .icon-card .fa-solid,
+        #slide-high-findings .icon-grid-dense .icon-card .fa-regular {
+            font-size: 1.2em;
+            margin-bottom: 0.1em;
+        }
+        #slide-high-findings .icon-grid-dense .icon-card h3 {
+            font-size: 0.65em;
+            margin: 0.1em 0 0.1em;
+            line-height: 1.15;
+        }
+        #slide-high-findings .icon-grid-dense .icon-card p {
+            font-size: 0.5em;
+            line-height: 1.2;
+            margin: 0.08em 0;
+        }
+
+        /* Compact citation marker used inside icon-cards on slides 8 / 14
+           where the finding-ID plus file:line fits in a single muted line.
+           Tighter than the mitigation-ref to keep the 5-card icon-grid
+           within the 800 px Reveal internal viewport budget. */
+        .icon-card .card-cite {
+            font-size: 0.5em !important;
+            color: var(--dim);
+            margin: 0.15em 0 0 !important;
+            line-height: 1.2;
+            font-family: monospace;
+        }
+
+        /* Compact variant for slide 22 (4 cards with link-buttons).  The
+           link-buttons have long labels that wrap and otherwise push the
+           slide well past the 820 px budget (observed 944 px unscoped).
+           Reduce icon / heading / button sizes to keep all 4 cards in a
+           single row that fits in ~ 450 px total. */
+        .icon-grid-links .icon-card {
+            padding: 0.35em 0.5em;
+            max-width: 250px;
+            flex: 1 1 200px;
+        }
+        .icon-grid-links .icon-card > i.fa-solid {
+            font-size: 1.25em;
+            margin-bottom: 0.15em;
+        }
+        .icon-grid-links .icon-card h3 {
+            font-size: 0.65em;
+            margin: 0.15em 0;
+        }
+        .icon-grid-links .icon-card p {
+            margin: 0.2em 0;
+        }
+        .icon-grid-links .link-button {
+            font-size: 0.55em;
+            padding: 3px 8px;
+            margin: 2px;
+        }
+        .icon-grid-links .link-button .fa-solid {
+            font-size: 1em;
+            margin-right: 0.3em;
+        }
+
+        .citation-footer {
+            position: absolute;
+            bottom: 1em;
+            left: 0;
+            right: 0;
+            text-align: center;
+            font-size: 0.5em;
+            color: var(--dim);
+            font-family: monospace;
+            padding: 0 1em;
+        }
+
+        .citation-footer code {
+            font-size: 0.95em;
+            color: var(--dim);
+            background: transparent;
+            border: none;
+            padding: 0;
+        }
+
+        .audit-only-banner {
+            background: var(--green);
+            color: #fff;
+            text-align: center;
+            padding: 0.4em 0.8em;
+            border-radius: 4px;
+            font-size: 0.65em;
+            font-weight: 600;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            margin: 0.5em auto;
+            max-width: 85%;
+        }
+
+        .audit-only-banner .fa-solid {
+            margin-right: 0.4em;
+        }
+
+        .warning-banner {
+            background: rgba(217, 119, 6, 0.2);
+            border-left: 4px solid var(--amber);
+            padding: 0.5em 0.8em;
+            margin: 0.4em 0;
+            font-size: 0.75em;
+            color: var(--light);
+        }
+
+        .warning-banner .fa-solid {
+            color: var(--amber);
+            margin-right: 0.35em;
+        }
+
+        /* Higher specificity (.reveal pre.mermaid) needed to beat `.reveal pre`
+           rule above which otherwise forces dark navy background and light
+           text on Mermaid blocks.  For diagrams whose nodes carry their own
+           fill colors (flowcharts, sequence diagrams) a dark container is
+           only cosmetic; but the Mermaid pie chart in slide 7 renders its
+           title and legend text directly onto the SVG background, making
+           those labels invisible on dark navy.  The rule below guarantees a
+           light container for every Mermaid block.                           */
+        .reveal pre.mermaid,
+        .reveal .mermaid {
+            text-align: center;
+            margin: 0.3em auto;
+            background: #F8FAFC !important;
+            color: #0F172A !important;
+            padding: 0.4em;
+            border-radius: 5px;
+            border: 1px solid var(--grey) !important;
+            box-shadow: none !important;
+            font-size: 1em !important;
+            max-width: 95%;
+        }
+
+        .diagram-title {
+            text-align: center;
+            font-size: 0.78em;
+            font-style: italic;
+            color: var(--dim);
+            margin-bottom: 0.3em;
+        }
+
+        .two-col {
+            display: flex;
+            gap: 1em;
+        }
+
+        .two-col > div {
+            flex: 1;
+        }
+
+        .link-button {
+            display: inline-block;
+            background: var(--blue);
+            color: #fff !important;
+            padding: 6px 14px;
+            border-radius: 4px;
+            text-decoration: none;
+            font-size: 0.75em;
+            margin: 4px;
+            border: 1px solid var(--navy);
+        }
+
+        .link-button:hover {
+            background: var(--navy);
+            color: #fff !important;
+        }
+
+        .link-button .fa-solid {
+            margin-right: 0.35em;
+        }
+
+        .footer-text {
+            text-align: center;
+            font-size: 0.65em;
+            color: var(--dim);
+            margin-top: 0.6em;
+        }
+
+        .no-change-check {
+            background: rgba(22, 163, 74, 0.15);
+            border: 2px solid var(--green);
+            border-radius: 6px;
+            padding: 0.3em 0.8em;
+            margin: 0.2em 0;
+        }
+
+        .no-change-check .fa-solid {
+            color: var(--green);
+            font-size: 1.1em;
+            margin-right: 0.4em;
+        }
+
+        .no-change-check > p {
+            margin: 0.25em 0;
+            font-size: 0.7em;
+        }
+
+        /* Only style the direct-child <code> block (the git diff listing). Inline
+           <code> elements inside paragraphs remain inline (they inherit
+           `.reveal code` which is `display: inline`). */
+        .no-change-check > code {
+            display: block;
+            background: var(--navy);
+            color: #A7F3D0;
+            font-size: 0.32em;
+            line-height: 1.15;
+            padding: 0.25em 0.5em;
+            border-radius: 3px;
+            margin: 0.25em 0;
+            border: 1px solid var(--green);
+            white-space: pre;
+            text-align: left;
+            overflow-x: auto;
+        }
+
+        /* Make Mermaid renders adapt to our dark theme background */
+        .reveal .mermaid svg {
+            max-width: 100%;
+            height: auto !important;
+        }
+
+        /* Force dark text on light Mermaid background (reveal.js league theme
+           otherwise sets text color to white, which makes edge labels and
+           default nodes invisible against Mermaid's white fill). */
+        .reveal .mermaid svg .nodeLabel,
+        .reveal .mermaid svg .edgeLabel,
+        .reveal .mermaid svg .cluster-label,
+        .reveal .mermaid svg .cluster-label p,
+        .reveal .mermaid svg .edgeLabel p,
+        .reveal .mermaid svg .nodeLabel p,
+        .reveal .mermaid svg foreignObject div,
+        .reveal .mermaid svg foreignObject span,
+        .reveal .mermaid svg text {
+            color: #0F172A !important;
+            fill: #0F172A !important;
+        }
+        /* Keep class-styled node labels white (mand, untrust, trust, allow,
+           deny, hot, user, jvm, flag, safe, step classes explicitly tint
+           their fills dark and text should stay white).
+           NOTE: compound selector .node.X to avoid matching Mermaid's
+           internal structural .root wrapper group.                        */
+        .reveal .mermaid svg .node.mand .nodeLabel,
+        .reveal .mermaid svg .node.mand .nodeLabel p,
+        .reveal .mermaid svg .node.untrust .nodeLabel,
+        .reveal .mermaid svg .node.untrust .nodeLabel p,
+        .reveal .mermaid svg .node.trust .nodeLabel,
+        .reveal .mermaid svg .node.trust .nodeLabel p,
+        .reveal .mermaid svg .node.semi .nodeLabel,
+        .reveal .mermaid svg .node.semi .nodeLabel p,
+        .reveal .mermaid svg .node.allow .nodeLabel,
+        .reveal .mermaid svg .node.allow .nodeLabel p,
+        .reveal .mermaid svg .node.deny .nodeLabel,
+        .reveal .mermaid svg .node.deny .nodeLabel p,
+        .reveal .mermaid svg .node.audit .nodeLabel,
+        .reveal .mermaid svg .node.audit .nodeLabel p,
+        .reveal .mermaid svg .node.safe .nodeLabel,
+        .reveal .mermaid svg .node.safe .nodeLabel p,
+        .reveal .mermaid svg .node.struct .nodeLabel,
+        .reveal .mermaid svg .node.struct .nodeLabel p,
+        .reveal .mermaid svg .node.unsafe .nodeLabel,
+        .reveal .mermaid svg .node.unsafe .nodeLabel p,
+        .reveal .mermaid svg .node.jvm .nodeLabel,
+        .reveal .mermaid svg .node.jvm .nodeLabel p,
+        .reveal .mermaid svg .node.jni .nodeLabel,
+        .reveal .mermaid svg .node.jni .nodeLabel p,
+        .reveal .mermaid svg .node.flag .nodeLabel,
+        .reveal .mermaid svg .node.flag .nodeLabel p,
+        .reveal .mermaid svg .node.block .nodeLabel,
+        .reveal .mermaid svg .node.block .nodeLabel p,
+        .reveal .mermaid svg .node.hot .nodeLabel,
+        .reveal .mermaid svg .node.hot .nodeLabel p,
+        .reveal .mermaid svg .node.user .nodeLabel,
+        .reveal .mermaid svg .node.user .nodeLabel p,
+        .reveal .mermaid svg .node.root .nodeLabel,
+        .reveal .mermaid svg .node.root .nodeLabel p,
+        .reveal .mermaid svg .node.step .nodeLabel,
+        .reveal .mermaid svg .node.step .nodeLabel p {
+            color: #ffffff !important;
+            fill: #ffffff !important;
+        }
+        /* opt and ref classes have light grey fill with dark text */
+        .reveal .mermaid svg .node.opt .nodeLabel,
+        .reveal .mermaid svg .node.opt .nodeLabel p,
+        .reveal .mermaid svg .node.ref .nodeLabel,
+        .reveal .mermaid svg .node.ref .nodeLabel p {
+            color: #0F172A !important;
+            fill: #0F172A !important;
+        }
+
+        /* Reduce reveal.js default margins so we fit more content */
+        .reveal .slides {
+            text-align: left;
+        }
+
+        .reveal .slides section > * {
+            margin-top: 0.35em;
+            margin-bottom: 0.35em;
+        }
+
+        /* Severity heatmap cells */
+        .heatmap-cell {
+            text-align: center;
+            font-weight: 700;
+        }
+        .heatmap-0 { background: rgba(100, 116, 139, 0.25); color: var(--dim); }
+        .heatmap-low { background: rgba(22, 163, 74, 0.35); color: #fff; }
+        .heatmap-med { background: rgba(217, 119, 6, 0.45); color: #fff; }
+        .heatmap-high { background: rgba(234, 88, 12, 0.55); color: #fff; }
+        .heatmap-crit { background: rgba(220, 38, 38, 0.75); color: #fff; }
+
+        /* Timeline phases color coding */
+        .phase-immediate { color: var(--red); font-weight: 600; }
+        .phase-short     { color: var(--amber); font-weight: 600; }
+        .phase-medium    { color: var(--blue); font-weight: 600; }
+        .phase-long      { color: var(--green); font-weight: 600; }
+
+        /* Slide meta header */
+        .slide-meta {
+            font-size: 0.6em;
+            color: var(--dim);
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            margin-bottom: 0.2em;
+        }
+
+        .slide-meta .fa-solid {
+            margin-right: 0.3em;
+        }
+
+        /*
+         * Responsive Polish — Mobile Breakpoint (≤ 480 px viewport width)
+         *
+         * The executive deck is primarily authored for desktop / tablet
+         * presentation contexts (intended audience: non-technical leadership
+         * per AAP §0.1.1). Reveal.js (width:1280, height:800, margin:0.04)
+         * auto-scales the base slide canvas to the viewport, so content
+         * remains functional and legible at narrow widths WITHOUT media
+         * queries — verified during QA #2 across all 22 slides at 375 × 812.
+         *
+         * The rules below provide NON-INVASIVE mobile polish for the two
+         * layout patterns that visibly compress at 375 px width (QA Issues
+         * 2-11 MINOR observations):
+         *
+         *   1. `.two-col` flex row (slide 18 supply-chain dual dependency
+         *      tables, slide 3 methodology): stack to single column for
+         *      easier reading on narrow viewports.
+         *   2. `.icon-grid-links` 4-card row (slide 22 NEXT STEPS cards:
+         *      Drill Down, Severity & Roadmap, Positive Posture,
+         *      Bibliography): allow wrapping to 2-per-row so the link
+         *      buttons remain tappable and their labels remain legible.
+         *
+         * These rules are SCOPED to `max-width: 480px` and do NOT affect
+         * desktop (1280) or tablet (768) rendering which are the primary
+         * presentation targets. The supply-chain and watchlist data tables
+         * remain visible and readable via Reveal.js auto-scaling at 375 px;
+         * no table font-size override is required.
+         */
+        @media (max-width: 480px) {
+            /* Stack two-column flex containers on ultra-narrow viewports. */
+            .two-col {
+                flex-direction: column;
+                gap: 0.4em;
+            }
+
+            /* Let slide-22 link-button cards wrap to 2-per-row at mobile
+             * so each card receives ~50 % of the slide width rather than
+             * ~25 %.  This keeps the card titles and link-button labels
+             * readable without changing the desktop 4-per-row layout. */
+            .icon-grid-links {
+                flex-wrap: wrap;
+                justify-content: center;
+            }
+            .icon-grid-links .icon-card {
+                flex: 1 1 calc(50% - 0.6em);
+                max-width: calc(50% - 0.6em);
+            }
+        }
+    </style>
+</head>
+<body>
+<div class="reveal">
+    <div class="slides">
+
+        <!-- ========================================================= -->
+        <!-- Slide 1 - Title                                           -->
+        <!-- ========================================================= -->
+        <section id="slide-title">
+            <i class="fa-solid fa-shield-halved title-icon" aria-hidden="true"></i>
+            <h1>Apache Kafka 4.2.0-SNAPSHOT</h1>
+            <h1 style="font-size:1.6em; color:#CBD5E1;">Security Vulnerability Assessment</h1>
+            <h2 style="text-align:center; border:none; font-size:1.1em; color:var(--dim); font-weight:400;">
+                Static, Audit-Only Threat Surface Enumeration
+            </h2>
+            <div class="audit-only-banner">
+                <i class="fa-solid fa-circle-check" aria-hidden="true"></i>
+                Audit Only &#8212; No Code Modifications
+            </div>
+            <p class="footer-text">
+                <i class="fa-solid fa-code-branch slide-icon" aria-hidden="true"></i>Branch: <code>blitzy-4bdad1ad-dc01-4556-9ef0-4c760b777d5a</code>
+                &nbsp;&#8226;&nbsp;
+                <i class="fa-solid fa-calendar slide-icon" aria-hidden="true"></i>Snapshot: 2026-04-17
+                &nbsp;&#8226;&nbsp;
+                <i class="fa-solid fa-hashtag slide-icon" aria-hidden="true"></i>Baseline <code>6d16f687aa</code>
+            </p>
+        </section>
+
+        <!-- ========================================================= -->
+        <!-- Slide 2 - Scope Statement                                 -->
+        <!-- ========================================================= -->
+        <section id="slide-scope">
+            <p class="slide-meta"><i class="fa-solid fa-bullseye" aria-hidden="true"></i>Slide 2 &#8212; Scope</p>
+            <h2><i class="fa-solid fa-clipboard-list slide-icon" aria-hidden="true"></i>What This Audit Covered</h2>
+            <div class="icon-grid">
+                <div class="icon-card">
+                    <i class="fa-solid fa-folder-tree" aria-hidden="true"></i>
+                    <h3>Ten Categories</h3>
+                    <p>Filesystem access, native code safety, resource limits, module system, ReDoS, network, callbacks, deserialization, information leakage, developer misuse</p>
+                </div>
+                <div class="icon-card">
+                    <i class="fa-solid fa-layer-group" aria-hidden="true"></i>
+                    <h3>All Modules</h3>
+                    <p>clients, core, connect, raft, metadata, coordinator, storage, streams, server-common, trogdor, tools, release</p>
+                </div>
+                <div class="icon-card">
+                    <i class="fa-solid fa-file-lines" aria-hidden="true"></i>
+                    <h3>Read-Only Analysis</h3>
+                    <p>No broker started, no tests executed, no code modified. Static code review with line-level citations.</p>
+                </div>
+                <div class="icon-card">
+                    <i class="fa-solid fa-book" aria-hidden="true"></i>
+                    <h3>Dependency Review</h3>
+                    <p>Runtime dependency manifest cross-referenced with supply-chain attack surface.</p>
+                </div>
+                <div class="icon-card">
+                    <i class="fa-solid fa-gauge-high" aria-hidden="true"></i>
+                    <h3>Performance Accounting</h3>
+                    <p>Each finding carries a Performance Considerations section (hot-path signals, JMX metrics, mitigation trade-offs, future-state cost). Static only &#8212; no benchmarks were run.</p>
+                </div>
+                <div class="icon-card">
+                    <i class="fa-solid fa-shield-halved" aria-hidden="true"></i>
+                    <h3>Mitigation Catalog</h3>
+                    <p>Nineteen accepted mitigations already present in the codebase catalogued to prevent regression and document positive security posture.</p>
+                </div>
+            </div>
+            <p class="footer-text">
+                Deliverable: <strong>53 findings</strong> across 10 categories, plus seven Mermaid diagrams and an executive deck.
+                Each finding follows an 11-section template covering category, evidence, attack vector, severity, business impact, performance considerations, accepted mitigations, and future-state remediation.
+            </p>
+        </section>
+
+        <!-- ========================================================= -->
+        <!-- Slide 3 - Methodology                                     -->
+        <!-- ========================================================= -->
+        <section id="slide-methodology">
+            <p class="slide-meta"><i class="fa-solid fa-diagram-project" aria-hidden="true"></i>Slide 3 &#8212; Methodology</p>
+            <h2><i class="fa-solid fa-microscope slide-icon" aria-hidden="true"></i>How the Audit Was Performed</h2>
+            <div class="diagram-title">Figure 3.1 &#8212; Audit Methodology (static reconnaissance pipeline)</div>
+            <pre class="mermaid">
+%%{init: {'theme':'neutral'}}%%
+flowchart LR
+    A[Repository Snapshot<br/>Baseline 6d16f687aa]:::mand --> B[Code Reconnaissance<br/>static read-only]:::mand
+    B --> C[Category Mapping<br/>ten canonical surfaces]:::mand
+    C --> D[Finding Classification<br/>per-surface evidence]:::mand
+    D --> E[Severity Rating<br/>Critical/High/Medium/Low]:::mand
+    E --> P[Performance Accounting<br/>static reading only]:::mand
+    P --> F[Git Diff Verification<br/>zero source changes]:::mand
+    B -.-> G[Dependency Review<br/>supply-chain inventory]:::opt
+    G -.-> D
+    subgraph Legend[" Legend "]
+        L1[Mandatory step]:::mand
+        L2[Optional step]:::opt
+    end
+    classDef mand fill:#2563EB,color:#fff,stroke:#0F172A,stroke-width:1px
+    classDef opt fill:#F1F5F9,color:#0F172A,stroke:#64748B,stroke-dasharray:4 3
+            </pre>
+            <p style="font-size:0.7em; margin-top:0.3em;">
+                <i class="fa-solid fa-ban icon-red" aria-hidden="true"></i>
+                No broker started. No test executed. No code, comment, test, or build file was modified.
+                Every finding also carries a <strong>Performance Considerations</strong> section
+                (hot-path signals, JMX metrics, mitigation trade-offs, future-state cost accounting)
+                derived strictly from static reading &#8212; no benchmarks or profilers were run
+                against Kafka code. This is a rule-mandated deliverable topic under the Audit Only rule.
+            </p>
+        </section>
+
+
+
+
+        <!-- ========================================================= -->
+        <!-- Slide 4 - Ten Vulnerability Categories at a Glance        -->
+        <!-- ========================================================= -->
+        <section id="slide-ten-categories">
+            <p class="slide-meta"><i class="fa-solid fa-grip" aria-hidden="true"></i>Slide 4 &#8212; Ten Categories</p>
+            <h2><i class="fa-solid fa-list-ol slide-icon" aria-hidden="true"></i>The Ten Categories Assessed</h2>
+            <div class="diagram-title">Figure 4.1 &#8212; Vulnerability Category Taxonomy</div>
+            <div style="display:grid; grid-template-columns:repeat(5, 1fr); gap:0.45em; max-width:1180px; margin:0.3em auto 0.4em auto;">
+                <div style="background:#CA8A04; color:#fff; border:1px solid #0F172A; border-radius:6px; padding:0.55em 0.4em; text-align:center; font-size:0.72em; line-height:1.2;"><strong>(1)</strong><br/>Filesystem Access<br/>&amp; Path Traversal</div>
+                <div style="background:#16A34A; color:#fff; border:1px solid #0F172A; border-radius:6px; padding:0.55em 0.4em; text-align:center; font-size:0.72em; line-height:1.2;"><strong>(2)</strong><br/>Low-Level Code Safety<br/><em>Native JNI</em></div>
+                <div style="background:#CA8A04; color:#fff; border:1px solid #0F172A; border-radius:6px; padding:0.55em 0.4em; text-align:center; font-size:0.72em; line-height:1.2;"><strong>(3)</strong><br/>Resource Limit<br/>Evasion</div>
+                <div style="background:#CA8A04; color:#fff; border:1px solid #0F172A; border-radius:6px; padding:0.55em 0.4em; text-align:center; font-size:0.72em; line-height:1.2;"><strong>(4)</strong><br/>Module System<br/>&amp; Built-in Abuse</div>
+                <div style="background:#16A34A; color:#fff; border:1px solid #0F172A; border-radius:6px; padding:0.55em 0.4em; text-align:center; font-size:0.72em; line-height:1.2;"><strong>(5)</strong><br/>Infinite Loop<br/>&amp; Recursion DoS</div>
+                <div style="background:#D97706; color:#fff; border:1px solid #0F172A; border-radius:6px; padding:0.55em 0.4em; text-align:center; font-size:0.72em; line-height:1.2;"><strong>(6)</strong><br/>Network &amp;<br/>Subprocess Access</div>
+                <div style="background:#D97706; color:#fff; border:1px solid #0F172A; border-radius:6px; padding:0.55em 0.4em; text-align:center; font-size:0.72em; line-height:1.2;"><strong>(7)</strong><br/>External Function<br/>&amp; Callback Misuse</div>
+                <div style="background:#16A34A; color:#fff; border:1px solid #0F172A; border-radius:6px; padding:0.55em 0.4em; text-align:center; font-size:0.72em; line-height:1.2;"><strong>(8)</strong><br/>Deserialization<br/>Attacks</div>
+                <div style="background:#16A34A; color:#fff; border:1px solid #0F172A; border-radius:6px; padding:0.55em 0.4em; text-align:center; font-size:0.72em; line-height:1.2;"><strong>(9)</strong><br/>Information<br/>Leakage</div>
+                <div style="background:#D97706; color:#fff; border:1px solid #0F172A; border-radius:6px; padding:0.55em 0.4em; text-align:center; font-size:0.72em; line-height:1.2;"><strong>(10)</strong><br/>Public API<br/>Developer Misuse</div>
+            </div>
+            <div style="display:flex; justify-content:center; gap:0.8em; margin-top:0.3em; font-size:0.66em;">
+                <span style="background:#DC2626; color:#fff; padding:0.25em 0.8em; border-radius:4px;"><i class="fa-solid fa-circle" aria-hidden="true" style="font-size:0.7em; margin-right:0.3em;"></i>Critical</span>
+                <span style="background:#D97706; color:#fff; padding:0.25em 0.8em; border-radius:4px;"><i class="fa-solid fa-circle" aria-hidden="true" style="font-size:0.7em; margin-right:0.3em;"></i>High</span>
+                <span style="background:#CA8A04; color:#fff; padding:0.25em 0.8em; border-radius:4px;"><i class="fa-solid fa-circle" aria-hidden="true" style="font-size:0.7em; margin-right:0.3em;"></i>Medium</span>
+                <span style="background:#16A34A; color:#fff; padding:0.25em 0.8em; border-radius:4px;"><i class="fa-solid fa-circle" aria-hidden="true" style="font-size:0.7em; margin-right:0.3em;"></i>Low</span>
+            </div>
+            <p style="font-size:0.62em; text-align:center; color:var(--dim); margin-top:0.5em;">
+                Category highest-severity color shown. Detailed per-finding ratings in <code>severity-matrix.md</code>.
+            </p>
+        </section>
+
+        <!-- ========================================================= -->
+        <!-- Slide 5 - Threat Model Overview                           -->
+        <!-- ========================================================= -->
+        <section id="slide-threat-model">
+            <p class="slide-meta"><i class="fa-solid fa-project-diagram" aria-hidden="true"></i>Slide 5 &#8212; Threat Model</p>
+            <h2><i class="fa-solid fa-sitemap slide-icon" aria-hidden="true"></i>End-to-End Threat Model</h2>
+            <div class="diagram-title">Figure 5.1 &#8212; Kafka 4.2 Threat Model &#8212; Current-State View</div>
+            <pre class="mermaid">
+%%{init: {'theme':'neutral'}}%%
+flowchart LR
+    P[Producers]:::untrust -->|PLAINTEXT or SSL/SASL| B[Brokers]:::trust
+    C[Consumers]:::untrust -->|PLAINTEXT or SSL/SASL| B
+    B ==>|KRaft Raft RPCs| K[KRaft Controllers]:::trust
+    K ==>|VoterSet quorum| K
+    CONN[Connect Workers]:::semi -->|Admin Client| B
+    CONN -.->|ServiceLoader plugin| PL[Plugin Classes]:::untrust
+    MM2[MirrorMaker 2]:::semi -->|cross-cluster| B
+    OAUTH[OAuth/OIDC Provider]:::untrust -.->|JWKS fetch| CONN
+    OAUTH -.->|JWKS fetch| B
+    subgraph Boundary[" Trust Boundary "]
+        B
+        K
+    end
+    subgraph Legend[" Legend "]
+        direction TB
+        L1["SOLID arrow: transport boundary"]
+        L2["THICK arrow: KRaft control plane"]
+        L3["DASHED arrow: plugin/external call"]
+    end
+    classDef untrust fill:#DC2626,color:#fff,stroke:#0F172A
+    classDef semi    fill:#D97706,color:#fff,stroke:#0F172A
+    classDef trust   fill:#16A34A,color:#fff,stroke:#0F172A
+            </pre>
+        </section>
+
+        <!-- ========================================================= -->
+        <!-- Slide 6 - Attack Surface Map                              -->
+        <!-- ========================================================= -->
+        <section id="slide-attack-surface">
+            <p class="slide-meta"><i class="fa-solid fa-map" aria-hidden="true"></i>Slide 6 &#8212; Attack Surface</p>
+            <h2><i class="fa-solid fa-table slide-icon" aria-hidden="true"></i>Attack Surface &times; Module Matrix</h2>
+            <div class="diagram-title">Figure 6.1 &#8212; Category-to-Module Attack Surface Map</div>
+            <table style="font-size:0.5em; margin:0 auto;">
+                <thead>
+                    <tr>
+                        <th>Category</th>
+                        <th>clients</th>
+                        <th>core</th>
+                        <th>connect</th>
+                        <th>raft</th>
+                        <th>metadata</th>
+                        <th>storage</th>
+                        <th>streams</th>
+                        <th>coordinator</th>
+                        <th>server-common</th>
+                        <th>tools</th>
+                        <th>trogdor</th>
+                        <th>release</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td>(1) Filesystem</td><td class="heatmap-cell heatmap-med">&#8226;</td><td class="heatmap-cell heatmap-med">&#8226;</td><td class="heatmap-cell heatmap-med">&#8226;</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+                    <tr><td>(2) Native Code</td><td class="heatmap-cell heatmap-low">&#8226;</td><td></td><td></td><td></td><td></td><td></td><td class="heatmap-cell heatmap-low">&#8226;</td><td></td><td></td><td></td><td></td><td></td></tr>
+                    <tr><td>(3) Resource Limits</td><td class="heatmap-cell heatmap-med">&#8226;</td><td class="heatmap-cell heatmap-med">&#8226;</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+                    <tr><td>(4) Module System</td><td class="heatmap-cell heatmap-med">&#8226;</td><td></td><td class="heatmap-cell heatmap-med">&#8226;</td><td></td><td class="heatmap-cell heatmap-med">&#8226;</td><td class="heatmap-cell heatmap-med">&#8226;</td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+                    <tr><td>(5) ReDoS</td><td class="heatmap-cell heatmap-low">&#8226;</td><td></td><td class="heatmap-cell heatmap-low">&#8226;</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+                    <tr><td>(6) Net/Subprocess</td><td></td><td></td><td class="heatmap-cell heatmap-high">&#8226;</td><td class="heatmap-cell heatmap-med">&#8226;</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td class="heatmap-cell heatmap-med">&#8226;</td></tr>
+                    <tr><td>(7) Callback Misuse</td><td class="heatmap-cell heatmap-high">&#8226;</td><td></td><td class="heatmap-cell heatmap-high">&#8226;</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+                    <tr><td>(8) Deserialization</td><td class="heatmap-cell heatmap-low">&#8226;</td><td></td><td class="heatmap-cell heatmap-low">&#8226;</td><td class="heatmap-cell heatmap-low">&#8226;</td><td></td><td></td><td class="heatmap-cell heatmap-low">&#8226;</td><td></td><td></td><td></td><td class="heatmap-cell heatmap-low">&#8226;</td><td></td></tr>
+                    <tr><td>(9) Info Leakage</td><td class="heatmap-cell heatmap-low">&#8226;</td><td class="heatmap-cell heatmap-low">&#8226;</td><td class="heatmap-cell heatmap-low">&#8226;</td><td></td><td class="heatmap-cell heatmap-low">&#8226;</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+                    <tr><td>(10) Dev Misuse</td><td class="heatmap-cell heatmap-high">&#8226;</td><td class="heatmap-cell heatmap-high">&#8226;</td><td class="heatmap-cell heatmap-high">&#8226;</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>
+                </tbody>
+            </table>
+            <p style="font-size:0.55em; text-align:center; color:var(--dim); margin-top:0.4em;">
+                Cell color encodes maximum severity of findings located in that module for that category.
+                Coordinator / server-common / tools have no direct category attributions (Tools is aggregated under Clients via JmxReporter).
+                <span class="badge badge-high">High</span> <span class="badge badge-medium">Medium</span> <span class="badge badge-low">Low</span>
+            </p>
+        </section>
+
+        <!-- ========================================================= -->
+        <!-- Slide 7 - Severity Heatmap                                -->
+        <!-- ========================================================= -->
+        <section id="slide-severity">
+            <p class="slide-meta"><i class="fa-solid fa-chart-column" aria-hidden="true"></i>Slide 7 &#8212; Severity</p>
+            <h2><i class="fa-solid fa-chart-pie slide-icon" aria-hidden="true"></i>Severity Distribution by Category</h2>
+            <div class="two-col">
+                <div>
+                    <div class="diagram-title">Figure 7.1 &#8212; Aggregate Severity</div>
+                    <pre class="mermaid">
+%%{init: {'theme':'neutral'}}%%
+pie showData title Finding Severity Distribution
+    "Critical" : 0
+    "High" : 5
+    "Medium" : 21
+    "Low" : 27
+                    </pre>
+                </div>
+                <div>
+                    <div class="diagram-title">Figure 7.2 &#8212; Per-Category Counts</div>
+                    <table style="font-size:0.58em;">
+                        <thead>
+                            <tr><th>Category</th><th>Crit</th><th>High</th><th>Med</th><th>Low</th></tr>
+                        </thead>
+                        <tbody>
+                            <tr><td>01 Filesystem</td><td class="heatmap-cell heatmap-0">0</td><td class="heatmap-cell heatmap-0">0</td><td class="heatmap-cell heatmap-med">4</td><td class="heatmap-cell heatmap-low">2</td></tr>
+                            <tr><td>02 Native</td><td class="heatmap-cell heatmap-0">0</td><td class="heatmap-cell heatmap-0">0</td><td class="heatmap-cell heatmap-0">0</td><td class="heatmap-cell heatmap-low">5</td></tr>
+                            <tr><td>03 Resources</td><td class="heatmap-cell heatmap-0">0</td><td class="heatmap-cell heatmap-0">0</td><td class="heatmap-cell heatmap-med">2</td><td class="heatmap-cell heatmap-low">1</td></tr>
+                            <tr><td>04 Modules</td><td class="heatmap-cell heatmap-0">0</td><td class="heatmap-cell heatmap-0">0</td><td class="heatmap-cell heatmap-med">4</td><td class="heatmap-cell heatmap-low">2</td></tr>
+                            <tr><td>05 ReDoS</td><td class="heatmap-cell heatmap-0">0</td><td class="heatmap-cell heatmap-0">0</td><td class="heatmap-cell heatmap-med">1</td><td class="heatmap-cell heatmap-low">4</td></tr>
+                            <tr><td>06 Network</td><td class="heatmap-cell heatmap-0">0</td><td class="heatmap-cell heatmap-high">1</td><td class="heatmap-cell heatmap-med">3</td><td class="heatmap-cell heatmap-low">1</td></tr>
+                            <tr><td>07 Callback</td><td class="heatmap-cell heatmap-0">0</td><td class="heatmap-cell heatmap-high">1</td><td class="heatmap-cell heatmap-med">3</td><td class="heatmap-cell heatmap-0">0</td></tr>
+                            <tr><td>08 Deserial</td><td class="heatmap-cell heatmap-0">0</td><td class="heatmap-cell heatmap-0">0</td><td class="heatmap-cell heatmap-med">1</td><td class="heatmap-cell heatmap-low">4</td></tr>
+                            <tr><td>09 Leakage</td><td class="heatmap-cell heatmap-0">0</td><td class="heatmap-cell heatmap-0">0</td><td class="heatmap-cell heatmap-med">1</td><td class="heatmap-cell heatmap-low">4</td></tr>
+                            <tr><td>10 API Misuse</td><td class="heatmap-cell heatmap-0">0</td><td class="heatmap-cell heatmap-high">3</td><td class="heatmap-cell heatmap-med">2</td><td class="heatmap-cell heatmap-low">4</td></tr>
+                            <tr style="font-weight:700;"><td>TOTAL</td><td class="heatmap-cell heatmap-0">0</td><td class="heatmap-cell heatmap-high">5</td><td class="heatmap-cell heatmap-med">21</td><td class="heatmap-cell heatmap-low">27</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            <p style="font-size:0.6em; text-align:center; color:var(--dim); margin-top:0.2em;">
+                Severity uses Critical / High / Medium / Low with CVSS v3.1-inspired weighting. Total findings: <strong>53</strong>.
+            </p>
+        </section>
+
+        <!-- ========================================================= -->
+        <!-- Slide 8 - High-Severity Findings Highlights               -->
+        <!-- ========================================================= -->
+        <section id="slide-high-findings">
+            <p class="slide-meta"><i class="fa-solid fa-fire" aria-hidden="true"></i>Slide 8 &#8212; High Severity</p>
+            <h2><i class="fa-solid fa-triangle-exclamation slide-icon icon-orange" aria-hidden="true"></i>Findings Requiring Priority Attention</h2>
+            <div class="icon-grid icon-grid-dense">
+                <div class="icon-card accent-orange">
+                    <i class="fa-solid fa-lock-open icon-orange" aria-hidden="true"></i>
+                    <h3>Connect REST Bypass</h3>
+                    <p><span class="badge badge-high">High</span> <code>JaasBasicAuthFilter.INTERNAL_REQUEST_MATCHERS</code> permits unauthenticated internal tasks and fence calls.</p>
+                    <p class="card-cite">F-06.1 &#8226; JaasBasicAuthFilter.java:L55-L58</p>
+                </div>
+                <div class="icon-card accent-orange">
+                    <i class="fa-solid fa-triangle-exclamation icon-orange" aria-hidden="true"></i>
+                    <h3>OAuth Unsecured Validator</h3>
+                    <p><span class="badge badge-high">High</span> <code>OAuthBearerUnsecuredValidatorCallbackHandler</code> accepts <code>alg:none</code> &#8212; not intended for production.</p>
+                    <p class="card-cite">F-07.1 / F-10.4 &#8226; OAuthBearerUnsecuredValidatorCallbackHandler.java</p>
+                </div>
+                <div class="icon-card accent-orange">
+                    <i class="fa-solid fa-file-lines icon-orange" aria-hidden="true"></i>
+                    <h3>Plaintext Credentials</h3>
+                    <p><span class="badge badge-high">High</span> <code>PropertyFileLoginModule</code> ships plaintext credential store; self-documented as not for production.</p>
+                    <p class="card-cite">F-10.3 &#8226; PropertyFileLoginModule.java</p>
+                </div>
+                <div class="icon-card accent-orange">
+                    <i class="fa-solid fa-plug-circle-xmark icon-orange" aria-hidden="true"></i>
+                    <h3>PLAINTEXT Default Listener</h3>
+                    <p><span class="badge badge-high">High</span> Out-of-the-box broker listener is unencrypted and unauthenticated. Operators must harden explicitly.</p>
+                    <p class="card-cite">F-10.1 &#8226; KafkaConfig.scala / ListenerName.java</p>
+                </div>
+                <div class="icon-card accent-amber">
+                    <i class="fa-solid fa-terminal icon-amber" aria-hidden="true"></i>
+                    <h3>Release Tooling Subprocess</h3>
+                    <p><span class="badge badge-medium">Medium</span> <code>release/release.py</code> L334-L362 uses <code>shell=True</code> with f-string interpolation &#8212; release-engineer privilege only.</p>
+                    <p class="card-cite">F-06.4 &#8226; release/release.py:L334-L362</p>
+                </div>
+            </div>
+        </section>
+
+
+        <!-- ========================================================= -->
+        <!-- Slide 9 - Connect REST Trust Boundary                     -->
+        <!-- ========================================================= -->
+        <section id="slide-connect-rest">
+            <p class="slide-meta"><i class="fa-solid fa-network-wired" aria-hidden="true"></i>Slide 9 &#8212; Connect REST</p>
+            <h2><i class="fa-solid fa-shield-halved slide-icon" aria-hidden="true"></i>Connect REST Trust Boundary</h2>
+            <div class="diagram-title">Figure 9.1 &#8212; Connect REST Trust Boundary &#8212; current state</div>
+            <pre class="mermaid">
+%%{init: {'theme':'neutral', 'themeVariables': {'fontSize': '11px'}, 'sequence': {'actorMargin': 50, 'messageMargin': 18, 'boxMargin': 3, 'noteMargin': 2, 'mirrorActors': false, 'useMaxWidth': true}}}%%
+sequenceDiagram
+    autonumber
+    participant CL as Client / Peer
+    participant CO as CrossOriginHandler
+    participant JF as JaasBasicAuthFilter
+    participant RH as Resource Handler
+    participant RC as RestClient
+    participant DS as Downstream Worker
+    CL->>CO: HTTP request
+    CO->>JF: pass-through (origin="" default)
+    alt path matches INTERNAL_REQUEST_MATCHERS
+        JF-->>RH: BYPASS auth (high)
+        Note over JF,RH: POST /connectors/{n}/tasks + PUT /connectors/{n}/fence
+    else other paths
+        JF->>JF: check Basic-Auth JAAS login
+        JF->>RH: authenticated
+    end
+    RH->>RC: forward request (internal)
+    RC->>DS: HTTP + Authorization header (SSRF vector)
+    Note over RC,DS: RestClient forwards inbound Authorization to outbound peer
+    DS-->>RC: response
+    RC-->>RH: response
+    RH-->>CL: HTTP 200
+            </pre>
+            <p style="font-size:0.62em; margin:0.15em 0 0;">
+                <span class="badge badge-high">High</span> F-06.1 Bypass path.
+                <span class="badge badge-medium">Medium</span> F-06.2 Authorization forwarding.
+            </p>
+            <div class="citation-footer">
+                <code>connect/basic-auth-extension/.../JaasBasicAuthFilter.java:L55-L58</code>
+                &nbsp;&#8226;&nbsp;
+                <code>connect/runtime/.../RestClient.java</code>
+                &nbsp;&#8226;&nbsp;
+                <code>connect/runtime/.../RestServer.java:L274-L286</code>
+                &nbsp;&#8226;&nbsp;
+                <code>connect/runtime/.../RestServerConfig.java:L76</code>
+            </div>
+        </section>
+
+        <!-- ========================================================= -->
+        <!-- Slide 10 - OAuth JWT Validation Paths                     -->
+        <!-- ========================================================= -->
+        <section id="slide-oauth-jwt">
+            <p class="slide-meta"><i class="fa-solid fa-key" aria-hidden="true"></i>Slide 10 &#8212; OAuth/OIDC</p>
+            <h2><i class="fa-solid fa-fingerprint slide-icon" aria-hidden="true"></i>OAuth/OIDC Dual-Validator Architecture</h2>
+            <div class="diagram-title">Figure 10.1 &#8212; OAuth JWT Validation &#8212; Signed vs Unsigned Paths</div>
+            <pre class="mermaid">
+%%{init: {'theme':'neutral'}}%%
+flowchart LR
+    Start([Incoming JWT]) --> Dispatch{Validator<br/>wired?}
+    Dispatch -->|Broker| BV[BrokerJwtValidator<br/>jose4j + DISALLOW_NONE]:::safe
+    Dispatch -->|Client| CV[ClientJwtValidator<br/>structural only]:::struct
+    Dispatch -->|Legacy| UV[OAuthBearerUnsecured<br/>accepts alg:none]:::unsafe
+    BV --> B1[Verify signature<br/>iss/aud/exp]:::safe --> OK1([Accept])
+    CV --> C1[Decode; trust<br/>transport layer]:::struct --> OK2([Accept])
+    UV --> U1[No signature<br/>check]:::unsafe --> OK3([Accept])
+    subgraph Legend["Legend"]
+        direction LR
+        LSafe[Signed path]:::safe
+        LStruct[Structural only]:::struct
+        LUnsafe[NOT FOR PRODUCTION]:::unsafe
+    end
+    classDef safe   fill:#16A34A,color:#fff,stroke:#0F172A
+    classDef struct fill:#D97706,color:#fff,stroke:#0F172A
+    classDef unsafe fill:#DC2626,color:#fff,stroke:#0F172A
+            </pre>
+            <div class="citation-footer">
+                <code>clients/.../BrokerJwtValidator.java:L52</code>
+                &nbsp;(<code>import static&#8230;DISALLOW_NONE</code>),&nbsp;
+                <code>:L131</code>
+                (<code>setJwsAlgorithmConstraints(DISALLOW_NONE)</code>)
+            </div>
+        </section>
+
+        <!-- ========================================================= -->
+        <!-- Slide 11 - KRaft Quorum Safety                            -->
+        <!-- ========================================================= -->
+        <section id="slide-kraft-quorum">
+            <p class="slide-meta"><i class="fa-solid fa-diagram-project" aria-hidden="true"></i>Slide 11 &#8212; KRaft</p>
+            <h2><i class="fa-solid fa-users-gear slide-icon" aria-hidden="true"></i>KRaft Controller Quorum Integrity</h2>
+            <div class="diagram-title">Figure 11.1 &#8212; KRaft Quorum Reconfiguration Safety</div>
+            <pre class="mermaid">
+%%{init: {'theme':'neutral'}}%%
+stateDiagram-v2
+    direction LR
+    [*] --> Follower : start-up
+    Follower --> Prospective : election-timeout (pre-vote)
+    Prospective --> Candidate : quorum pre-vote won
+    Prospective --> Follower  : reject or higher epoch
+    Candidate --> Leader     : majority election win
+    Candidate --> Follower   : higher epoch / reject
+    Leader --> Follower      : higher epoch observed
+    Follower --> Observer    : voter removed from set
+    Observer --> Follower    : voter re-added to set
+    note right of Leader
+        Reconfiguration gate:
+        VoterSet.hasOverlappingMajority
+        must hold for AddVoter /
+        RemoveVoter / UpdateVoter
+    end note
+    note left of Candidate
+        ElectionState persisted
+        BEFORE vote broadcast
+        (durable-first invariant)
+    end note
+            </pre>
+            <p style="font-size:0.65em; text-align:center;">
+                <i class="fa-solid fa-minus icon-grey" aria-hidden="true"></i>Solid arrow = durable transition
+                &nbsp;&nbsp;
+                <i class="fa-solid fa-ellipsis icon-grey" aria-hidden="true"></i>Dashed note = in-memory invariant
+            </p>
+            <div class="citation-footer">
+                <code>raft/.../QuorumState.java</code>
+                &nbsp;&#8226;&nbsp;
+                <code>raft/.../VoterSet.java</code>
+                &nbsp;&#8226;&nbsp;
+                <code>raft/.../KafkaRaftClient.java</code>
+            </div>
+        </section>
+
+        <!-- ========================================================= -->
+        <!-- Slide 12 - Authorization Decision Flow                    -->
+        <!-- ========================================================= -->
+        <section id="slide-authz">
+            <p class="slide-meta"><i class="fa-solid fa-user-shield" aria-hidden="true"></i>Slide 12 &#8212; Authorization</p>
+            <h2><i class="fa-solid fa-gavel slide-icon" aria-hidden="true"></i>StandardAuthorizer Decision Flow</h2>
+            <div class="diagram-title">Figure 12.1 &#8212; StandardAuthorizer &#8212; DENY-over-ALLOW Precedence</div>
+            <pre class="mermaid">
+%%{init: {'theme':'neutral'}}%%
+flowchart LR
+    Start([authorize]) --> SU{superUsers?}
+    SU -->|yes| Allow1([ALLOWED])
+    SU -->|no| LC{loadingComplete?}
+    LC -->|false| NotReady([NotReady exception])
+    LC -->|true| Deny{DENY ACL match?}
+    Deny -->|yes| DenyOut([DENIED + audit])
+    Deny -->|no| AllowLookup{ALLOW ACL match?}
+    AllowLookup -->|yes| Allow2([ALLOWED + audit])
+    AllowLookup -->|no| Default{"allow.everyone<br/>.if.no.acl.found?"}
+    Default -->|true| AllowOpen([ALLOWED])
+    Default -->|false| DefaultDeny([DENIED default])
+    subgraph Legend["Legend"]
+        direction LR
+        LAllow[ALLOW]
+        LDeny[DENY]
+        LAudit[Audit/error]
+    end
+    classDef allow fill:#16A34A,color:#fff,stroke:#0F172A
+    classDef deny  fill:#DC2626,color:#fff,stroke:#0F172A
+    classDef audit fill:#64748B,color:#fff,stroke:#0F172A
+    class Allow1,Allow2,AllowOpen,LAllow allow
+    class DenyOut,DefaultDeny,LDeny deny
+    class NotReady,LAudit audit
+            </pre>
+            <div class="citation-footer">
+                <code>metadata/.../StandardAuthorizerData.java:L92</code> (<code>loadingComplete</code>),
+                <code>:L97</code> (<code>superUsers</code>),
+                <code>:L221</code> (<em>DENY precedence comment</em>)
+            </div>
+        </section>
+
+        <!-- ========================================================= -->
+        <!-- Slide 13 - Native Compression Boundary                    -->
+        <!-- ========================================================= -->
+        <section id="slide-native-compression">
+            <p class="slide-meta"><i class="fa-solid fa-microchip" aria-hidden="true"></i>Slide 13 &#8212; Native Boundary</p>
+            <h2><i class="fa-solid fa-file-zipper slide-icon" aria-hidden="true"></i>JVM &harr; Native JNI Boundary &#8212; Zstandard</h2>
+            <div class="diagram-title">Figure 13.1 &#8212; Native Compression Buffer Ownership</div>
+            <pre class="mermaid">
+%%{init: {'theme':'neutral'}}%%
+flowchart LR
+    subgraph JVM[" JVM-Owned (Kafka) "]
+        direction TB
+        BS[BufferSupplier<br/>managed allocation]:::jvm
+        CB[ChunkedBytesStream<br/>16 KB chunk cap]:::jvm
+        ZC[ZstdCompression<br/>wrap/unwrap]:::jvm
+    end
+    subgraph JNI[" Native (zstd-jni) "]
+        direction TB
+        RB[RecyclingBufferPool<br/>off-heap]:::jni
+        ZS[Zstd Compressor/Decompressor<br/>C library]:::jni
+    end
+    BS --> ZC
+    CB --> ZC
+    ZC -->|wrap Throwable<br/>as KafkaException| RB
+    RB --> ZS
+    ZS -.->|Throwable| ZC
+    subgraph Legend [" Legend "]
+        direction LR
+        LJ[Kafka-owned]:::jvm
+        LN[JNI-owned]:::jni
+    end
+    classDef jvm fill:#2563EB,color:#fff,stroke:#0F172A
+    classDef jni fill:#64748B,color:#fff,stroke:#0F172A
+            </pre>
+            <p style="font-size:0.65em; text-align:center;">
+                Hard cap: <strong>16&nbsp;KB</strong> decompression chunk per <code>ChunkedBytesStream</code>. All <code>Throwable</code> from JNI is wrapped in <code>KafkaException</code>.
+            </p>
+            <div class="citation-footer">
+                <code>clients/.../compress/ZstdCompression.java:L49-L51</code>
+                &nbsp;&#8226;&nbsp;
+                <code>gradle/dependencies.gradle:L131</code> (<code>zstd-jni&nbsp;1.5.6-10</code>)
+            </div>
+        </section>
+
+        <!-- ========================================================= -->
+        <!-- Slide 14 - Deserialization Surface                        -->
+        <!-- ========================================================= -->
+        <section id="slide-deserialization">
+            <p class="slide-meta"><i class="fa-solid fa-database" aria-hidden="true"></i>Slide 14 &#8212; Deserialization</p>
+            <h2><i class="fa-solid fa-file-code slide-icon" aria-hidden="true"></i>JSON &amp; Object Deserialization Posture</h2>
+            <div class="diagram-title">Figure 14.1 &#8212; Deserialization Feature Flags &amp; Blocklist</div>
+            <pre class="mermaid" style="max-width:1180px;margin:0.3em auto;">
+%%{init: {'theme':'neutral'}}%%
+flowchart TB
+    subgraph Jackson [" Jackson 2.19.0 JSON Path "]
+        direction LR
+        JD[JsonDeserializer<br/>Connect]:::flag -->|L57| F1[ALLOW_LEADING_ZEROS<br/>_FOR_NUMBERS ON]:::flag
+        JU[JsonUtil<br/>Trogdor]:::flag -->|L39| F2[ACCEPT_SINGLE_VALUE<br/>_AS_ARRAY ON]:::flag
+    end
+    subgraph JOS [" ObjectInputStream Path "]
+        direction LR
+        SOIS[SafeObjectInputStream<br/>suffix blocklist]:::block -->|blocks endsWith| BB[InetAddress / Socket /<br/>Constructor / others]:::block
+    end
+    subgraph JWT [" JWT Validator Path "]
+        direction LR
+        BV[BrokerJwtValidator<br/>jose4j]:::safe -.->|alg:none BLOCKED| NOT([DISALLOW_NONE]):::safe
+        CV[ClientJwtValidator]:::struct -.->|structural only| STR([client-side lite]):::struct
+    end
+    classDef flag   fill:#D97706,color:#fff,stroke:#0F172A
+    classDef block  fill:#64748B,color:#fff,stroke:#0F172A
+    classDef safe   fill:#16A34A,color:#fff,stroke:#0F172A
+    classDef struct fill:#2563EB,color:#fff,stroke:#0F172A
+            </pre>
+            <p style="font-size:0.55em; text-align:center; margin:0.3em 0 0.2em 0;">
+                Legend: <span style="background:#D97706;color:#fff;padding:0 0.4em;border-radius:3px;">Feature flag ON</span>
+                &nbsp;<span style="background:#64748B;color:#fff;padding:0 0.4em;border-radius:3px;">Blocklist</span>
+                &nbsp;<span style="background:#16A34A;color:#fff;padding:0 0.4em;border-radius:3px;">Safe validator</span>
+                &nbsp;<span style="background:#2563EB;color:#fff;padding:0 0.4em;border-radius:3px;">Structural only</span>
+            </p>
+            <div class="citation-footer" style="position:static;margin-top:0.4em;">
+                <code>connect/json/.../JsonDeserializer.java:L57</code>
+                &nbsp;&#8226;&nbsp;
+                <code>trogdor/.../JsonUtil.java:L39</code>
+                &nbsp;&#8226;&nbsp;
+                <code>connect/runtime/.../SafeObjectInputStream.java</code>
+            </div>
+        </section>
+
+
+        <!-- ========================================================= -->
+        <!-- Slide 15 - ReDoS Surface                                  -->
+        <!-- ========================================================= -->
+        <section id="slide-redos">
+            <p class="slide-meta"><i class="fa-solid fa-code" aria-hidden="true"></i>Slide 15 &#8212; ReDoS Inventory</p>
+            <h2><i class="fa-solid fa-magnifying-glass slide-icon" aria-hidden="true"></i>Regular Expression &#8212; ReDoS Risk Inventory</h2>
+            <div class="diagram-title">Figure 15.1 &#8212; Pattern.compile Sites (ten non-test sources)</div>
+            <pre class="mermaid">
+%%{init: {'theme':'neutral'}}%%
+flowchart LR
+    Root(("Pattern.compile<br/>inventory<br/>(10 sites)")):::root
+    subgraph Hot[" Highest Attention "]
+        K1[KerberosRule.java<br/>4 patterns]:::hot
+    end
+    subgraph User[" User-Configurable Inputs "]
+        direction TB
+        JR1[JmxReporter<br/>INCLUDE filter]:::user
+        JR2[JmxReporter<br/>EXCLUDE filter]:::user
+        EV[EnvVarConfigProvider<br/>allowlist.pattern]:::user
+        CT[ConfigTransformer<br/>variable substitution]:::user
+    end
+    subgraph Safe[" Safer Literal Sources "]
+        direction TB
+        KN[KerberosName]:::safe
+        KS[KerberosShortNamer]:::safe
+        CD[ConfigDef]:::safe
+        SC[ServerConnectionId]:::safe
+        AV[ApiVersionsRequest]:::safe
+        OBCIR[OAuthBearerClientInitialResponse]:::safe
+    end
+    Root --> Hot
+    Root --> User
+    Root --> Safe
+    subgraph Legend [" Legend "]
+        direction LR
+        LH[Hotspot - validate inputs]:::hot
+        LU[User-configurable]:::user
+        LS[Literal / internal format]:::safe
+    end
+    classDef root fill:#0F172A,color:#fff,stroke:#2563EB,stroke-width:2px
+    classDef hot  fill:#DC2626,color:#fff,stroke:#0F172A
+    classDef user fill:#D97706,color:#fff,stroke:#0F172A
+    classDef safe fill:#16A34A,color:#fff,stroke:#0F172A
+            </pre>
+            <p style="font-size:0.6em; text-align:center; color:var(--dim);">
+                No catastrophic backtracking primitives identified in reconnaissance.
+                Category 5 rating: <span class="badge badge-medium">Medium</span> for user-configurable sites, <span class="badge badge-low">Low</span> for internal literals.
+            </p>
+        </section>
+
+        <!-- ========================================================= -->
+        <!-- Slide 16 - Accepted Mitigations                           -->
+        <!-- ========================================================= -->
+        <section id="slide-mitigations">
+            <p class="slide-meta"><i class="fa-solid fa-shield-heart" aria-hidden="true"></i>Slide 16 &#8212; Accepted Mitigations</p>
+            <h2><i class="fa-solid fa-circle-check slide-icon icon-green" aria-hidden="true"></i>What Kafka Already Does Right</h2>
+            <div class="icon-grid icon-grid-dense">
+                <div class="icon-card accent-green">
+                    <i class="fa-solid fa-shield icon-green" aria-hidden="true"></i>
+                    <h3>Constant-Time HMAC</h3>
+                    <p>Constant-time <code>MessageDigest.isEqual</code> defeats timing side-channels.</p>
+                    <p class="mitigation-ref">M1 &#8226; DelegationToken.java:L60</p>
+                </div>
+                <div class="icon-card accent-green">
+                    <i class="fa-solid fa-key icon-green" aria-hidden="true"></i>
+                    <h3>DISALLOW_NONE JWT</h3>
+                    <p>Broker validator rejects <code>alg:none</code> via jose4j.</p>
+                    <p class="mitigation-ref">M2 &#8226; BrokerJwtValidator.java:L52,L131</p>
+                </div>
+                <div class="icon-card accent-green">
+                    <i class="fa-solid fa-network-wired icon-green" aria-hidden="true"></i>
+                    <h3>Replication Exempt</h3>
+                    <p>Internal replication listener exempt from broker caps &#8212; prevents self-DoS.</p>
+                    <p class="mitigation-ref">M3 &#8226; ConnectionQuotas.scala</p>
+                </div>
+                <div class="icon-card accent-green">
+                    <i class="fa-solid fa-ban icon-green" aria-hidden="true"></i>
+                    <h3>DENY-over-ALLOW</h3>
+                    <p>One DENY ACL cannot be out-voted by ALLOW entries.</p>
+                    <p class="mitigation-ref">M4 &#8226; StandardAuthorizerData.java:L221</p>
+                </div>
+                <div class="icon-card accent-green">
+                    <i class="fa-solid fa-list-check icon-green" aria-hidden="true"></i>
+                    <h3>ACL Op Bound</h3>
+                    <p>Record-list cap prevents unbounded ACL floods.</p>
+                    <p class="mitigation-ref">M5 &#8226; AclControlManager.java</p>
+                </div>
+                <div class="icon-card accent-green">
+                    <i class="fa-solid fa-compress icon-green" aria-hidden="true"></i>
+                    <h3>16 KB Chunk Cap</h3>
+                    <p>Hard-capped decompression chunks limit zip-bomb blast.</p>
+                    <p class="mitigation-ref">M6 &#8226; ZstdCompression.java:L49-L51</p>
+                </div>
+                <div class="icon-card accent-green">
+                    <i class="fa-solid fa-eye-slash icon-green" aria-hidden="true"></i>
+                    <h3>Password Masking</h3>
+                    <p><code>Password.HIDDEN</code> &amp; HMAC masked with <code>[*******]</code>.</p>
+                    <p class="mitigation-ref">M7, M11 &#8226; Password.java, DelegationToken.java:L74</p>
+                </div>
+                <div class="icon-card accent-green">
+                    <i class="fa-solid fa-people-group icon-green" aria-hidden="true"></i>
+                    <h3>Quorum Safety</h3>
+                    <p>Overlapping-majority check blocks unsafe raft reconfig.</p>
+                    <p class="mitigation-ref">M8 &#8226; VoterSet.java</p>
+                </div>
+            </div>
+            <p style="font-size:0.6em; text-align:center; color:var(--dim); margin-top:0.2em;">
+                Nineteen accepted mitigations (M1&#8211;M19) catalogued in <code>accepted-mitigations.md</code>.
+            </p>
+        </section>
+
+        <!-- ========================================================= -->
+        <!-- Slide 17 - Insecure-by-Default Watchlist                  -->
+        <!-- ========================================================= -->
+        <section id="slide-watchlist">
+            <p class="slide-meta"><i class="fa-solid fa-eye" aria-hidden="true"></i>Slide 17 &#8212; Operator Watchlist</p>
+            <h2><i class="fa-solid fa-list-check slide-icon" aria-hidden="true"></i>Operator Configuration Watchlist</h2>
+            <table class="compact-table" style="font-size:0.55em;">
+                <thead>
+                    <tr><th>Configuration</th><th>Default</th><th>Posture</th><th>Operator Action</th></tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><code>listeners</code> / protocol</td>
+                        <td>PLAINTEXT</td>
+                        <td><span class="badge badge-high">Insecure</span></td>
+                        <td>Enable SSL or SASL_SSL before production</td>
+                    </tr>
+                    <tr>
+                        <td><code>sasl.enabled.mechanisms</code></td>
+                        <td>GSSAPI</td>
+                        <td><span class="badge badge-medium">Specialized</span></td>
+                        <td>Add SCRAM or OAUTHBEARER for non-Kerberos deployments</td>
+                    </tr>
+                    <tr>
+                        <td><code>PropertyFileLoginModule</code></td>
+                        <td>Plaintext credentials</td>
+                        <td><span class="badge badge-high">Not for prod</span></td>
+                        <td>Use SCRAM / OAuth / Kerberos instead</td>
+                    </tr>
+                    <tr>
+                        <td><code>OAuthBearerUnsecuredValidator<br/>CallbackHandler</code></td>
+                        <td>Accepts <code>alg:none</code></td>
+                        <td><span class="badge badge-high">Not for prod</span></td>
+                        <td>Wire <code>BrokerJwtValidator</code> (<code>DISALLOW_NONE</code>) instead</td>
+                    </tr>
+                    <tr>
+                        <td><code>ssl.allow.dn.changes</code></td>
+                        <td>false</td>
+                        <td><span class="badge badge-low">Secure</span></td>
+                        <td>Keep false unless cert reconfig required</td>
+                    </tr>
+                    <tr>
+                        <td><code>ssl.allow.san.changes</code></td>
+                        <td>false</td>
+                        <td><span class="badge badge-low">Secure</span></td>
+                        <td>Keep false unless cert reconfig required</td>
+                    </tr>
+                    <tr>
+                        <td><code>access.control.allow.origin</code> (Connect)</td>
+                        <td><em>empty string</em></td>
+                        <td><span class="badge badge-low">Secure</span></td>
+                        <td>Only set if reverse-proxy CORS is needed</td>
+                    </tr>
+                    <tr>
+                        <td><code>allow.everyone.if.no.acl.found</code></td>
+                        <td>false</td>
+                        <td><span class="badge badge-low">Secure</span></td>
+                        <td>Keep false &#8212; default-deny posture</td>
+                    </tr>
+                    <tr>
+                        <td><code>unclean.leader.election.enable</code></td>
+                        <td>false</td>
+                        <td><span class="badge badge-low">Secure</span></td>
+                        <td>Keep false for transactional correctness</td>
+                    </tr>
+                    <tr>
+                        <td><code>auto.create.topics.enable</code></td>
+                        <td>true</td>
+                        <td><span class="badge badge-medium">Accessibility</span></td>
+                        <td>Disable in multi-tenant or authZ-strict clusters</td>
+                    </tr>
+                </tbody>
+            </table>
+            <p style="font-size:0.6em; text-align:center; color:var(--dim); margin-top:0.2em;">
+                Secure defaults are green-coded; insecure-out-of-the-box defaults are amber-coded. Reference: <code>findings/10-public-api-developer-misuse.md</code>.
+            </p>
+        </section>
+
+        <!-- ========================================================= -->
+        <!-- Slide 18 - Supply Chain / Dependencies                    -->
+        <!-- ========================================================= -->
+        <section id="slide-supply-chain">
+            <p class="slide-meta"><i class="fa-solid fa-boxes-stacked" aria-hidden="true"></i>Slide 18 &#8212; Supply Chain</p>
+            <h2><i class="fa-solid fa-cubes slide-icon" aria-hidden="true"></i>Kafka 4.2 Runtime Dependency Manifest</h2>
+            <div class="two-col">
+                <div>
+                    <table style="font-size:0.6em;">
+                        <thead>
+                            <tr><th>Dependency</th><th>Version</th><th>Category</th></tr>
+                        </thead>
+                        <tbody>
+                            <tr><td><i class="fa-solid fa-file-code icon-blue" aria-hidden="true"></i> <code>jackson-databind</code></td><td>2.19.0</td><td>08 Deserialization</td></tr>
+                            <tr><td><i class="fa-solid fa-key icon-blue" aria-hidden="true"></i> <code>jose4j</code></td><td>0.9.6</td><td>07 Callback / 08 Deserial</td></tr>
+                            <tr><td><i class="fa-solid fa-server icon-blue" aria-hidden="true"></i> <code>jetty-server</code></td><td>12.0.22 <i class="fa-solid fa-triangle-exclamation icon-orange" aria-label="High severity CVE flag" title="CVE-2026-1605 [High] GzipHandler native-memory DoS"></i></td><td>06 Network</td></tr>
+                            <tr><td><i class="fa-solid fa-plug icon-blue" aria-hidden="true"></i> <code>jersey</code></td><td>3.1.10</td><td>06 Network</td></tr>
+                            <tr><td><i class="fa-solid fa-file-lines icon-blue" aria-hidden="true"></i> <code>log4j2</code></td><td>2.25.1</td><td>09 Info Leakage</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div>
+                    <table style="font-size:0.6em;">
+                        <thead>
+                            <tr><th>Dependency</th><th>Version</th><th>Category</th></tr>
+                        </thead>
+                        <tbody>
+                            <tr><td><i class="fa-solid fa-file-zipper icon-grey" aria-hidden="true"></i> <code>zstd-jni</code></td><td>1.5.6-10</td><td>02 Native</td></tr>
+                            <tr><td><i class="fa-solid fa-file-zipper icon-grey" aria-hidden="true"></i> <code>snappy-java</code></td><td>1.1.10.7</td><td>02 Native</td></tr>
+                            <tr><td><i class="fa-solid fa-file-zipper icon-red" aria-hidden="true"></i> <code>lz4-java</code></td><td>1.8.0 <i class="fa-solid fa-triangle-exclamation icon-red" aria-label="Critical severity CVE flag" title="CVE-2025-12183 + CVE-2025-66566 [Critical x 2]"></i></td><td>02 Native</td></tr>
+                            <tr><td><i class="fa-solid fa-database icon-grey" aria-hidden="true"></i> <code>rocksdbjni</code></td><td>10.1.3</td><td>02 Native</td></tr>
+                            <tr><td><i class="fa-solid fa-certificate icon-blue" aria-hidden="true"></i> <code>bcpkix-jdk18on</code></td><td>1.80</td><td>07 Callback</td></tr>
+                            <tr><td><i class="fa-solid fa-scroll icon-blue" aria-hidden="true"></i> <code>scala-library</code></td><td>2.13.17</td><td>Runtime</td></tr>
+                            <tr><td><i class="fa-solid fa-screwdriver-wrench icon-blue" aria-hidden="true"></i> <code>Gradle</code></td><td>9.1.0</td><td>Toolchain</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            <p style="font-size:0.62em; text-align:center; color:var(--dim); margin-top:0.3em;">
+                OWASP Dependency-Check and Trivy scanners are configured in the repository's CI pipeline for ongoing supply-chain surveillance.
+                <br/><i class="fa-solid fa-triangle-exclamation icon-orange" aria-hidden="true"></i> <strong style="color:#f1f5f9;">Three active CVEs identified at audit snapshot</strong> &#8212; <code>lz4-java</code> <span class="badge-critical" style="padding:0.1em 0.4em; border-radius:3px; font-size:0.9em; color:#fff;">Critical &times; 2</span> and <code>jetty-server</code> <span class="badge-high" style="padding:0.1em 0.4em; border-radius:3px; font-size:0.9em; color:#fff;">High &times; 1</span>; see <code>cve-snapshot.md</code>. Per the Audit Only rule, remediation is staged as future-state engagements in <code>remediation-roadmap.md</code> Sections 3.2.7 and 3.4.4.
+            </p>
+            <div class="citation-footer" style="position:static;margin-top:0.4em;">
+                <code>gradle/dependencies.gradle:L56,L63,L66,L69,L70,L81,L108,L110,L113,L118,L125,L131</code>
+            </div>
+        </section>
+
+        <!-- ========================================================= -->
+        <!-- Slide 19 - Remediation Roadmap (Future State)             -->
+        <!-- ========================================================= -->
+        <section id="slide-roadmap">
+            <p class="slide-meta"><i class="fa-solid fa-road" aria-hidden="true"></i>Slide 19 &#8212; Roadmap</p>
+            <h2><i class="fa-solid fa-clipboard-check slide-icon" aria-hidden="true"></i>Recommended Future Actions</h2>
+            <div class="diagram-title">Figure 19.1 &#8212; Remediation Roadmap &#8212; Future State</div>
+            <pre class="mermaid">
+%%{init: {'theme':'neutral'}}%%
+gantt
+    dateFormat  YYYY-MM-DD
+    title       Remediation Roadmap (future-state recommendations only)
+    axisFormat  %b %Y
+
+    section Immediate (Cat 06, 07, 10)
+    Document JaasBasicAuthFilter bypass for operators      :a1, 2026-05-01, 14d
+    Warn on OAuthBearerUnsecured in production             :a2, after a1, 14d
+    Flag PropertyFileLoginModule in startup logs           :a3, after a1, 14d
+
+    section Short-term (Cat 02, 08, 09)
+    Review ALLOW_LEADING_ZEROS_FOR_NUMBERS Jackson flag    :b1, 2026-06-01, 21d
+    Publish SafeObjectInputStream class-level allow-list   :b2, after b1, 30d
+    Consolidate redaction markers ("[hidden]", "[redacted]"):b3, after b1, 30d
+
+    section Medium-term (Cat 03, 04, 05)
+    Formalize ServiceLoader plugin attestation model       :c1, 2026-09-01, 60d
+    Add ReDoS regression fixtures for user-configurable regex :c2, 2026-09-01, 45d
+    Add bounded-time regex engine option                   :c3, after c2, 60d
+
+    section Long-term (Cat 01)
+    Uniform file-resolver with canonical-path guards       :d1, 2027-01-01, 90d
+    Deprecate direct file paths in config providers        :d2, after d1, 120d
+            </pre>
+            <div class="warning-banner">
+                <i class="fa-solid fa-triangle-exclamation" aria-hidden="true"></i>
+                <strong>This audit proposes no code changes.</strong> All items above are future-state recommendations for the engineering team&#8217;s roadmap &#8212; they are not being implemented in this run.
+            </div>
+        </section>
+
+        <!-- ========================================================= -->
+        <!-- Slide 20 - No-Change Verification                         -->
+        <!-- ========================================================= -->
+        <section id="slide-no-change">
+            <p class="slide-meta"><i class="fa-solid fa-circle-check" aria-hidden="true"></i>Slide 20 &#8212; No-Change Verification</p>
+            <h2 style="margin:0.1em 0 0.15em 0; font-size:1.25em;"><i class="fa-solid fa-circle-check slide-icon icon-green" aria-hidden="true"></i>Audit Only &#8212; Zero Code Modifications</h2>
+            <div class="no-change-check" style="padding:0.6em 0.8em; margin-bottom:0.3em;">
+                <p style="margin:0 0 0.3em 0;">
+                    <i class="fa-solid fa-quote-left" aria-hidden="true"></i>
+                    <strong>Audit Only rule (verbatim, user-supplied):</strong>
+                    <em style="color:#CBD5E1;">
+                        &#8220;This run should serve as a dry run for potential changes, research, or documentation.
+                        DO NOT modify, create, or delete any existing code in the codebase. Avoid executing any
+                        code in the code base, this should be a static analysis. Every deliverable MUST include
+                        a markdown file summarizing security vulnerabilities, potential exploits, bugs in the
+                        codebase, perofrmace considerations, and remediation recommendations. Verify the
+                        NO CHANGES clause by confirming no changes to existing codebase featured in the git
+                        differential. Markdown files explicitly related to the analysis performed in this run
+                        are permitted.&#8221;
+                    </em>
+                </p>
+            </div>
+            <div class="no-change-check">
+                <p>
+                    <i class="fa-solid fa-terminal" aria-hidden="true"></i>
+                    Git differential verification &#8212; executed at the end of the audit:
+                </p>
+                <code>$ git diff --name-status main &#46;&#46;&#46; blitzy-4bdad1ad-dc01-4556-9ef0-4c760b777d5a
+A   docs/security-audit/README.md
+A   docs/security-audit/executive-summary.html
+A   docs/security-audit/accepted-mitigations.md
+A   docs/security-audit/cve-snapshot.md
+A   docs/security-audit/dependency-inventory.md
+A   docs/security-audit/no-change-verification.md
+A   docs/security-audit/references.md
+A   docs/security-audit/remediation-roadmap.md
+A   docs/security-audit/severity-matrix.md
+A   docs/security-audit/findings/01-filesystem-access-path-traversal.md
+A   docs/security-audit/findings/02-low-level-code-safety.md
+A   docs/security-audit/findings/03-resource-limit-evasion.md
+A   docs/security-audit/findings/04-module-system-builtin-abuse.md
+A   docs/security-audit/findings/05-infinite-loop-recursion-dos.md
+A   docs/security-audit/findings/06-network-subprocess-access.md
+A   docs/security-audit/findings/07-external-function-callback-misuse.md
+A   docs/security-audit/findings/08-deserialization-attacks.md
+A   docs/security-audit/findings/09-information-leakage.md
+A   docs/security-audit/findings/10-public-api-developer-misuse.md
+A   docs/security-audit/diagrams/threat-model-overview.md
+A   docs/security-audit/diagrams/attack-surface-map.md
+A   docs/security-audit/diagrams/authorization-decision-flow.md
+A   docs/security-audit/diagrams/kraft-quorum-safety.md
+A   docs/security-audit/diagrams/connect-rest-trust-boundary.md
+A   docs/security-audit/diagrams/oauth-jwt-validation-paths.md
+A   docs/security-audit/diagrams/native-compression-boundary.md</code>
+                <p>
+                    <i class="fa-solid fa-circle-check icon-green" aria-hidden="true"></i>
+                    <strong>Every entry is an ADD (<code>A</code>) and every path is inside <code>docs/security-audit/</code>.</strong>
+                    Zero modifications (<code>M</code>), zero deletions (<code>D</code>), zero renames (<code>R</code>) against any existing source, test, build, or documentation file.
+                </p>
+            </div>
+            <p style="font-size:0.6em; text-align:center; color:var(--dim); margin-top:0.2em;">
+                Full verification procedure and evidence archived in <code>docs/security-audit/no-change-verification.md</code>.
+                The spelling of <code>&quot;perofrmace&quot;</code> above is preserved verbatim from the user-supplied rule and MUST NOT be corrected.
+            </p>
+        </section>
+
+        <!-- ========================================================= -->
+        <!-- Slide 21 - Onboarding                                     -->
+        <!-- ========================================================= -->
+        <section id="slide-onboarding">
+            <p class="slide-meta"><i class="fa-solid fa-graduation-cap" aria-hidden="true"></i>Slide 21 &#8212; Onboarding</p>
+            <h2><i class="fa-solid fa-compass slide-icon" aria-hidden="true"></i>How to Use This Audit</h2>
+            <div class="diagram-title">Figure 21.1 &#8212; Onboarding Flow</div>
+            <pre class="mermaid">
+%%{init: {'theme':'neutral'}}%%
+flowchart LR
+    S1["Step 1<br/>Start at README.md"]:::step --> S2["Step 2<br/>Skim severity-matrix.md"]:::step
+    S2 --> S3["Step 3<br/>Drill into findings/0x-*.md"]:::step
+    S3 --> S4["Step 4<br/>Review accepted-mitigations.md"]:::step
+    S4 --> S5["Step 5<br/>Plan with engineering leads<br/>using remediation-roadmap.md"]:::step
+    S5 --> S6["Step 6<br/>Re-run audit against<br/>next Kafka release"]:::step
+    subgraph Artifacts[" Cross-References "]
+        direction TB
+        A1[diagrams/*.md<br/>seven Mermaid diagrams]:::ref
+        A2[dependency-inventory.md<br/>supply-chain posture]:::ref
+        A3[references.md<br/>full bibliography]:::ref
+    end
+    S3 -.-> A1
+    S3 -.-> A2
+    S6 -.-> A3
+    classDef step fill:#2563EB,color:#fff,stroke:#0F172A
+    classDef ref  fill:#F1F5F9,color:#0F172A,stroke:#64748B,stroke-dasharray:3 2
+            </pre>
+            <p style="font-size:0.7em; text-align:center;">
+                <strong>Reviewer audience:</strong> security leadership, engineering managers, SRE on-call, compliance officers.
+            </p>
+        </section>
+
+        <!-- ========================================================= -->
+        <!-- Slide 22 - Contact / References                           -->
+        <!-- ========================================================= -->
+        <section id="slide-contact">
+            <p class="slide-meta"><i class="fa-solid fa-book-open" aria-hidden="true"></i>Slide 22 &#8212; Next Steps</p>
+            <h2><i class="fa-solid fa-arrow-right-long slide-icon" aria-hidden="true"></i>Next Steps &amp; References</h2>
+            <div class="icon-grid icon-grid-links">
+                <div class="icon-card">
+                    <i class="fa-solid fa-table-list icon-blue" aria-hidden="true"></i>
+                    <h3>Drill Down</h3>
+                    <p>
+                        <a class="link-button" href="findings/01-filesystem-access-path-traversal.md"><i class="fa-solid fa-file-lines" aria-hidden="true"></i>01 Filesystem</a>
+                        <a class="link-button" href="findings/06-network-subprocess-access.md"><i class="fa-solid fa-network-wired" aria-hidden="true"></i>06 Network</a>
+                        <a class="link-button" href="findings/10-public-api-developer-misuse.md"><i class="fa-solid fa-user-gear" aria-hidden="true"></i>10 API Misuse</a>
+                    </p>
+                </div>
+                <div class="icon-card">
+                    <i class="fa-solid fa-scale-balanced icon-blue" aria-hidden="true"></i>
+                    <h3>Severity &amp; Roadmap</h3>
+                    <p>
+                        <a class="link-button" href="severity-matrix.md"><i class="fa-solid fa-chart-simple" aria-hidden="true"></i>Severity Matrix</a>
+                        <a class="link-button" href="remediation-roadmap.md"><i class="fa-solid fa-road" aria-hidden="true"></i>Roadmap</a>
+                        <a class="link-button" href="cve-snapshot.md"><i class="fa-solid fa-triangle-exclamation" aria-hidden="true"></i>CVE Snapshot</a>
+                    </p>
+                </div>
+                <div class="icon-card">
+                    <i class="fa-solid fa-shield-halved icon-green" aria-hidden="true"></i>
+                    <h3>Positive Posture</h3>
+                    <p>
+                        <a class="link-button" href="accepted-mitigations.md"><i class="fa-solid fa-circle-check" aria-hidden="true"></i>Accepted Mitigations</a>
+                        <a class="link-button" href="no-change-verification.md"><i class="fa-solid fa-lock" aria-hidden="true"></i>No-Change Verification</a>
+                    </p>
+                </div>
+                <div class="icon-card">
+                    <i class="fa-solid fa-book icon-blue" aria-hidden="true"></i>
+                    <h3>Bibliography</h3>
+                    <p>
+                        <a class="link-button" href="references.md"><i class="fa-solid fa-bookmark" aria-hidden="true"></i>references.md</a>
+                        <a class="link-button" href="dependency-inventory.md"><i class="fa-solid fa-cubes" aria-hidden="true"></i>Dependencies</a>
+                        <a class="link-button" href="README.md"><i class="fa-solid fa-house" aria-hidden="true"></i>README</a>
+                    </p>
+                </div>
+            </div>
+            <p class="footer-text">
+                <i class="fa-solid fa-code-branch" aria-hidden="true"></i>Branch <code>blitzy-4bdad1ad-dc01-4556-9ef0-4c760b777d5a</code>
+                &nbsp;&#8226;&nbsp;
+                <i class="fa-solid fa-calendar" aria-hidden="true"></i>Snapshot 2026-04-17
+                &nbsp;&#8226;&nbsp;
+                <i class="fa-solid fa-hashtag" aria-hidden="true"></i>Baseline <code>6d16f687aa</code>
+            </p>
+            <div class="audit-only-banner" style="margin-top:0.6em;">
+                <i class="fa-solid fa-circle-check" aria-hidden="true"></i>
+                Apache Kafka 4.2 Security Audit &#8212; Audit Only, No Code Modifications
+            </div>
+        </section>
+
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/notes/notes.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/highlight/highlight.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.0/dist/mermaid.min.js"></script>
+<script>
+    // Mermaid must be initialized with startOnLoad=false so that we can
+    // manually render diagrams on slide transitions (reveal.js clones
+    // slides during navigation which would lose the rendered SVG otherwise).
+    mermaid.initialize({
+        startOnLoad: false,
+        theme: 'neutral',
+        securityLevel: 'loose',
+        flowchart: { htmlLabels: true, curve: 'basis' },
+        sequence:  { diagramMarginX: 30, diagramMarginY: 10 },
+        gantt:     { leftPadding: 120, rightPadding: 30 }
+    });
+
+    // Mermaid cannot compute dimensions for slides that reveal.js has hidden
+    // with display:none. We therefore render each slide's diagrams lazily,
+    // the first time the slide becomes visible. Rendered diagrams are skipped
+    // on subsequent visits because Mermaid sets data-processed="true".
+    function renderMermaidInCurrentSlide() {
+        var current = document.querySelector('.reveal .slides section.present');
+        if (!current) return;
+        var pending = current.querySelectorAll('pre.mermaid:not([data-processed="true"]), div.mermaid:not([data-processed="true"])');
+        if (pending.length === 0) return;
+        try {
+            mermaid.run({ nodes: Array.prototype.slice.call(pending) }).catch(function (e) {
+                console.warn('Mermaid render warning on current slide:', e);
+            });
+        } catch (e) {
+            console.warn('Mermaid render exception on current slide:', e);
+        }
+    }
+
+    Reveal.initialize({
+        hash: true,
+        slideNumber: 'c/t',
+        controls: true,
+        progress: true,
+        center: true,
+        transition: 'fade',
+        width: 1280,
+        height: 800,
+        margin: 0.04,
+        plugins: [ RevealNotes, RevealHighlight ]
+    }).then(function () {
+        // Render diagrams on the initially-visible slide only. Other slides
+        // are rendered lazily on first navigation (see slidechanged below).
+        renderMermaidInCurrentSlide();
+    });
+
+    // Re-run Mermaid when the user transitions between slides. Already-rendered
+    // diagrams carry data-processed="true" and are skipped automatically.
+    Reveal.on('slidechanged', function () {
+        renderMermaidInCurrentSlide();
+    });
+</script>
+</body>
+</html>
+
