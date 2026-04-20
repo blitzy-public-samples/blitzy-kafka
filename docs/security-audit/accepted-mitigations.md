@@ -35,6 +35,37 @@ consistent with the governing **Audit Only** rule described in
 [`./README.md`](./README.md) and verified in
 [`./no-change-verification.md`](./no-change-verification.md).
 
+### Audit Only Rule (verbatim, user-supplied)
+
+> "This run should serve as a dry run for potential changes, research, or documentation. DO
+> NOT modify, create, or delete any existing code in the codebase. Avoid executing any code in
+> the code base, this should be a static analysis. Every deliverable MUST include a markdown
+> file summarizing security vulnerabilities, potential exploits, bugs in the codebase,
+> perofrmace considerations, and remediation recommendations. Verify the NO CHANGES clause by
+> confirming no changes to existing codebase featured in the git differential. Markdown files
+> explicitly related to the analysis performed in this run are permitted."
+
+The spelling `perofrmace` above is preserved **verbatim** from the user-supplied rule and
+must not be corrected anywhere in the audit tree.
+
+### Performance Considerations — Mitigation-Specific Coverage
+
+The Audit Only rule above lists `perofrmace considerations` as one of the topics that every
+deliverable must address. This catalogue satisfies that clause in two complementary ways:
+
+- **Regression-risk column.** Every `[Accepted]` entry below includes a `Regression Risk`
+  field that documents the conditions under which a future maintenance change could degrade
+  the mitigation. Several of those conditions are performance-motivated — for example, an
+  operator or contributor who replaces the immutable copy-on-write `AclCache` with a
+  concurrent mutable collection **"for performance"** would regress mitigation `M9` (see
+  entry #13 in Section 3). The catalogue makes that performance-versus-security trade-off
+  explicit so that a future contributor can make an informed decision.
+- **Per-finding coverage.** The detailed performance analysis for each threat class lives
+  in `## 8. Performance Considerations` within the matching per-category findings file
+  under [`./findings/`](./findings/). This document cross-references those sections rather
+  than duplicating the analysis, so that the mitigation catalogue remains focused on the
+  code-level invariants that must be preserved.
+
 ## How to Read an Entry
 
 Every entry follows the same sub-template:

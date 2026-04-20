@@ -19,7 +19,7 @@
 
 > Navigation: [Audit Overview](../README.md) • [Severity Matrix](../severity-matrix.md) • [Remediation Roadmap](../remediation-roadmap.md) • [Accepted Mitigations](../accepted-mitigations.md)
 
-> AUDIT-ONLY STATEMENT — This finding documents observed configuration defaults, code paths, and Javadoc warnings that affect security posture. NO code, configuration, test, or build-file change is applied by this audit. Every recommendation in Section 9 is future-state only and requires formal engineering review (e.g., a Kafka Improvement Proposal) before any action.
+> AUDIT-ONLY STATEMENT — This finding documents observed configuration defaults, code paths, and Javadoc warnings that affect security posture. NO code, configuration, test, or build-file change is applied by this audit. Every recommendation in Section 10 is future-state only and requires formal engineering review (e.g., a Kafka Improvement Proposal) before any action.
 
 ---
 
@@ -237,7 +237,73 @@ The non-technical takeaway: today's Kafka deployment is exposed mainly through *
 
 ---
 
-## 8. Accepted Mitigations Already Present
+## 8. Performance Considerations
+
+The Audit Only rule requires every deliverable to summarize "perofrmace considerations" (sic). This section characterises the runtime cost of the nine defaults above, the metrics an operator would use to detect exploitation, the performance posture of the existing mitigations in Section 9, and the performance accounting for every future-state item in Section 10. No Kafka code was executed during this audit — all characterisations below are derived from static reading of the cited source files and from the documented semantics of each public API. No benchmarks, micro-benchmarks, or profiling runs were performed; no JFR, async-profiler, or JMH data was collected.
+
+### 8.1 Hot-Path Signals per Sub-Finding
+
+- **10.1 `PLAINTEXT` listener default** — Cost is realised as a *negative* performance delta relative to TLS: a PLAINTEXT listener skips the handshake (one RTT + cert-chain parse, typically 1–10 ms on a warm JVM) and skips the per-record AES encrypt/decrypt (~100–500 ns per kilobyte on AES-NI hardware). The "insecure but fast" property of PLAINTEXT is precisely the operator incentive that keeps this default in use. At `Source: clients/src/main/java/org/apache/kafka/common/security/auth/SecurityProtocol.java` the enum declares `PLAINTEXT` as a first-class protocol; protocol selection happens at socket-accept time in `SocketServer` — zero per-request cost after the listener is bound.
+- **10.2 `sasl.mechanism = GSSAPI`** — Configuration-load signal only; the enum value is read once during `KafkaConfig` validation and cached. The runtime hot path is the Kerberos SASL/GSSAPI handshake itself: a `KerberosClientCallbackHandler` ticket-cache lookup followed by a UDP/TCP exchange with the Kerberos KDC (`AS-REQ`/`AS-REP` + `TGS-REQ`/`TGS-REP`), typically 5–50 ms per fresh login; subsequent reauthentication uses the cached ticket until `renew_lifetime` expires. Token-based mechanisms (SCRAM-SHA-256/512) complete in tens of µs by comparison. The default's performance footprint is therefore tens of milliseconds every `ticket_lifetime` interval per connecting client — not a per-request concern.
+- **10.3 `PropertyFileLoginModule`** — Cost is a single `Properties.load(FileInputStream)` invocation in the JAAS `login()` callback at `Source: connect/basic-auth-extension/src/main/java/org/apache/kafka/connect/rest/basic/auth/extension/PropertyFileLoginModule.java:L72-L96`. The file is re-read on every login attempt (no in-module cache), so the per-REST-request cost is one filesystem `read()` of a small file (typically <1 KB, served from the OS page cache after the first read). Password comparison is a string-equality check — NOT a constant-time comparison — making this module a textbook timing-attack surface as documented in sub-finding 10.3. For a Connect REST worker under typical administrative load (tens of requests per hour), the page-cache hit means the hot-path cost is dominated by filesystem metadata access (~10 µs) rather than disk I/O.
+- **10.4 `OAuthBearerUnsecuredValidatorCallbackHandler`** — Cross-reference to sub-finding 07.1. The unsecured path performs JSON parsing of the JWT payload only (no JWS signature verification), executing in tens of microseconds per SASL handshake. The secured counterpart `BrokerJwtValidator` invokes jose4j's JWS verification (RSA-SHA-256 or ECDSA-SHA-256 public-key operation), costing 1–10 ms per handshake. The unsecured handler is therefore 100–1000× faster than the secured handler — this performance differential is precisely why operators sometimes inadvertently keep the unsecured handler in production. For a Connect worker handling 100 OAuth SASL reauthentications per hour, the unsecured handler's aggregate CPU footprint is negligible; the point is that the sub-microsecond-level CPU savings do not justify the security regression.
+- **10.5 `ssl.allow.dn.changes = false` / `ssl.allow.san.changes = false`** — Cost is incurred during dynamic broker reconfiguration only. `SslFactory.validateReconfiguration()` at `Source: clients/src/main/java/org/apache/kafka/common/security/ssl/SslFactory.java:L260-L298` compares the old `CertificateEntries` against the new ones once per `AdminClient.alterConfigs()` call targeting SSL config — a control-plane operation that occurs at most a handful of times per broker lifetime during certificate rotation. DN/SAN string comparison is O(|DN-string| + |SAN-list|), typically microseconds. No per-TLS-handshake cost is added by this check; the per-handshake path is unchanged regardless of the flag value.
+- **10.6 `access.control.allow.origin = ""`** — Cross-reference to sub-finding 06.3. The Jetty `CrossOriginHandler` at `Source: connect/runtime/src/main/java/org/apache/kafka/connect/runtime/rest/RestServer.java:L274-L284` is instantiated only when the config value is non-empty; the empty-string default causes the handler to be OMITTED from the Jetty filter chain entirely. Zero per-request cost. This is the ideal performance posture for a SECURE default — the secure behaviour has strictly lower cost than the permissive one.
+- **10.7 `allow.everyone.if.no.acl.found = false`** — Cost is per-authorization-decision and realised inside `StandardAuthorizerData.authorize()` at `Source: metadata/src/main/java/org/apache/kafka/metadata/authorizer/StandardAuthorizerData.java:L211-L213`. The fail-closed branch completes as soon as the matching-rule loop exhausts the ACL cache without finding a DENY or ALLOW rule — a constant-factor check against the field value. The flag value itself is a single memory read (the field is `final`); the computed fail-open variant under `allow.everyone.if.no.acl.found = true` would take the same path but produce `AuthorizationResult.ALLOWED` on the default branch. Performance parity between secure and insecure settings; nothing per-request to tune.
+- **10.8 `unclean.leader.election.enable = false`** — Cold-path check. Only consulted inside `ReplicaManager` / `LeaderAndIsrRequest` handling when the controller has declared a leader-election event and the candidate set is empty. At steady state (no broker failures, no ISR shrinkage below zero) the flag is not evaluated. The aggregate cost across a broker's lifetime is a handful of boolean reads per leader-failure event. The true operational impact is asymmetric: the SECURE default may cost *availability* (a partition with all-in-sync replicas down stays offline until a replica recovers) while avoiding a correctness regression in transactional semantics — a trade-off the Kafka community has deliberately chosen via ReplicationConfigs default.
+- **10.9 `auto.create.topics.enable = true`** — Cost is incurred per first-produce or first-fetch for a topic not yet in the metadata cache. The path executes inside `KafkaApis.handleProduceRequest` / `handleFetchRequest` and triggers a controller-forwarded `CreateTopicsRequest` with `numPartitions = num.partitions` (default 1) and `replicationFactor = default.replication.factor` (default 1). Per-topic one-time cost: one round-trip to the controller (low-millisecond under KRaft), one quorum commit of a `TopicRecord`, and propagation to all brokers (low-millisecond). Per-steady-state-request cost: zero (the flag is only checked when the topic is not cached). The exploitation pattern in Section 5 — an attacker triggering unbounded topic creation — translates to controller-metadata-log growth (each synthetic topic adds records, partitions, and replica assignments) and broker memory pressure (metadata cache, log directories). The operator-observable signal is `kafka.controller:type=KafkaController,name=GlobalTopicCount` climbing without operator action.
+
+### 8.2 Observable Metrics Indicating Exploitation
+
+The following metrics already ship in Apache Kafka 4.2.0-SNAPSHOT and require no code change. An operator monitoring these metrics can detect exploitation attempts or misconfiguration drift for each sub-finding above.
+
+- **`kafka.server:type=socket-server-metrics,listener=PLAINTEXT,networkProcessor=*,name=connection-count`** — spikes on a PLAINTEXT listener that was expected to be dormant signal either mis-configuration (10.1) or attacker reconnaissance.
+- **`kafka.server:type=BrokerTopicMetrics,name=FailedAuthenticationPerSec`** / **`SuccessfulAuthenticationPerSec`** — delta between the two over a 5-minute window highlights credential-stuffing against `PropertyFileLoginModule` (10.3) or `GSSAPI` Kerberos key-distribution failures (10.2).
+- **`kafka.network:type=RequestMetrics,name=RequestQueueTimeMs,request=SaslHandshake`** and **`request=SaslAuthenticate`** — tail-latency regression on either metric indicates heavy reliance on KDC (10.2) or on the unsecured JWT path followed by reauth loops (10.4).
+- **`kafka.controller:type=KafkaController,name=GlobalTopicCount`** and **`GlobalPartitionCount`** — monotonically increasing values without operator action confirm the 10.9 exploitation pattern (auto-create abuse).
+- **`kafka.controller:type=KafkaController,name=TopicsToDeleteCount`** — non-zero steady state after exploitation of 10.9 indicates the operator is in the remediation loop, not the exploit loop.
+- **`kafka.server:type=KafkaRequestHandlerPool,name=RequestHandlerAvgIdlePercent`** — saturation below 20% on a broker accepting PLAINTEXT traffic (10.1) may correlate with unauthenticated flood exploitation; the metric itself is protocol-agnostic but pairs with the PLAINTEXT connection count above.
+- **`kafka.security:type=auditlog,name=AuthorizationAttemptsPerSec`** (exposed via the authorizer's audit-log sink) — burst in DENY decisions followed by flat line in ALLOW decisions signals that 10.7's default-deny is working as intended against a hostile principal.
+- **`kafka.server:type=ReplicaManager,name=IsrShrinksPerSec`** and **`LeaderElectionRateAndTimeMs`** — co-occurrence with operator-set `unclean.leader.election.enable = true` (a regression of 10.8) is the leading indicator that the SECURE default was flipped.
+- **Controller metadata-log partition lag (`kafka.controller:type=KafkaController,name=ActiveControllerCount`, `GlobalTopicCount` growth rate)** — correlates with topic-creation abuse driven by 10.9.
+
+All of the above are already emitted by the broker with no operator-side code change; they are exposed via JMX under the existing `JmxReporter` (see sub-finding 09.3 for the default-authentication posture of JMX itself).
+
+### 8.3 Performance Trade-Offs of Current Mitigations
+
+Every mitigation in Section 9 carries an implicit performance stance. The table below makes the stance explicit.
+
+| Mitigation (Section 9) | Per-Operation Overhead | Scope | Trade-off Assessment |
+|---|---|---|---|
+| `ssl.endpoint.identification.algorithm = "https"` (companion to 10.1) | One `HostnameVerifier.verify()` call per TLS handshake (~100 µs for a typical CN/SAN match) | Per-connection | Negligible — overhead dwarfed by the TLS handshake itself |
+| `access.control.allow.origin = ""` (10.6) | Zero — the `CrossOriginHandler` is not installed when the value is empty | N/A | Strict performance improvement over a permissive CORS setting |
+| `allow.everyone.if.no.acl.found = false` (10.7) | Zero marginal — same code path as the fail-open branch, differs only in return value | Per-authorization-check | Identical performance, different security outcome |
+| `unclean.leader.election.enable = false` (10.8) | Zero at steady state; avoided leader-elections may cost AVAILABILITY during multi-replica failure | Per-leader-failure event | The SECURE default trades availability for transactional correctness |
+| `ssl.allow.dn.changes = false` / `ssl.allow.san.changes = false` (10.5) | One DN/SAN string-comparison per `alterConfigs` call targeting SSL | Per-reconfiguration (rare) | Negligible — control-plane only |
+| `PropertyFileLoginModule` Javadoc warning (10.3) | Zero — documentation-only | N/A | No runtime cost; relies on operator diligence |
+| `OAuthBearerUnsecuredValidatorCallbackHandler` Javadoc warning (10.4) | Zero — documentation-only | N/A | Same as above |
+| `BrokerJwtValidator` enforces `DISALLOW_NONE` (paired with 10.4) | 1–10 ms per SASL handshake for RSA/ECDSA signature verification vs tens of µs for unsecured parsing | Per-authentication handshake (amortised across KIP-368 reauth interval, default 1 hour) | The cost is why the unsecured handler exists; operators who choose security pay milliseconds once per hour per connection |
+
+No mitigation in the table requires a code change; all are existing code paths or documentation. The SECURE defaults (10.6, 10.7) exhibit the ideal pattern — they are strictly cheaper than or equal to the insecure variant.
+
+### 8.4 Future-State Performance Accounting
+
+Every recommendation in Section 10 is described below in terms of the performance cost a future implementer would incur if the recommendation were applied. The audit proposes NO change in this run; the accounting is forward-looking.
+
+1. **Future KIP: change `listeners` default away from PLAINTEXT (Section 10 item 1).** The performance delta for operators who currently rely on the PLAINTEXT default would be the TLS cost quantified in 8.1 for sub-finding 10.1 — one handshake per connection plus per-record AES encrypt/decrypt. For a broker terminating TLS in software (no AES-NI), this is typically 10–20% throughput reduction on hot producer paths; on AES-NI hardware the reduction is under 5%. The KIP would include a broker-side benchmark to measure the regression on representative workloads. Cost is one-time engineering effort plus a well-characterised runtime overhead.
+2. **Future KIP: deprecate `PropertyFileLoginModule` shipping in `connect-basic-auth-extension` (Section 10 item 2).** Deprecation is a documentation-only step with zero runtime impact. The companion "promote Javadoc warning to startup-time log line" suggestion adds one `LOG.warn(...)` call at `PropertyFileLoginModule.login()` — sub-microsecond, invoked at most once per login.
+3. **Future KIP: deprecate `OAuthBearerUnsecuredValidatorCallbackHandler` or gate it behind `allow.unsecured.token = true` (Section 10 item 3).** An explicit opt-in flag would add one `ConfigDef` boolean read at SASL-handshake-handler instantiation — amortised across the lifetime of the SASL server, effectively zero per-authentication cost. The deprecation-cycle removal would eliminate the class entirely with no runtime cost change.
+4. **Future KIP: change `auto.create.topics.enable` default to `false` (Section 10 item 4).** Changing the default from `true` to `false` ELIMINATES the per-first-produce/first-fetch topic-creation path documented in 8.1 for sub-finding 10.9 — a strict performance improvement for first-write latency on topics that operators intended to manage administratively. For workloads that intentionally rely on auto-creation, the default change forces an operator-visible `UNKNOWN_TOPIC_OR_PARTITION` error on first write, triggering an administrative `kafka-topics.sh` invocation; the aggregate cost is shifted from the broker's hot path to the operator's deploy tooling.
+5. **Operator runbook (Section 10 item 5).** Documentation-only; zero runtime cost.
+6. **Regression-guard documentation (Section 10 item 6).** Documentation-only; zero runtime cost.
+
+### 8.5 No-Code-Change Attestation
+
+This Performance Considerations section is written entirely from static reading of the Kafka source tree and from the documented semantics of every cited public API. No Kafka code was executed, no micro-benchmark was run, no profiler was attached, and no metrics collector was wired into a live broker for the purposes of this audit. All quantitative figures (millisecond TLS handshake costs, microsecond file-cache reads, hour-long KIP-368 reauthentication intervals, nanosecond-scale boolean checks) are order-of-magnitude estimates derived from the published behaviour of the JDK, jose4j, Jetty, and Kafka itself — not from measurements taken in this run. The audit remains a strictly static analysis consistent with the Audit Only rule: *"Avoid executing any code in the code base, this should be a static analysis."* Performance-relevant findings in this section are for future-planning purposes only; no mitigation, instrumentation, or benchmark is being added to the codebase in this PR.
+
+---
+
+## 9. Accepted Mitigations Already Present
 
 The following SECURE defaults and existing Javadoc warnings are mitigations already encoded in the codebase. They are catalogued in depth in [`../accepted-mitigations.md`](../accepted-mitigations.md); the cross-references below tie them back to the sub-finding they protect.
 
@@ -261,7 +327,7 @@ These mitigations are the reason none of the Medium/Low sub-findings above escal
 
 ---
 
-## 9. Recommended Future Remediation (No Changes in This Run)
+## 10. Recommended Future Remediation (No Changes in This Run)
 
 > The items below are future-state suggestions. The audit proposes NO code, configuration, or documentation change against the existing Kafka repository in this run. Every item requires formal engineering review — typically a Kafka Improvement Proposal (KIP) — before any action. Reviewers MUST verify the "No Changes" clause via [`../no-change-verification.md`](../no-change-verification.md) before considering any recommendation for implementation.
 
@@ -276,7 +342,7 @@ These mitigations are the reason none of the Medium/Low sub-findings above escal
 
 ---
 
-## 10. Cross-References
+## 11. Cross-References
 
 - [`../accepted-mitigations.md`](../accepted-mitigations.md) — full catalog of secure defaults, including 10.5, 10.6, 10.7, 10.8 and the `ssl.endpoint.identification.algorithm = "https"` mitigation paired with 10.1.
 - [`../remediation-roadmap.md`](../remediation-roadmap.md) — suggested hardening order across the four phases (Immediate / Short-term / Medium-term / Long-term), with every item here echoed in the roadmap's future-state Gantt chart.

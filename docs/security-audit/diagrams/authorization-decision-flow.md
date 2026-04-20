@@ -136,6 +136,21 @@ Every citation below points at `metadata/src/main/java/org/apache/kafka/metadata
 - `metadata/src/main/java/org/apache/kafka/metadata/authorizer/StandardAuthorizerData.java:L445-L470` — `findResult`, `baseKafkaPrincipal`, and `matchingPrincipals` helpers that feed the `findAclRule` node in the diagram
 - `metadata/src/main/java/org/apache/kafka/metadata/authorizer/StandardAuthorizerData.java:L463-L469` — `matchingPrincipals` body returning `Set.of(basePrincipal, WILDCARD_KAFKA_PRINCIPAL)` — the wildcard-inclusion invariant
 
+## Audit Only Rule and Performance Considerations Bridge
+
+This diagram is a visual artifact produced under the following user-supplied governing rule, reproduced verbatim with the spelling `perofrmace` preserved:
+
+> This run should serve as a dry run for potential changes, research, or documentation. DO NOT modify, create, or delete any existing code in the codebase. Avoid executing any code in the code base, this should be a static analysis. Every deliverable MUST include a markdown file summarizing security vulnerabilities, potential exploits, bugs in the codebase, perofrmace considerations, and remediation recommendations. Verify the NO CHANGES clause by confirming no changes to existing codebase featured in the git differential. Markdown files explicitly related to the analysis performed in this run are permitted.
+
+**Performance Considerations.** `StandardAuthorizer.authorize` is on the hot path of every client request reaching `KafkaApis`; its latency directly constrains broker throughput. This diagram documents the decision structure (super-user bypass → literal-pattern gate → `loadingComplete` gate → DENY scan → ALLOW scan → audit emission), not the performance characteristics of each stage. The rule-mandated `perofrmace considerations` deliverable topic is satisfied in the per-category findings under [`../findings/`](../findings/). Performance anchors relevant to this decision flow:
+
+- Authorization lookup cost — Finding 09 (`../findings/09-information-leakage.md`) Section 8 discusses the per-request cost of `AclCache` navigation and the audit-log emission overhead.
+- Copy-on-write `StandardAuthorizerData` — see [`../accepted-mitigations.md`](../accepted-mitigations.md) (M9). The `AclCache` uses `ImmutableNavigableSet`/`ImmutableMap` for lock-free reads at the cost of higher write amortization on ACL mutation. Replacing these with a mutable concurrent collection "for performance" would regress M9; any such proposal is explicitly out of scope for this audit under the Audit Only rule.
+- `AclControlManager.MAX_RECORDS_PER_USER_OP` — see [`../accepted-mitigations.md`](../accepted-mitigations.md) (M11): bounds the per-operation record volume so mutation cost is capped, preserving controller throughput under pathological admin workloads.
+- Super-user bypass ordering — Finding 10 (`../findings/10-public-api-developer-misuse.md`) Section 8 notes that evaluating `superUsers.contains(principal.toString())` before the ACL lookup keeps the hot path short for super-user sessions at the cost of strict least-privilege semantics.
+
+**Change Posture.** Consistent with the Audit Only rule, this diagram adds to `docs/security-audit/` only. No pre-existing Kafka source, test, build, documentation, or comment file is modified. The [`../no-change-verification.md`](../no-change-verification.md) artifact carries the git-diff evidence that confirms this invariant.
+
 ## Cross-References
 
 - [Category 10 — Public API developer misuse](../findings/10-public-api-developer-misuse.md) — default-allow versus default-deny configuration posture, including `allow.everyone.if.no.acl.found` and super-user semantics

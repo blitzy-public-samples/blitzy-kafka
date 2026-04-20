@@ -26,6 +26,25 @@ makes NO modifications to the dependency manifest, no upgrades, and no pinning c
 For security-relevant posture of each dependency and findings cross-reference, see the table in
 section 3. Findings that reference a dependency are cross-linked in the rightmost column.
 
+## Audit Only Rule (verbatim, user-supplied)
+
+> "This run should serve as a dry run for potential changes, research, or documentation. DO
+> NOT modify, create, or delete any existing code in the codebase. Avoid executing any code in
+> the code base, this should be a static analysis. Every deliverable MUST include a markdown
+> file summarizing security vulnerabilities, potential exploits, bugs in the codebase,
+> perofrmace considerations, and remediation recommendations. Verify the NO CHANGES clause by
+> confirming no changes to existing codebase featured in the git differential. Markdown files
+> explicitly related to the analysis performed in this run are permitted."
+
+The spelling `perofrmace` above is preserved **verbatim** from the user-supplied rule and
+must not be corrected anywhere in the audit tree. This inventory contributes to the
+`perofrmace considerations` clause in two ways: (a) by flagging every native-library
+dependency (lz4-java, snappy-java, zstd-jni, rocksdbjni) whose JNI hot-path performance
+characteristics are catalogued in the per-category findings under
+`## 8. Performance Considerations`, and (b) by documenting in section 6 the already-configured
+supply-chain tooling that runs outside the Kafka broker hot path and therefore imposes no
+runtime performance cost.
+
 ---
 
 ## Table of Contents
@@ -653,11 +672,17 @@ in the inventory table matches the manifest. Each item is a read-only reviewer s
 ## 9. Closing Note
 
 For per-category deep-dives into how each of these dependencies surfaces in Kafka's attack
-surface, consult the ten findings files under `./findings/`. For the existing positive-security
-controls that mitigate dependency-level risk, consult `./accepted-mitigations.md`.
+surface, consult the ten findings files under `./findings/`. Each findings file now carries
+an 11-section template whose `## 8. Performance Considerations` section discusses the
+hot-path cost profile of the cited dependency on the specific Kafka code path in question
+(for example, decompression throughput for zstd-jni in finding 02, JWT-parse latency for
+jose4j in finding 08, Jetty GzipHandler hot-path in finding 06). For the existing
+positive-security controls that mitigate dependency-level risk, consult
+`./accepted-mitigations.md`.
 
 For confirmation that producing this inventory introduced zero modifications to
 `gradle/dependencies.gradle`, `LICENSE-binary`, `NOTICE-binary`, or any other pre-existing
-file in the Kafka repository, consult `./no-change-verification.md`.
+file in the Kafka repository, consult `./no-change-verification.md`. That confirmation is
+the procedural satisfaction of the Audit Only rule quoted at the top of this document.
 
 

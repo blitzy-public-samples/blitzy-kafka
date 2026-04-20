@@ -168,7 +168,50 @@ Business impact is reported per sub-finding rather than as a single category-wid
 3. **Startup-time stall from `EnvVarConfigProvider` (05.4).** A pathological operator-supplied `allowlist.pattern` stalls the broker during the `configure(Map)` call path, which runs synchronously during initialization. The failure mode is fail-fast — the broker does not become available to clients during the stall — which is preferable to silent runtime degradation. Business impact is deployment-time, recoverable by configuration correction.
 4. **Fixed-pattern sites (05.3) and wire-format parsers (05.5).** No material business impact. These patterns are inventoried for completeness and to demonstrate that Kafka's regex surface outside of the three user-influenceable sites is bounded by design. The finding's presence here serves as documentation that future `Pattern.compile` additions should receive the same architectural review.
 
-## 8. Accepted Mitigations Already Present
+## 8. Performance Considerations
+
+This section satisfies the Audit Only rule's requirement that every deliverable summarize "perofrmace considerations" (verbatim typo preserved from the governing rule reproduced at `../README.md` section 3.1). Category 05 is the category most intrinsically about CPU-time behaviour: a ReDoS event **is** a pathological performance event. The observations below decompose the ten `Pattern.compile` sites enumerated in Section 4 and the `SafeObjectInputStream` graph-walk surface in Section 4.6 into hot-path and cold-path contributions. No benchmark, micro-benchmark, or regex-profiling run was executed against Kafka code during this audit.
+
+### 8.1 Hot-Path Signals per Sub-Finding
+
+- **05.1 Kerberos auth-to-local rule parsing.** The compiled `KerberosRule` patterns are evaluated against every Kerberos principal at authentication time (`KerberosShortNamer.shortName` invocation). Under steady-state operation this is per-SASL-handshake (a cold connection path) but becomes a **hot path** whenever the broker experiences reconnection storms — for example, after a controller failover when all clients re-authenticate simultaneously. The four `KerberosRule` `Pattern.compile` sites at `KerberosRule.java:L33,L38,L70,L72` are compiled once at `configure` time (cold path), but the compiled patterns are then applied per-principal (potentially hot-burst path).
+- **05.2 `JmxReporter` include/exclude regex.** The INCLUDE and EXCLUDE regexes at `JmxReporter.java:L308-L309` are evaluated every time a metric is registered, removed, or queried via the JMX interface. Under steady-state operation, metric registration is low-frequency; the hot-path is metric *query*, which is dominated by the JMX thread handling external requests rather than the broker request-handler thread pool. A pathological pattern stalls the JMX thread only.
+- **05.3 `ConfigDef`, `ConfigTransformer`, Streams `OffsetCheckpoint` fixed patterns.** All patterns in this sub-finding are compiled from fixed Kafka-owned string literals (`ConfigDef.COMMA_WITH_WHITESPACE`, `ConfigTransformer.DEFAULT_PATTERN`, `OffsetCheckpoint.WHITESPACE_MINIMUM_ONCE`) against bounded-length inputs. Each `Pattern.matcher(...)` call is O(input length) and not attacker-tunable. The Streams `OffsetCheckpoint` pattern parses a checkpoint file whose line count is bounded by the topic partition count — a bounded, operator-configured dimension.
+- **05.4 `EnvVarConfigProvider` allowlist pattern.** The compiled allowlist at `EnvVarConfigProvider.java:L61-L63` is evaluated per env-var-name lookup during `configure(Map)`. The `allowlist.pattern` is operator-supplied; a pathological pattern stalls `configure` and the broker fails to start — failure is loud and cold-path.
+- **05.5 Wire-format parsers.** The patterns in `ServerConnectionId.java`, `ApiVersionsRequest.java`, and `OAuthBearerClientInitialResponse.java` are evaluated per inbound request against protocol-length-capped strings. The per-match cost is bounded by the `COMPACT_STRING` or `NULLABLE_STRING` length cap documented in the wire protocol. Hot-path matching, but bounded by structural constraints.
+- **Graph-walk (`SafeObjectInputStream`).** The blocklist check at `SafeObjectInputStream.java:L27-L37` is a suffix-match against nine fixed strings per class encountered in the deserialization graph. Graph depth is bounded by the JVM stack, not by the blocklist. Hot-path for the per-class `resolveClass` invocation but O(9) per class.
+
+### 8.2 Observable Metrics Indicating Exploitation
+
+- **`kafka.server:type=KafkaRequestHandlerPool,name=RequestHandlerAvgIdlePercent`.** Any broker-side ReDoS event — whether in the Kerberos auth path (05.1) or the OAUTHBEARER initial-response parser (05.5) — drops the request-handler idle percentage because the handler threads are blocked on regex backtracking. This is the primary coarse signal for a live ReDoS event on the broker.
+- **Authentication-failure rate and SASL handshake latency distribution.** A pathological Kerberos rule produces elevated per-principal match times; the broker's SASL handshake duration (measured via `kafka.server:type=Request,name=RequestSendTimeMs,request=SaslHandshake` or via the `AuthenticatorStats` sensor) widens. Operators who retain the per-mechanism split in their observability pipeline can correlate elevated GSSAPI-mechanism handshake times with a newly deployed `sasl.kerberos.principal.to.local.rules` value.
+- **JMX scrape latency.** If a pathological `metrics.jmx.include` or `metrics.jmx.exclude` pattern is deployed, the JMX scrape endpoint's response time (measured externally by the monitoring client) climbs. This does not affect the broker's own request-handling latency; the JMX thread is distinct from the request-handler pool.
+- **Startup-time stall.** A pathological `allowlist.pattern` for `EnvVarConfigProvider` shows up as broker-startup stall — `BrokerState` transitions are delayed. This is a fail-fast signal; the broker does not become `RUNNING` until `configure` completes.
+- **Process CPU.** The operating-system-level `ProcessCpuLoad` (exported via `java.lang:type=OperatingSystem`) rises under any sustained regex-backtracking event and is the single most reliable broad-stroke indicator of a ReDoS condition on either the broker network threads or the JMX thread.
+
+### 8.3 Performance Trade-Offs of Current Mitigations
+
+- **Fail-fast-at-`configure`-time compile.** Both `KerberosRule.java:L70,L72` and `EnvVarConfigProvider.java:L61-L63` compile the operator-supplied regex at `configure` time rather than per-request. Trade-off: startup-time stalls become visible (preferable to silent runtime degradation), at the cost of requiring the broker to actually *start* to learn that the regex is pathological. This is a heavy bias toward observability and safety.
+- **Allow-list-over-blocklist default for `EnvVarConfigProvider`.** The default `.*` pattern admits all environment variables — the operator-supplied narrowing happens by substitution, not addition. Trade-off: the default is permissive (all env vars readable) in exchange for zero per-lookup regex cost under the default. An operator who narrows the pattern accepts a per-lookup regex-match cost in exchange for tightened scope. This is the operator's explicit choice at the cost of per-lookup overhead.
+- **Wire-format length caps.** The `COMPACT_STRING` and `NULLABLE_STRING` caps in the Kafka protocol impose structural length limits *before* any regex reaches the input. Trade-off: a small, constant framing overhead per field is accepted in exchange for guaranteed-bounded regex input length. This is a high-leverage architectural mitigation; the length-cap cost is negligible relative to the protection it affords.
+- **JMX filter on non-request thread.** The JMX-thread isolation at `JmxReporter` means a pathological include/exclude pattern stalls observability but not the data plane. Trade-off: observability loss is accepted in exchange for broker availability preservation. This is a well-structured isolation boundary.
+- **`SafeObjectInputStream` nine-entry blocklist.** Suffix-matching nine fixed strings per class encountered in the deserialization graph is O(9) per class. Trade-off: the blocklist is not exhaustive (other gadget chains may exist), but the per-class cost is constant. See [Finding 08.3](./08-deserialization-attacks.md) for the blocklist-versus-allow-list architectural discussion.
+
+### 8.4 Future-State Performance Accounting
+
+Any future remediation from Section 10 would impose the following performance cost:
+
+1. **Narrow `KerberosRule` regex surface (Section 10, item 1).** A ReDoS linter applied at `configure` time is a one-time per-startup cost; the lint itself is cheap. If the roadmap's alternative — migrating the rule parser to a purpose-built grammar — is chosen, the runtime cost is *reduced* relative to the current regex match cost, because grammar-directed parsing is O(n) by construction.
+2. **Process-wide ReDoS-resistant regex facility (Section 10, item 2).** A `Utils.compileWithBudget(String, Duration)` helper that imposes a deterministic per-match budget adds a bounded per-match overhead — a wall-clock check every N steps of the matcher. The overhead is typically single-digit percentage of the current match cost, traded against deterministic termination. Applied to all ten `Pattern.compile` sites, this is a broad cross-module change.
+3. **Kerberos runbook (Section 10, item 3).** Documentation-only; zero runtime cost.
+4. **`SafeObjectInputStream` allow-list migration (Section 10, item 4).** Primary owner is Finding 08.3; Section 8.3 there analyses the performance impact. Briefly: allow-list match cost is O(log N) (expected positive-match rate high) rather than the current O(9) for the blocklist, but the security posture tightens substantially.
+5. **`JmxReporter` runbook (Section 10, item 5).** Documentation-only; zero runtime cost.
+
+### 8.5 No-Code-Change Attestation
+
+This section characterises the CPU-time behaviour of the existing regex and graph-walk paths documented in Sections 4 and 9. No code change is proposed by this audit and none of the future-state items above is applied in this run. All performance observations are derived by reading the cited source files at the snapshot listed in [`../no-change-verification.md`](../no-change-verification.md); no `Pattern.compile` benchmark, no matcher profiler run, and no load test was performed against the Kafka codebase during this audit, consistent with the Audit Only rule's directive to "Avoid executing any code in the code base."
+
+## 9. Accepted Mitigations Already Present
 
 The following protective properties already exist in the tracked source and are relied on by this finding's severity assignments. Each is recorded in [`../accepted-mitigations.md`](../accepted-mitigations.md) and must not be regressed by future changes outside the scope of this audit.
 
@@ -178,7 +221,7 @@ The following protective properties already exist in the tracked source and are 
 - **JMX filter predicate evaluated on a non-request thread (05.2).** The `JmxReporter` thread is distinct from the broker network threads and request-handler thread pool. A pathological predicate stalls observability, not the data plane.
 - **`SafeObjectInputStream` nine-entry suffix blocklist (Section 4.6).** The Connect runtime's `SafeObjectInputStream.java:L27-L37` pre-screens known Java-deserialization gadget classes by class-name suffix. [`../accepted-mitigations.md`](../accepted-mitigations.md) catalogues this as the primary defence for the Connect deserialization recursion surface discussed in [Finding 08.3](./08-deserialization-attacks.md).
 
-## 9. Recommended Future Remediation (No Changes in This Run)
+## 10. Recommended Future Remediation (No Changes in This Run)
 
 The items below are forward-looking guidance for subsequent KIP proposals, operator runbook updates, or code-review exercises. No code change is applied in this audit run per the Audit Only rule; every item here cross-references the entry in [`../remediation-roadmap.md`](../remediation-roadmap.md) that records it in a prioritised form.
 
@@ -190,7 +233,7 @@ The items below are forward-looking guidance for subsequent KIP proposals, opera
 
 **Closing.** No code changes are applied in this audit run per the Audit Only rule. Every recommendation above is a forward-looking guidance item for the Kafka community to evaluate in subsequent KIP proposals, operator runbook updates, or code-review exercises.
 
-## 10. Cross-References
+## 11. Cross-References
 
 - **Navigation root:** [`../README.md`](../README.md) — audit overview, severity tier definitions (Section 2.3), and navigation to every audit artifact.
 - **Severity matrix:** [`../severity-matrix.md`](../severity-matrix.md) — Section 3.5 "Category 05 — Infinite Loop and Recursion DoS" enumerates rows `05.1` through `05.5` with the same severity assignments used in this document (one Medium, four Low).
@@ -212,7 +255,7 @@ The following checklist items are provided so that a future auditor or reviewer 
 - [ ] Additional pattern sites documented in Section 4.3, 4.4, and 4.5 (`EnvVarConfigProvider`, `ServerConnectionId`, `ApiVersionsRequest`, `OAuthBearerClientInitialResponse`) are still present and unchanged.
 - [ ] `SafeObjectInputStream` at `connect/runtime/src/main/java/org/apache/kafka/connect/runtime/isolation/util/` still uses a suffix-matching blocklist of nine entries as documented in Section 4.6 (cross-referenced to sub-finding 08.3).
 - [ ] Severity assignments in Section 6 agree with the per-row entries for Category 05 in [`../severity-matrix.md`](../severity-matrix.md) Section 3.5 (one Medium, four Low).
-- [ ] The two remediation roadmap entries tagged `[05.1]` (Section 3.3.3) and `[05.*]` (Section 3.4.3) in [`../remediation-roadmap.md`](../remediation-roadmap.md) are the authoritative records for the recommendations in Section 9 above.
+- [ ] The two remediation roadmap entries tagged `[05.1]` (Section 3.3.3) and `[05.*]` (Section 3.4.3) in [`../remediation-roadmap.md`](../remediation-roadmap.md) are the authoritative records for the recommendations in Section 10 above.
 - [ ] The `EnvVarConfigProvider.allowlist.pattern` accepted-mitigation entry #5 in [`../accepted-mitigations.md`](../accepted-mitigations.md) is still present and cross-references the allow-list-over-blocklist property.
 - [ ] The [`../diagrams/attack-surface-map.md`](../diagrams/attack-surface-map.md) Category 05 row intersects the modules enumerated in Section 3 (Clients security/kerberos, metrics, config, network, requests; Streams OffsetCheckpoint; Connect util/SafeObjectInputStream).
 - [ ] The H1 title of this finding ("DoS") aligns with the Category label body text in Section 1 and with the AAP-verbatim category name.

@@ -172,19 +172,25 @@ against.
 ### 2.2 Finding Structure
 
 Every per-category findings document (`./findings/NN-<category-slug>.md`) follows the same
-fixed-order template so a reviewer can skim any finding with a consistent mental model:
+fixed-order template so a reviewer can skim any finding with a consistent mental model. The
+template is an 11-section layout (numbered sections plus an unnumbered Validation Checklist
+and Key Insights appendix):
 
 | Section | Purpose |
 | ------- | ------- |
-| Category | The canonical user-specified category label (preserved verbatim). |
-| Definition | What the category means and what threat class it covers. |
-| Kafka Surface Inventory | The Kafka subsystems, classes, and configs that expose this surface. |
-| Evidence | File paths and line ranges backing each claim. |
-| Attack Vector | The step-by-step path an adversary would use to exploit a surface. |
-| Severity | Risk classification: Critical / High / Medium / Low. |
-| Business Impact | Operational consequence if the surface is exploited. |
-| Accepted Mitigations Already Present | Existing positive-security controls that lower the observed risk. |
-| Recommended Future Remediation (no changes in this run) | Guidance for a future engagement; NO code is changed here. |
+| 1. Category | The canonical user-specified category label (preserved verbatim). |
+| 2. Definition | What the category means and what threat class it covers. |
+| 3. Kafka Surface Inventory | The Kafka subsystems, classes, and configs that expose this surface. |
+| 4. Evidence | File paths and line ranges backing each claim. |
+| 5. Attack Vector | The step-by-step path an adversary would use to exploit a surface. |
+| 6. Severity | Risk classification: Critical / High / Medium / Low. |
+| 7. Business Impact | Operational consequence if the surface is exploited. |
+| 8. Performance Considerations | Hot-path signals, observable metrics, performance trade-offs of current mitigations, and future-state performance accounting — all derived from static reading, never from measurement. This section satisfies the Audit Only rule's explicit requirement that every deliverable summarize "perofrmace considerations" (sic, verbatim from the user-supplied rule in [Section 3.1](#31-audit-only)). |
+| 9. Accepted Mitigations Already Present | Existing positive-security controls that lower the observed risk. |
+| 10. Recommended Future Remediation (no changes in this run) | Guidance for a future engagement; NO code is changed here. |
+| 11. Cross-References | Links to severity matrix, remediation roadmap, accepted mitigations, relevant diagrams, and companion findings. |
+| *Validation Checklist (unnumbered)* | Read-only `git`/`grep` checks a future auditor can run to re-verify the finding against a later Kafka snapshot. |
+| *Key Insights (unnumbered)* | Plain-language takeaways for operator consumption, paired with the finding above. |
 
 ### 2.3 Severity Tiers
 
@@ -291,17 +297,23 @@ Each diagram includes a descriptive title and a legend.
 
 Every document under [`./findings/`](./findings/) uses the following identical section
 layout. A reviewer who internalizes this structure once can navigate any finding in seconds.
+The layout is 11 numbered sections plus two unnumbered appendices (Validation Checklist and
+Key Insights).
 
 ```
-## Category
-## Definition
-## Kafka Surface Inventory
-## Evidence
-## Attack Vector
-## Severity
-## Business Impact
-## Accepted Mitigations Already Present
-## Recommended Future Remediation (no changes in this run)
+## 1. Category
+## 2. Definition
+## 3. Kafka Surface Inventory
+## 4. Evidence
+## 5. Attack Vector
+## 6. Severity
+## 7. Business Impact
+## 8. Performance Considerations
+## 9. Accepted Mitigations Already Present
+## 10. Recommended Future Remediation (no changes in this run)
+## 11. Cross-References
+## Validation Checklist       (unnumbered)
+## Key Insights                (unnumbered)
 ```
 
 Meaning of each section:
@@ -326,12 +338,30 @@ Meaning of each section:
 - **Business Impact** - What the organization would observe if the surface were exploited:
   data-confidentiality loss, operational outage, regulatory exposure, reputational harm, or
   supply-chain compromise. Written for cross-functional readers.
+- **Performance Considerations** - Hot-path signals per sub-finding, JMX metrics that already
+  exist in Kafka 4.2.0-SNAPSHOT and would indicate exploitation if observed, the performance
+  trade-offs of each existing mitigation, and forward-looking performance accounting for every
+  future-state recommendation. This section is required by the updated Audit Only rule in
+  [Section 3.1](#31-audit-only), which mandates that every deliverable summarize "perofrmace
+  considerations" (verbatim typo from the rule text). All characterisations are derived from
+  static reading of source files and from the documented semantics of cited public APIs; no
+  benchmarks, micro-benchmarks, or profilers were run against Kafka code during this audit.
 - **Accepted Mitigations Already Present** - The specific positive-security controls that
   lower the severity of the finding, with a back-link to the relevant row in
   [`./accepted-mitigations.md`](./accepted-mitigations.md).
 - **Recommended Future Remediation (no changes in this run)** - Guidance a future engagement
   could adopt. Explicitly labeled as "no changes applied here" so the reader never confuses
   a recommendation with an applied fix.
+- **Cross-References** - Pointers to the severity matrix, remediation roadmap, accepted
+  mitigations catalog, relevant Mermaid diagrams, and companion findings that share a surface
+  or an exploit chain.
+- **Validation Checklist (unnumbered)** - A list of read-only `git`/`grep`/file-inspection
+  checks that a future auditor can run to re-verify the finding against a later Kafka
+  snapshot. No code execution is ever required by the checklist, honoring the Audit Only
+  rule for both the original audit and any re-verification pass.
+- **Key Insights (unnumbered)** - Plain-language takeaways for operator consumption,
+  summarising the dominant attack vector, the strongest existing mitigations, and the
+  primary residual risks. Intended to be read alongside (not in place of) the full finding.
 
 ---
 

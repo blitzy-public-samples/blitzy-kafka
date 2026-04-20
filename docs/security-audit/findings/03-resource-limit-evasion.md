@@ -37,8 +37,8 @@ Three sub-findings enumerate the resource-limit evasion surfaces. Each row cross
 
 | Sub-finding | Surface                                                                                                       | Primary Source Locator                                                                                                                        | Severity   | Accepted Mitigation            |
 | ----------- | ------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- | ---------- | ------------------------------ |
-| 03.1        | REPLICATION (inter-broker) listener exempted from broker-wide connection cap via `protectedListener(...)`     | `core/src/main/scala/kafka/network/SocketServer.scala:L1285,L1486-L1487`                                                                      | `[Medium]` | M3 (see Section 8)             |
-| 03.2        | `ClientRequestQuotaManager` sliding-window + `maxThrottleTimeMs` ceiling permits short-term request spikes    | `core/src/main/java/kafka/server/ClientRequestQuotaManager.java:L39,L46,L52-L63`                                                              | `[Low]`    | M-quota (see Section 8)        |
+| 03.1        | REPLICATION (inter-broker) listener exempted from broker-wide connection cap via `protectedListener(...)`     | `core/src/main/scala/kafka/network/SocketServer.scala:L1285,L1486-L1487`                                                                      | `[Medium]` | M3 (see Section 9)             |
+| 03.2        | `ClientRequestQuotaManager` sliding-window + `maxThrottleTimeMs` ceiling permits short-term request spikes    | `core/src/main/java/kafka/server/ClientRequestQuotaManager.java:L39,L46,L52-L63`                                                              | `[Low]`    | M-quota (see Section 9)        |
 | 03.3        | Per-IP connection caps collapse against shared-source-IP topologies (load-balancer / NAT / service mesh)      | `core/src/main/scala/kafka/network/SocketServer.scala:L1287-L1288,L1299`; defaults at `server/src/main/java/org/apache/kafka/network/SocketServerConfigs.java:L110-L111,L115-L116,L126-L127` | `[Medium]` | Operator-topology mitigation   |
 
 A fourth surface — `SimpleMemoryPool` non-strict allocation mode — is documented here as a **brief cross-reference** to Finding 02 (Low-level Code Safety) Section 02.5 rather than as a new sub-finding in Category 03, because its primary characterisation sits on the JVM-JNI boundary rather than the quota-evasion boundary. The pointer is preserved at Section 4.4 below so that a reviewer following this finding can navigate directly to the underlying buffer-allocation-mode evidence without losing the resource-exhaustion context.
@@ -188,7 +188,51 @@ The operator-facing impact of each sub-finding is summarised below. Every paragr
 
 6. **(Reputational / compliance impact.)** A multi-tenant hosted-Kafka offering whose SLO is a per-tenant connection cap or per-tenant request-rate cap, and whose enforcement implementation relies on the platform defaults described above, cannot meet a contractual per-tenant guarantee in the presence of a shared-source-IP intermediary (03.3) or a just-under-threshold-pacing adversary (03.2). Platform operators advertising per-tenant limits should treat this as an architectural concern at procurement time rather than a code-level remediation item.
 
-## 8. Accepted Mitigations Already Present
+## 8. Performance Considerations
+
+This section satisfies the Audit Only rule's requirement that every deliverable summarize "perofrmace considerations" (verbatim typo preserved from the governing rule at `../README.md` section 3.1). Category 03 is inherently about resource-limit semantics, so performance and security intersect tightly — the mitigations in Section 9 *are* performance-governing mechanisms that also happen to be security controls. The observations below are static observations from reading the cited code; no benchmark, load test, or quota-saturation experiment was executed against Kafka code in this audit.
+
+### 8.1 Hot-Path Signals per Sub-Finding
+
+- **03.1 REPLICATION-listener exemption.** Inter-broker replication runs on every fetch / replica-fetch / metadata exchange. The exemption at `SocketServer.scala:L1486-L1487` is a hot-path branch that tests `isProtected(listenerName)` on every new connection; the branch predictor amortises this to effectively zero cost. The *performance-relevant* property is that when the broker-wide cap is reached, the REPLICATION listener continues to accept new connections unaffected — meaning the inter-broker fetch latency does not spike even under client-listener saturation. The trade-off is that broker-wide file-descriptor exhaustion is possible despite the cap.
+- **03.2 `ClientRequestQuotaManager` sliding window.** The sliding-window machinery at `ClientRequestQuotaManager.java:L39,L46,L52-L63` computes the client's request-time consumption over the `quota.window.size.seconds` × `num.quota.samples` window on every throttle evaluation. The evaluation is O(num.quota.samples) in the worst case and is invoked in the request-complete path of every client request, so the steady-state cost is proportional to `num.quota.samples` × inbound-request rate. Default `num.quota.samples = 11` keeps this cost negligible; operators who raise the sample count for finer-grained quota measurement trade a slightly higher per-request cost for tighter enforcement.
+- **03.3 Per-IP connection cap.** Per-IP enforcement is a concurrent hash-map lookup on every new connection at `ConnectionQuotas.scala`'s per-IP counter. The steady-state cost is dominated by the concurrent-hash-map write on increment and decrement; in a multi-tenant scenario behind a shared ingress, the single per-IP bucket sees very high contention, which can become a measurable bottleneck on acceptor threads. The mitigation for this contention is *not* a code change but an operator-configured per-IP override for the known-shared intermediary IP, which routes that tenant to a per-override bucket with its own contention domain.
+
+### 8.2 Observable Metrics Indicating Exploitation
+
+- **Connection-count breakdown per listener.** `kafka.network:type=ConnectionQuotas,name=ConnectionCount,listener=*` exposes per-listener connection counts. Operators relying on broker-wide `ConnectionCount` alone miss REPLICATION-listener pressure (sub-finding 03.1); the per-listener breakdown is the forensic-attribution surface for identifying where connection pressure originates.
+- **Request-handler idle percent.** `kafka.server:type=KafkaRequestHandlerPool,name=RequestHandlerAvgIdlePercent` — the key metric for sub-finding 03.2. A sustained downward trend without a matching rise in `kafka.network:type=RequestMetrics,name=ThrottleTimeMs,request=*` indicates sliding-window evasion: the broker is busy but the quota machinery is not classifying any client as over-budget.
+- **Exempt-request throughput.** The `EXEMPT_SENSOR_NAME` at `ClientRequestQuotaManager.java:L44` routes broker-internal request-time consumption to a distinct `exempt-Request` sensor. Operators can monitor broker-internal vs client-attributable request-handler pressure independently — a positive-security visibility property that helps distinguish internal control-plane work from client-induced load.
+- **Throttle response distribution.** `kafka.network:type=RequestMetrics,name=ThrottleTimeMs,request=Produce|Fetch` — the `boundedThrottleTime` mitigation at `ClientRequestQuotaManager.java:L100-L102` bounds individual throttle responses to `maxThrottleTimeMs`. A histogram that consistently hits the ceiling indicates sustained over-quota clients; a histogram that never hits the ceiling but shows long-latency request tails is the signature of sliding-window evasion.
+- **Sensor-map heap footprint.** `java.lang:type=Memory,name=HeapMemoryUsage` correlated with `kafka.server:type=ClientQuotaManager,name=sensor-map-size` (or a similar memory-pressure signal) can detect an adversary who opens many short-lived clients to inflate the sensor map. The `INACTIVE_SENSOR_EXPIRATION_TIME_SECONDS = 3600` bound at `ClientQuotaManager.java:L63` ensures this is not a persistent OOM vector.
+
+### 8.3 Performance Trade-Offs of Current Mitigations
+
+- **`closeExcessConnections` reaping (`SocketServer.scala:L1122-L1128`).** The lowest-priority-channel reaping strategy shifts broker-wide excess pressure onto client-facing listeners promptly. The trade-off is that the reaping decision is amortised across all channels rather than targeted at the most expensive channel — a broker under sustained connection pressure may reap an idle low-throughput client while a high-throughput misbehaving client continues operating. This is a correct engineering choice: targeted reaping would require per-channel metering, which has its own performance cost.
+- **Connection-creation-rate sensor (`SocketServer.scala:L1301`).** Rate limiting at the arrival edge is cheaper than concurrency capping because it can be implemented as a token-bucket against a monotonic clock. The trade-off is that rate limiting does not bound steady-state concurrency — a client that opens connections slowly but never closes them can still accumulate arbitrarily many. The two mechanisms (rate cap + count cap) are complementary.
+- **Three-tier quota model (`SocketServer.scala:L1287-L1296`).** Each additional tier adds one concurrent-counter check per new connection. Three tiers × two operations (accept + close) = six atomic counter operations per connection life cycle. This is negligible on modern JVMs but multiplies if a future KIP adds a fourth tier (e.g., per-tenant caps).
+- **Bounded throttle response (`ClientRequestQuotaManager.java:L100-L102`).** Bounding the throttle at `maxThrottleTimeMs` prevents an adversarially-crafted over-quota burst from eliciting a multi-minute throttle response that would itself be weaponisable. The trade-off is that under sustained over-quota conditions, the effective throttle rate is lower than the quota violation would otherwise demand — but this is precisely the intended behaviour.
+- **Sensor-map GC at one-hour expiry (`ClientQuotaManager.java:L63`).** The one-hour `INACTIVE_SENSOR_EXPIRATION_TIME_SECONDS` balances heap footprint (sensors cost a small but non-zero amount of heap per client) against diagnostic utility (operators often want to inspect a client's quota history for more than a minute after the last interaction). Making this shorter would reduce heap cost; making it longer would improve diagnostic continuity.
+- **`SimpleMemoryPool` non-strict mode.** See Finding 02.5 for the performance-trade-off discussion; the same property applies here because Finding 03 references the pool as a resource-limit surface.
+
+### 8.4 Future-State Performance Accounting
+
+Any future remediation from Section 10 would impose the following performance cost:
+
+- **Item 10.1 (network-level isolation runbook).** Zero in-process cost; operational-topology recommendation.
+- **Item 10.2 (documentation update).** Zero in-process cost.
+- **Item 10.3 (per-listener connection dashboards).** Observability cost only — reading already-exposed JMX metrics.
+- **Item 10.4 (per-listener REPLICATION cap).** Would add one concurrent-counter check per REPLICATION-listener connection. Negligible.
+- **Item 10.5 (shorten `INACTIVE_SENSOR_EXPIRATION_TIME_SECONDS`).** Would reduce steady-state heap cost of sensor map; trade-off is shorter diagnostic history. Requires a future KIP; no action in this run.
+- **Item 10.6 (per-tenant quota via ingress-header propagation).** Would require a header-parse step on every client request plus a tenant-scoped sensor lookup, replacing the `source-IP` lookup with a `tenant-id` lookup. The asymptotic performance is equivalent; the absolute cost depends on header-parse implementation choice.
+
+### 8.5 No-Code-Change Attestation
+
+This section is descriptive, not prescriptive. Consistent with the Audit Only rule — *"Avoid executing any code in the code base, this should be a static analysis."* — no load test, quota-saturation experiment, or benchmark was executed. All performance observations derive from static reading of the cited code and the Kafka JMX metric catalogue.
+
+---
+
+## 9. Accepted Mitigations Already Present
 
 The following protective properties already exist in the tracked source and are relied on by this finding's severity assignments. Each is recorded in [`../accepted-mitigations.md`](../accepted-mitigations.md) and must not be regressed by future changes outside the scope of this audit.
 
@@ -206,7 +250,7 @@ The following protective properties already exist in the tracked source and are 
 
 The protections above are the basis for the severity ratings assigned in Section 6. Future changes that modify the code sites listed must be reviewed against this finding to ensure the protections they encode are not inadvertently regressed.
 
-## 9. Recommended Future Remediation (No Changes in This Run)
+## 10. Recommended Future Remediation (No Changes in This Run)
 
 The items below are forward-looking guidance for subsequent KIP proposals, operator runbook updates, or code-review exercises. No code change is applied in this audit run per the Audit Only rule; every item here cross-references the entry in [`../remediation-roadmap.md`](../remediation-roadmap.md) that records it in a prioritised form.
 
@@ -221,7 +265,7 @@ The items below are forward-looking guidance for subsequent KIP proposals, opera
 
 **Closing.** No code changes are applied in this audit run per the Audit Only rule. Every recommendation above is a forward-looking guidance item for the Kafka community to evaluate in subsequent KIP proposals, operator runbook updates, or code-review exercises.
 
-## 10. Cross-References
+## 11. Cross-References
 
 - **Navigation root:** [`../README.md`](../README.md)
 - **Severity matrix:** [`../severity-matrix.md`](../severity-matrix.md) (see Section 3.3 for Category 03 rows)
@@ -245,7 +289,7 @@ The following checklist items are provided so that a future auditor or reviewer 
 - [ ] `SimpleMemoryPool` at `clients/src/main/java/org/apache/kafka/common/memory/SimpleMemoryPool.java` still exposes both strict and non-strict allocation modes as documented in sub-finding 03.4 (shared with Category 02 Section 02.5).
 - [ ] Severity assignments in Section 6 agree with the per-row entries for Category 03 in [`../severity-matrix.md`](../severity-matrix.md) at Section 3.3.
 - [ ] The accepted mitigation cross-reference ("entry 7 — REPLICATION listener exemption") exists in [`../accepted-mitigations.md`](../accepted-mitigations.md) and its `M3 ↔ C3` association is depicted in the Mermaid diagram therein.
-- [ ] The remediation roadmap entry tagged `[03.1]` at Section 3.1.6 of [`../remediation-roadmap.md`](../remediation-roadmap.md) covers the network-layer-constraint recommendation from Section 9 above.
+- [ ] The remediation roadmap entry tagged `[03.1]` at Section 3.1.6 of [`../remediation-roadmap.md`](../remediation-roadmap.md) covers the network-layer-constraint recommendation from Section 10 above.
 - [ ] The per-listener connection-count gauge `kafka.network:type=ConnectionQuotas,name=ConnectionCount,listener=*` documented in recommendation 3 is still emitted by the current broker runtime (confirmed via `grep -rn "ConnectionCount" core/src/main/scala/kafka/network/`).
 - [ ] The no-change verification in [`../no-change-verification.md`](../no-change-verification.md) still shows zero modifications to any Kafka source, test, or build file relative to the pre-audit baseline.
 

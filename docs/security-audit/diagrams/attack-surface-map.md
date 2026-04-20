@@ -251,6 +251,27 @@ The citations below are the code anchors for each category edge in the primary d
 - `connect/basic-auth-extension/src/main/java/org/apache/kafka/connect/rest/basic/auth/extension/PropertyFileLoginModule.java` (production-unsuitable default)
 - `core/src/main/scala/kafka/server/KafkaConfig.scala` (`unclean.leader.election.enable = false`; secure default)
 
+## Audit Only Rule and Performance Considerations Bridge
+
+This diagram is a visual artifact produced under the following user-supplied governing rule, reproduced verbatim with the spelling `perofrmace` preserved:
+
+> This run should serve as a dry run for potential changes, research, or documentation. DO NOT modify, create, or delete any existing code in the codebase. Avoid executing any code in the code base, this should be a static analysis. Every deliverable MUST include a markdown file summarizing security vulnerabilities, potential exploits, bugs in the codebase, perofrmace considerations, and remediation recommendations. Verify the NO CHANGES clause by confirming no changes to existing codebase featured in the git differential. Markdown files explicitly related to the analysis performed in this run are permitted.
+
+**Performance Considerations.** This diagram is a ten-category × module matrix that identifies WHERE each attack surface lives; it does not propose redesign and does not add runtime cost. The rule-mandated `perofrmace considerations` deliverable topic is satisfied at the per-finding layer, where each of the ten per-category files under [`../findings/`](../findings/) carries a dedicated `## 8. Performance Considerations` section. Each row of this surface matrix has a direct counterpart in that per-finding Section 8:
+
+- Category 01 (filesystem) Section 8 — `FileConfigProvider` and `DirectoryConfigProvider` cold-load latency and path-resolution cost.
+- Category 02 (low-level code safety) Section 8 — native decompression hot path (zstd-jni / lz4-java / snappy-java), `RocksDBStore` JNI latency, `SimpleMemoryPool` allocation amortization.
+- Category 03 (resource-limit evasion) Section 8 — per-IP / per-listener / broker-wide connection-cap enforcement cost, percentage-based request throttle with 10-second sliding window.
+- Category 04 (module-system abuse) Section 8 — `ServiceLoader` discovery cold-start cost, `DelegatingClassLoader` child-first search overhead.
+- Category 05 (ReDoS) Section 8 — latency characteristics of every `Pattern.compile` site enumerated in the finding.
+- Category 06 (network / subprocess) Section 8 — Jetty `GzipHandler` / `CrossOriginHandler` request-decoding hot path, `RestClient` outbound connection pooling, KRaft RPC frame parsing.
+- Category 07 (external callbacks) Section 8 — SASL callback invocation cost on each handshake.
+- Category 08 (deserialization) Section 8 — Jackson 2.19.0 binding cost, jose4j JWT parse/verify latency, `SafeObjectInputStream` class-resolve cost.
+- Category 09 (information leakage) Section 8 — JMX metric registration overhead, redaction cost on `toString` and log-formatter pathways.
+- Category 10 (public API developer misuse) Section 8 — secure-default enforcement cost (e.g., `ssl.endpoint.identification.algorithm = https` hostname verification on every handshake).
+
+**Change Posture.** Consistent with the Audit Only rule, this diagram adds to `docs/security-audit/` only. No pre-existing Kafka source, test, build, documentation, or comment file is modified. The [`../no-change-verification.md`](../no-change-verification.md) artifact carries the git-diff evidence that confirms this invariant.
+
 ## Cross-References
 
 - [Finding 01 — Filesystem access / path traversal](../findings/01-filesystem-access-path-traversal.md)

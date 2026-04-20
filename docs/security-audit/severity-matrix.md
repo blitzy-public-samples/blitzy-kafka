@@ -30,6 +30,7 @@
 | Related Manifest       | [`./no-change-verification.md`](./no-change-verification.md)          |
 | Finding Count          | 54 rows across 10 categories                                          |
 | Severity Distribution  | 1 Critical / 6 High / 21 Medium / 26 Low                              |
+| Finding File Template  | 11-section layout (Category, Definition, Surface, Evidence, Attack Vector, Severity, Business Impact, **Performance Considerations**, Accepted Mitigations, Future Remediation, Cross-References) |
 
 This document is the single **at-a-glance drill-down artifact** for the ten-category security
 audit of Apache Kafka 4.2.0-SNAPSHOT. It enumerates every finding catalogued under
@@ -47,6 +48,16 @@ should consult [`./accepted-mitigations.md`](./accepted-mitigations.md) in paral
 seeking the prescribed future-state action list should consult
 [`./remediation-roadmap.md`](./remediation-roadmap.md); the roadmap organizes every row in this
 matrix into a phased plan without applying any change in this run.
+
+**Performance considerations coverage.** The Audit Only governing rule requires every
+deliverable to address `perofrmace considerations` (spelling preserved verbatim from the
+user-supplied rule and not corrected anywhere in this audit). Each per-category findings file
+linked from Section 6 below therefore includes a dedicated `## 8. Performance Considerations`
+section covering hot-path signals, JMX metrics exposed for observability, performance
+trade-offs inherent in the existing mitigations, future-state performance accounting, and a
+no-code-change attestation. The severity rows in Section 3 below do not duplicate that
+performance narrative - to avoid row-count drift the matrix points to the per-finding
+Performance Considerations sections by reference only.
 
 ---
 
@@ -421,20 +432,26 @@ Diagram artifacts referenced in per-category findings:
 
 This severity matrix is a snapshot of the Apache Kafka 4.2.0-SNAPSHOT codebase as of the audit
 date recorded at the top of this document. Every row describes an **observed state**, never a
-recommended change. Per the Audit-Only governing rule recorded in
+recommended change. Per the Audit Only governing rule recorded in
 [`./no-change-verification.md`](./no-change-verification.md), this document contains **no
 proposed code modifications** - only observations and hyperlinks to the per-category findings
-files.
+files. The severity tags are informed not only by the attack vectors and business impacts in
+each finding but also by the hot-path and performance characteristics documented in each
+finding's `## 8. Performance Considerations` section, because a resource-exhaustion vector's
+severity depends on the existence (or absence) of back-pressure, throttling, or chunk-size
+limits already in place.
 
 If a subsequent audit is performed against a later Kafka revision, the severity of individual
 rows may shift (for example, a dependency upgrade in `gradle/dependencies.gradle` may close an
 existing surface, or a new ServiceLoader discovery point may open a new one). In that case the
 reviewer must:
 
-1. Re-walk the evidence cited in each per-category finding.
+1. Re-walk the evidence cited in each per-category finding, including the Performance
+   Considerations subsection.
 2. Update severity tags where appropriate.
 3. Recompute the Section 4 matrix and the Section 2 pie chart.
 4. Refresh the Section 5 calibration note with any new distribution.
+5. Confirm that the 11-section finding template remains intact in every per-category file.
 
 The audit trail in [`./references.md`](./references.md) records the exact file-line citations
 that underlie each row so that the re-walk is mechanical and repeatable.

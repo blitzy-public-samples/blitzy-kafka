@@ -159,6 +159,22 @@ The citations below are the code anchors that ground every edge and every zone i
 - `connect/mirror/src/main/java/org/apache/kafka/connect/mirror/MirrorMakerConfig.java` — MirrorMaker 2 (`public final class MirrorMakerConfig extends AbstractConfig` at L60).
 - `clients/src/main/java/org/apache/kafka/common/security/oauthbearer/BrokerJwtValidator.java`, `ClientJwtValidator.java` — OAuth validation (broker-side import of `DISALLOW_NONE` at L52 of `BrokerJwtValidator.java`; `ClientJwtValidator` at L61 performs structural-only validation, see Javadoc at L49-L58).
 
+## Audit Only Rule and Performance Considerations Bridge
+
+This diagram is a visual artifact produced under the following user-supplied governing rule, reproduced verbatim with the spelling `perofrmace` preserved:
+
+> This run should serve as a dry run for potential changes, research, or documentation. DO NOT modify, create, or delete any existing code in the codebase. Avoid executing any code in the code base, this should be a static analysis. Every deliverable MUST include a markdown file summarizing security vulnerabilities, potential exploits, bugs in the codebase, perofrmace considerations, and remediation recommendations. Verify the NO CHANGES clause by confirming no changes to existing codebase featured in the git differential. Markdown files explicitly related to the analysis performed in this run are permitted.
+
+**Performance Considerations.** This diagram is a current-state visualization of Kafka 4.2 trust zones and data flow; it modifies no architecture, proposes no redesign, and adds no runtime cost. The rule-mandated `perofrmace considerations` deliverable topic is satisfied in the per-category findings under [`../findings/`](../findings/). Each finding file carries an 11-section template in which `## 8. Performance Considerations` documents the hot-path and throughput implications of the corresponding attack surface. Specific performance anchors relevant to this trust-model view:
+
+- Client-broker boundary throughput — see Finding 03 (`../findings/03-resource-limit-evasion.md`) Section 8: per-IP/per-listener connection caps, percentage-based request throttling, REPLICATION listener exemption as a throughput-preservation decision.
+- Intra-cluster replication hot path — see Finding 02 (`../findings/02-low-level-code-safety.md`) Section 8: native `zstd-jni`, `lz4-java`, `snappy-java` decompression throughput on the fetch and produce paths, `BufferSupplier` amortization.
+- Operator-plane REST hot path — see Finding 06 (`../findings/06-network-subprocess-access.md`) Section 8: Jetty `GzipHandler` and `CrossOriginHandler` request-decoding cost for the Connect worker and MirrorMaker 2 REST.
+- External identity provider (OAuth/OIDC) boundary — see Finding 08 (`../findings/08-deserialization-attacks.md`) Section 8: jose4j JWT-parse and signature-verify latency on every SASL handshake.
+- Authorization decision cost at the broker-controller boundary — see Finding 09 (`../findings/09-information-leakage.md`) Section 8 and the `StandardAuthorizerData` copy-on-write discussion in [`../accepted-mitigations.md`](../accepted-mitigations.md) (M9).
+
+**Change Posture.** Consistent with the Audit Only rule, this diagram adds to `docs/security-audit/` only. No pre-existing Kafka source, test, build, documentation, or comment file is modified. The [`../no-change-verification.md`](../no-change-verification.md) artifact carries the git-diff evidence that confirms this invariant.
+
 ## Cross-References
 
 - [Attack Surface Map](./attack-surface-map.md) — matrix overlay of ten categories on these modules

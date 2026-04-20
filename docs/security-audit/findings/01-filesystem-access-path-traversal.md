@@ -218,7 +218,52 @@ No sub-finding in this category rises to `[High]` or `[Critical]` because every 
 
 ---
 
-## 8. Accepted Mitigations Already Present
+## 8. Performance Considerations
+
+This section addresses the Audit Only rule's explicit directive that every deliverable must summarize "perofrmace considerations" (verbatim typo preserved from the governing rule at `../README.md` section 3.1 and `../no-change-verification.md` section 2). The performance discussion below is a code-grounded static observation — no benchmark, no profiling run, no performance test was executed against Kafka code in this audit. The material is intended to help operators (1) recognise exploitation-indicating signals that surface as performance anomalies, (2) understand the performance trade-offs inherent in the accepted mitigations, and (3) reason about the performance cost that any future remediation (per Section 10) would need to account for.
+
+### 8.1 Hot-Path Signals per Sub-Finding
+
+- **01.1 / 01.2 (`FileConfigProvider`, `DirectoryConfigProvider`).** The substitution machinery runs during (a) broker / Connect-worker startup, (b) dynamic reconfiguration (`kafka-configs.sh` alter, Connect `PUT /connectors/{name}/config`), and (c) any connector `start()` / `reconfigure()` invocation. Each `${file:…}` or `${directory:…}` reference triggers a synchronous disk read on the thread executing the configuration parse. For Connect, that thread is the HerderThread (standalone) or the leader worker's configuration-applying thread (distributed). Because the read is synchronous and uncached by the provider, a hostile `${directory:/sys}` reference on Linux can stall the config-apply thread until the OS kernel services the readdir. The path-normalisation step `AllowedPaths.parseUntrustedPath` adds a constant `Path.normalize()` call per resolved reference, which is negligible compared to the disk I/O but non-zero for deeply nested paths.
+- **01.3 (`EnvVarConfigProvider`).** Environment-variable reads are O(1) hash lookups in `System.getenv()`; the performance cost is bounded to the regex match against `allowlist.pattern`. With the default `.*` pattern the match is constant-time; with a pathological operator-supplied pattern such as `^(a+)+$`, the same ReDoS hazard documented in Finding 05 applies at configuration-resolution time.
+- **01.4 (Connect `plugin.path`).** Plugin scanning is performed once at worker start by `DelegatingClassLoader.initPluginLoaders()`. The cost is proportional to the total size of JARs and class files under every configured plugin directory, plus the number of classpath URLs enumerated. An adversary who drops a large JAR (or a JAR with many class files) into a plugin directory produces a measurable startup delay that can be observed at the `kafka.connect.worker:type=connect-worker-metrics,worker-metrics=*` MBean family or via wall-clock time between `INFO Kafka version` and `INFO Kafka Connect started` log lines.
+- **01.5 (`KafkaCSVMetricsReporter`).** The `Utils.delete(csvDir)` primitive is a synchronous recursive filesystem walk invoked on the broker's startup thread before request handlers come online. Deletion cost scales linearly with the number of entries under `kafka.csv.metrics.dir`. A mis-pointed directory such as `/var/log` with thousands of files extends broker startup by the recursive-delete wall-clock, a signal that is externally observable as a broker-startup-latency outlier.
+- **01.6 (`FileJwtRetriever`, `JwtBearerJwtRetriever`).** File retrievers read from disk on every token-refresh cycle (driven by `sasl.oauthbearer.token.refresh.window.factor` / `refresh.min.period.seconds`). The cost is bounded by the file size — typically a few hundred bytes for a JWT — and is not a concern for default operator configurations. Anomalous file-size growth (e.g., an attacker replaces a 500-byte JWT file with a multi-megabyte file of appended garbage) would appear as client-side refresh latency.
+
+### 8.2 Observable Metrics Indicating Exploitation
+
+The following metrics are already exposed by the current codebase (read-only inventory — no new metrics are proposed by this audit) and can serve as exploitation indicators for Category 01:
+
+- **Broker startup time.** `kafka.server:type=KafkaServer,name=BrokerState` transitioning through `STARTING` → `RECOVERY` → `RUNNING` is timestamped in the broker log. A sudden increase in the `STARTING` dwell time can indicate a `KafkaCSVMetricsReporter` recursive-delete against an unintended target (Finding 01.5) or a `plugin.path` scan against a newly-introduced payload (Finding 01.4).
+- **Connect worker startup time.** Wall-clock between `INFO Kafka Connect worker initialization took X ms` and `INFO Herder started` at `Source: connect/runtime/src/main/java/org/apache/kafka/connect/cli/ConnectStandalone.java` and `connect/runtime/src/main/java/org/apache/kafka/connect/cli/ConnectDistributed.java` captures plugin-scan cost.
+- **SASL callback handler timing.** `kafka.server:type=KafkaRequestHandlerPool,name=RequestHandlerAvgIdlePercent` dipping during authentication waves can correlate with expensive `FileJwtRetriever` / `JwtBearerJwtRetriever` reads when the token-refresh schedule is pathological.
+- **JMX attributes for configuration refresh.** Connect herder metrics (`connect-worker-metrics:connector-startup-success-total`, `connector-startup-failure-total`) and broker dynamic-config refresh counts (`kafka.server:type=KafkaServer,name=yammer-metrics-count`) provide visibility into configuration-apply cycles where `FileConfigProvider` / `DirectoryConfigProvider` substitution runs.
+
+### 8.3 Performance Trade-Offs of Current Mitigations
+
+- **`AllowedPaths.parseUntrustedPath` normalisation overhead.** The mitigation at `Source: clients/src/main/java/org/apache/kafka/common/config/internals/AllowedPaths.java:L68-L81` applies `Path.normalize()` plus an allow-list `startsWith` scan on every resolved path. For a configured allow-list of N entries and a path of depth D, the worst-case cost is O(N · D) string comparisons. In practice N is small (single-digit) and D is bounded by filesystem path-component limits, so the mitigation has negligible steady-state cost. The trade-off is a fail-fast at configuration parse time rather than at file-open time — operators pay an allocation for every resolved reference instead of only paying for failed references, which is the correct engineering choice for a security-critical code path.
+- **`BrokerSecurityConfigs.ALLOWED_SASL_OAUTHBEARER_FILES_CONFIG` empty-default cost.** The strict-by-default allow-list imposes zero runtime cost (the comparison is against a known-empty set and short-circuits immediately) but imposes a configuration-time burden on operators who must enumerate allowed files. The performance-versus-security trade-off here is operator ergonomics, not runtime throughput.
+- **`PluginClassLoader` child-first delegation.** Child-first delegation is more expensive than parent-first because every class lookup first scans the plugin's own URLs before falling through to the parent. For a worker running dozens of plugins with hundreds of classes, the delta is measurable at plugin-startup time but not on the data-plane (connector poll / put cycles); steady-state overhead is amortised by the JVM's class-resolution cache.
+- **`Utils.delete(csvDir)` recursion.** The mitigation is that the reporter is disabled-by-default (`kafka.csv.metrics.reporter.enabled=false`), so the recursive-delete primitive has zero runtime cost on a default broker. When enabled, the startup-time cost is proportional to directory contents; there is no steady-state cost because deletion is a one-shot at broker start.
+
+### 8.4 Future-State Performance Accounting
+
+Any future remediation proposed in Section 10 would incur measurable (though modest) performance cost:
+
+- **Item 10.1 (`plugin.path` runbook).** Zero runtime cost — the recommendation is purely documentation.
+- **Item 10.2 (tighten `EnvVarConfigProvider` default `allowlist.pattern`).** Zero runtime cost; tightening the default pattern does not change the regex-compilation cost (one-time at provider init) or the match cost (constant per env-var lookup).
+- **Item 10.3 (`allowed.paths` required for hardened profile).** Would impose a one-time configuration-parse cost at broker / worker startup equivalent to the current `AllowedPaths` constructor work, but tuned to reject the "unset" case. No data-plane cost.
+- **Item 10.4 (audit-log JWT file reads).** Would add a single `INFO` log-line emission per novel path, plus maintenance of a bounded in-memory set of previously-observed paths. The cost per token refresh is bounded by a `HashMap.contains` + possible `put`; negligible relative to the disk read itself.
+- **Item 10.5 (`kafka.csv.metrics.dir` dedicated-directory convention).** Zero runtime cost — purely a documentation recommendation.
+- **Item 10.6 (cross-reference `ALLOWED_SASL_OAUTHBEARER_FILES_CONFIG`).** Zero runtime cost — documentation only.
+
+### 8.5 No-Code-Change Attestation
+
+This section is descriptive, not prescriptive. Consistent with the Audit Only rule quoted in full at `../README.md` section 3.1 — *"DO NOT modify, create, or delete any existing code in the codebase. … Avoid executing any code in the code base, this should be a static analysis."* — no performance measurement was run, no benchmark was executed, and no source, test, or build file was altered to gather the signals described above. All performance observations are derived from static reading of the cited code and from the already-exposed metric surfaces catalogued in Kafka's Javadoc and JMX MBean registry.
+
+---
+
+## 9. Accepted Mitigations Already Present
 
 The following mitigations are implemented in the current codebase. They are documented here so that a future maintainer who re-reads this finding does not regress them. Cross-references link to the consolidated accepted-mitigations catalogue.
 
@@ -233,7 +278,7 @@ Consolidated catalogue: see [`../accepted-mitigations.md`](../accepted-mitigatio
 
 ---
 
-## 9. Recommended Future Remediation (No Changes in This Run)
+## 10. Recommended Future Remediation (No Changes in This Run)
 
 All items below are framed as **suggestions for future work**. Consistent with the audit-only rule, no code change is proposed, applied, or required in this run. Each item uses "consider", "could", or "may" language per the remediation-roadmap convention.
 
@@ -248,7 +293,7 @@ All items below are framed as **suggestions for future work**. Consistent with t
 
 ---
 
-## 10. Cross-References
+## 11. Cross-References
 
 - **Audit Navigation**
   - [`../README.md`](../README.md) — Audit overview, ten-category enumeration, navigation index.
