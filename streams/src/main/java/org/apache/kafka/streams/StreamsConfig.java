@@ -571,6 +571,16 @@ public class StreamsConfig extends AbstractConfig {
     private static final String ERRORS_DEAD_LETTER_QUEUE_TOPIC_NAME_DOC = "If not null, the default exception handler will build and send a Dead Letter Queue record to the topic with the provided name if an error occurs.\n" +
             "If a custom deserialization/production or processing exception handler is set, this parameter is ignored for this handler.";
 
+    public static final String DEFAULT_DEAD_LETTER_QUEUE_TOPIC_CONFIG = "default.deadletterqueue.topic";
+    private static final String DEFAULT_DEAD_LETTER_QUEUE_TOPIC_DOC = "Global default Dead Letter Queue (DLQ) topic name for the opt-in DSL DLQ layer.\n" +
+            "If set (and the DLQ layer is enabled), records that fail deserialization or processing on a topology that opted in via " +
+            "KStream#withDeadLetterQueue(String, DeadLetterQueueOptions) are routed to this topic as their original key/value bytes plus dlq.* diagnostic headers.\n" +
+            "The DSL-level withDeadLetterQueue(topic, options) call takes precedence over this global default. This key is independent of, and coexists with, the handler-level errors.dead.letter.queue.topic.name configuration. The DLQ topic is assumed to already exist.";
+
+    public static final String DEFAULT_DEAD_LETTER_QUEUE_ENABLED_CONFIG = "default.deadletterqueue.enabled";
+    private static final String DEFAULT_DEAD_LETTER_QUEUE_ENABLED_DOC = "Global switch that enables the opt-in DSL Dead Letter Queue (DLQ) layer. Defaults to false.\n" +
+            "When false (default), the new DSL DLQ layer is inactive and error handling is unchanged. Per-topology / DSL-level configuration via KStream#withDeadLetterQueue(String, DeadLetterQueueOptions) takes precedence over this global default.";
+
     /** {@code log.summary.interval.ms} */
     public static final String LOG_SUMMARY_INTERVAL_MS_CONFIG = "log.summary.interval.ms";
     private static final String LOG_SUMMARY_INTERVAL_MS_DOC = "The output interval in milliseconds for logging summary information.\n" +
@@ -944,6 +954,16 @@ public class StreamsConfig extends AbstractConfig {
                     null,
                     Importance.MEDIUM,
                     ERRORS_DEAD_LETTER_QUEUE_TOPIC_NAME_DOC)
+            .define(DEFAULT_DEAD_LETTER_QUEUE_TOPIC_CONFIG,
+                    Type.STRING,
+                    null,
+                    Importance.MEDIUM,
+                    DEFAULT_DEAD_LETTER_QUEUE_TOPIC_DOC)
+            .define(DEFAULT_DEAD_LETTER_QUEUE_ENABLED_CONFIG,
+                    Type.BOOLEAN,
+                    false,
+                    Importance.MEDIUM,
+                    DEFAULT_DEAD_LETTER_QUEUE_ENABLED_DOC)
             .define(MAX_TASK_IDLE_MS_CONFIG,
                     Type.LONG,
                     0L,

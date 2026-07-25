@@ -84,6 +84,12 @@ public class TaskMetrics {
     private static final String DROPPED_RECORDS_RATE_DESCRIPTION =
         RATE_DESCRIPTION_PREFIX + DROPPED_RECORDS_DESCRIPTION + RATE_DESCRIPTION_SUFFIX;
 
+    private static final String DLQ_RECORDS_SENT = "dlq-records-sent";
+    private static final String DLQ_RECORDS_SENT_DESCRIPTION = "records sent to the dead letter queue";
+    private static final String DLQ_RECORDS_SENT_TOTAL_DESCRIPTION = TOTAL_DESCRIPTION + DLQ_RECORDS_SENT_DESCRIPTION;
+    private static final String DLQ_RECORDS_SENT_RATE_DESCRIPTION =
+        RATE_DESCRIPTION_PREFIX + DLQ_RECORDS_SENT_DESCRIPTION + RATE_DESCRIPTION_SUFFIX;
+
     private static final String PROCESS = "process";
     private static final String PROCESS_LATENCY = PROCESS + LATENCY_SUFFIX;
     private static final String PROCESS_DESCRIPTION = "calls to process";
@@ -256,6 +262,20 @@ public class TaskMetrics {
             DROPPED_RECORDS,
             DROPPED_RECORDS_RATE_DESCRIPTION,
             DROPPED_RECORDS_TOTAL_DESCRIPTION,
+            RecordingLevel.INFO,
+            streamsMetrics
+        );
+    }
+
+    public static Sensor dlqRecordsSentSensor(final String threadId,
+                                              final String taskId,
+                                              final StreamsMetricsImpl streamsMetrics) {
+        return invocationRateAndTotalSensor(
+            threadId,
+            taskId,
+            DLQ_RECORDS_SENT,
+            DLQ_RECORDS_SENT_RATE_DESCRIPTION,
+            DLQ_RECORDS_SENT_TOTAL_DESCRIPTION,
             RecordingLevel.INFO,
             streamsMetrics
         );
