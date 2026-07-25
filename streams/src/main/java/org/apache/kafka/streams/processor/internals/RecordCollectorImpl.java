@@ -79,7 +79,6 @@ public class RecordCollectorImpl implements RecordCollector {
 
     private final StreamsMetricsImpl streamsMetrics;
     private final Sensor droppedRecordsSensor;
-    private final Sensor dlqRecordsSentSensor;
     private final Map<String, Sensor> producedSensorByTopic = new HashMap<>();
 
     // we get `sendException` from "singleton" `StreamsProducer` to share it across all instances of `RecordCollectorImpl`
@@ -103,7 +102,6 @@ public class RecordCollectorImpl implements RecordCollector {
 
         final String threadId = Thread.currentThread().getName();
         this.droppedRecordsSensor = TaskMetrics.droppedRecordsSensor(threadId, taskId.toString(), streamsMetrics);
-        this.dlqRecordsSentSensor = TaskMetrics.dlqRecordsSentSensor(threadId, taskId.toString(), streamsMetrics);
         for (final String topic : topology.sinkTopics()) {
             final String processorNodeId = topology.sink(topic).name();
             producedSensorByTopic.put(
@@ -386,10 +384,6 @@ public class RecordCollectorImpl implements RecordCollector {
                         deadLetterQueueRecord
                 );
             }
-            // DLQ send-site observability (failure branch only): record the dlq-records-sent
-            // sensor once per failure event and emit a single WARN identifying the failure
-            // (source coordinates only; the record key/value payload is never logged).
-            recordDeadLetterQueueSend(serializationException, topic, context);
         }
 
         if (maybeFailResponse(response.result()) == ProductionExceptionHandler.Result.FAIL) {
@@ -441,32 +435,6 @@ public class RecordCollectorImpl implements RecordCollector {
                 null,
                 null
             );
-    }
-
-    /**
-     * Emits the Dead Letter Queue (DLQ) send-site observability signals for a single failure event:
-     * records the {@code dlq-records-sent} sensor once and logs one WARN identifying the failure.
-     * Invoked only from within a {@code !deadLetterQueueRecords.isEmpty()} branch (the failure path),
-     * so it adds no overhead to the non-failing record path. Source coordinates are derived from the
-     * record context in a null-guarded fashion, mirroring {@link #errorHandlerContext}; the record
-     * key/value payload is never logged.
-     *
-     * @param cause         the exception that triggered dead-lettering
-     * @param fallbackTopic the topic to report when no source record context is available
-     * @param context       the processor context providing the source record coordinates (may be null)
-     */
-    private void recordDeadLetterQueueSend(final Exception cause,
-                                           final String fallbackTopic,
-                                           final InternalProcessorContext<?, ?> context) {
-        final RecordContext dlqSourceContext = context != null ? context.recordContext() : null;
-        DeadLetterQueueObserver.record(
-            log,
-            dlqRecordsSentSensor,
-            cause.getClass().getName(),
-            dlqSourceContext != null ? dlqSourceContext.topic() : fallbackTopic,
-            dlqSourceContext != null ? dlqSourceContext.partition() : -1,
-            dlqSourceContext != null ? dlqSourceContext.offset() : -1L
-        );
     }
 
     private <KV> StreamsException createStreamsExceptionForClassCastException(final ProductionExceptionHandler.SerializationExceptionOrigin origin,
@@ -554,10 +522,6 @@ public class RecordCollectorImpl implements RecordCollector {
                             deadLetterQueueRecord
                     );
                 }
-                // DLQ send-site observability (failure branch only): record the dlq-records-sent
-                // sensor once per failure event and emit a single WARN identifying the failure
-                // (source coordinates only; the record key/value payload is never logged).
-                recordDeadLetterQueueSend(productionException, topic, context);
             }
 
             if (productionException instanceof RetriableException && response.result() == ProductionExceptionHandler.Result.RETRY) {

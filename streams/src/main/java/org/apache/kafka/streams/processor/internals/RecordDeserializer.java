@@ -25,7 +25,6 @@ import org.apache.kafka.streams.errors.DeserializationExceptionHandler;
 import org.apache.kafka.streams.errors.StreamsException;
 import org.apache.kafka.streams.errors.internals.DefaultErrorHandlerContext;
 import org.apache.kafka.streams.processor.api.ProcessorContext;
-import org.apache.kafka.streams.processor.internals.metrics.TaskMetrics;
 
 import org.slf4j.Logger;
 
@@ -132,27 +131,6 @@ public class RecordDeserializer {
                         deadLetterQueueRecord
                 );
             }
-            // Additive DLQ observability (failure branch only): record the dlq-records-sent
-            // metric once per failure event and emit a single WARN identifying the failure by
-            // exception class and source topic/partition/offset (never the record payload). The
-            // sensor is acquired inline on this exception branch so the non-failing (happy) record
-            // path incurs zero overhead; Streams sensor registration is an idempotent get-or-create,
-            // so repeated acquisition here is safe. The (InternalProcessorContext<?, ?>) cast mirrors
-            // the one at the top of this method and is therefore safe for all callers, including the
-            // global-state deserialization path that routes through this same static method.
-            final Sensor dlqRecordsSentSensor = TaskMetrics.dlqRecordsSentSensor(
-                Thread.currentThread().getName(),
-                processorContext.taskId().toString(),
-                ((InternalProcessorContext<?, ?>) processorContext).metrics()
-            );
-            DeadLetterQueueObserver.record(
-                log,
-                dlqRecordsSentSensor,
-                deserializationException.getClass().getName(),
-                rawRecord.topic(),
-                rawRecord.partition(),
-                rawRecord.offset()
-            );
         }
 
         if (response.result() == DeserializationExceptionHandler.Result.FAIL) {
