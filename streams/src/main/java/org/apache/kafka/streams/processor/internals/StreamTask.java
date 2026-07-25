@@ -106,6 +106,7 @@ public class StreamTask extends AbstractTask implements ProcessorNodePunctuator,
     private final Sensor punctuateLatencySensor;
     private final Sensor bufferedRecordsSensor;
     private final Sensor droppedRecordsSensor;
+    private final Sensor dlqRecordsSentSensor;
     private final Map<String, Sensor> e2eLatencySensors = new HashMap<>();
 
     private final RecordQueueCreator recordQueueCreator;
@@ -166,6 +167,7 @@ public class StreamTask extends AbstractTask implements ProcessorNodePunctuator,
         punctuateLatencySensor = TaskMetrics.punctuateSensor(threadId, taskId, streamsMetrics);
         bufferedRecordsSensor = TaskMetrics.activeBufferedRecordsSensor(threadId, taskId, streamsMetrics);
         droppedRecordsSensor = TaskMetrics.droppedRecordsSensor(threadId, taskId, streamsMetrics);
+        dlqRecordsSentSensor = TaskMetrics.dlqRecordsSentSensor(threadId, taskId, streamsMetrics);
 
         for (final String terminalNodeName : topology.terminalNodes()) {
             e2eLatencySensors.put(
@@ -966,6 +968,14 @@ public class StreamTask extends AbstractTask implements ProcessorNodePunctuator,
                             processorContext,
                             deadLetterQueueRecord);
                 }
+                DeadLetterQueueObserver.record(
+                    log,
+                    dlqRecordsSentSensor,
+                    processingException.getClass().getName(),
+                    recordContext.topic(),
+                    recordContext.partition(),
+                    recordContext.offset()
+                );
             }
 
             if (processingExceptionResponse.result() == ProcessingExceptionHandler.Result.FAIL) {

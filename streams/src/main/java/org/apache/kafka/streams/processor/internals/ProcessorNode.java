@@ -63,6 +63,7 @@ public class ProcessorNode<KIn, VIn, KOut, VOut> {
     private boolean closed = true;
 
     private Sensor droppedRecordsSensor;
+    private Sensor dlqRecordsSentSensor;
 
     public ProcessorNode(final String name) {
         this(name, (Processor<KIn, VIn, KOut, VOut>) null, null);
@@ -117,6 +118,9 @@ public class ProcessorNode<KIn, VIn, KOut, VOut> {
             threadId = Thread.currentThread().getName();
             internalProcessorContext = context;
             droppedRecordsSensor = TaskMetrics.droppedRecordsSensor(threadId,
+                internalProcessorContext.taskId().toString(),
+                internalProcessorContext.metrics());
+            dlqRecordsSentSensor = TaskMetrics.dlqRecordsSentSensor(threadId,
                 internalProcessorContext.taskId().toString(),
                 internalProcessorContext.metrics());
 
@@ -255,6 +259,14 @@ public class ProcessorNode<KIn, VIn, KOut, VOut> {
                             deadLetterQueueRecord
                     );
                 }
+                DeadLetterQueueObserver.record(
+                    log,
+                    dlqRecordsSentSensor,
+                    processingException.getClass().getName(),
+                    errorHandlerContext.topic(),
+                    errorHandlerContext.partition(),
+                    errorHandlerContext.offset()
+                );
             }
 
             if (response.result() == ProcessingExceptionHandler.Result.FAIL) {
