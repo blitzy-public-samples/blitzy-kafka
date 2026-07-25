@@ -24,6 +24,7 @@ import org.apache.kafka.common.header.Headers;
 import org.apache.kafka.common.header.internals.RecordHeader;
 import org.apache.kafka.common.header.internals.RecordHeaders;
 import org.apache.kafka.common.metrics.Metrics;
+import org.apache.kafka.common.metrics.Sensor;
 import org.apache.kafka.common.record.TimestampType;
 import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.common.utils.LogCaptureAppender;
@@ -36,6 +37,7 @@ import org.apache.kafka.streams.errors.LogAndFailExceptionHandler;
 import org.apache.kafka.streams.errors.StreamsException;
 import org.apache.kafka.streams.kstream.DeadLetterQueueOptions;
 import org.apache.kafka.streams.processor.TaskId;
+import org.apache.kafka.streams.processor.internals.metrics.TaskMetrics;
 import org.apache.kafka.streams.state.StateSerdes;
 import org.apache.kafka.test.InternalMockProcessorContext;
 import org.apache.kafka.test.MockRecordCollector;
@@ -319,27 +321,40 @@ public class RecordDeserializerTest {
     }
 
     @Test
-    public void shouldRecordDlqSentMetricAndWarnDuringDeserializationException() {
-        try (final LogCaptureAppender logCaptureAppender =
-                     LogCaptureAppender.createAndRegister(RecordDeserializerTest.class);
-             final Metrics metrics = new Metrics()) {
+    public void shouldSendEveryDeadLetterQueueRecordWhenHandlerReturnsMultiple() {
+        try (final Metrics metrics = new Metrics()) {
             final MockRecordCollector collector = new MockRecordCollector();
             final InternalProcessorContext<Object, Object> internalProcessorContext =
                     new InternalMockProcessorContext<>(
                             new StateSerdes<>("sink", Serdes.ByteArray(), Serdes.ByteArray()),
                             collector
                     );
-            // Opt-in DSL DLQ path: wrap the configured handler in the DLQ-aware decorator so the deserialization
-            // send site emits the dlq-records-sent metric and the targeted WARN. This observability is gated on the
-            // effective handler being this decorator, so the pre-existing global-config (KIP-1034) path stays unobserved.
-            final DeserializationExceptionHandler deserializationExceptionHandler =
-                    new DeadLetterQueueDeserializationExceptionHandler(
-                            new LogAndContinueExceptionHandler(),
-                            "dlq",
-                            DeadLetterQueueOptions.with("dlq"));
+            // A handler may return more than one dead letter queue record (e.g. the DLQ-aware decorator merges a
+            // delegate's records with the newly built one). The deserialization send site must produce EVERY
+            // returned record via the collector, not just the first. A plain (non-decorator) handler is used so
+            // this isolates the send-loop from the metric/WARN observability, which is gated on the decorator type.
+            final DeserializationExceptionHandler multiRecordHandler = new DeserializationExceptionHandler() {
+                @Override
+                public void configure(final Map<String, ?> configs) {
+                }
+
+                @Override
+                public Response handleError(final ErrorHandlerContext context,
+                                            final ConsumerRecord<byte[], byte[]> record,
+                                            final Exception exception) {
+                    return Response.resume(List.of(
+                            new ProducerRecord<>("dlq",
+                                    "k1".getBytes(StandardCharsets.UTF_8),
+                                    "v1".getBytes(StandardCharsets.UTF_8)),
+                            new ProducerRecord<>("dlq",
+                                    "k2".getBytes(StandardCharsets.UTF_8),
+                                    "v2".getBytes(StandardCharsets.UTF_8))
+                    ));
+                }
+            };
 
             RecordDeserializer.handleDeserializationFailure(
-                    deserializationExceptionHandler,
+                    multiRecordHandler,
                     internalProcessorContext,
                     new RuntimeException(new NullPointerException("Oopsie")),
                     new ConsumerRecord<>("source",
@@ -358,21 +373,92 @@ public class RecordDeserializerTest {
                     "sourceNode"
             );
 
+            assertEquals(2, collector.collected().size());
+            assertEquals("dlq", collector.collected().get(0).topic());
+            assertEquals("dlq", collector.collected().get(1).topic());
+            assertEquals("k1", new String((byte[]) collector.collected().get(0).key()));
+            assertEquals("k2", new String((byte[]) collector.collected().get(1).key()));
+        }
+    }
+
+    @Test
+    public void shouldRecordDlqSentMetricAndWarnDuringDeserializationException() {
+        try (final LogCaptureAppender logCaptureAppender =
+                     LogCaptureAppender.createAndRegister(RecordDeserializerTest.class)) {
+            final MockRecordCollector collector = new MockRecordCollector();
+            final InternalProcessorContext<Object, Object> internalProcessorContext =
+                    new InternalMockProcessorContext<>(
+                            new StateSerdes<>("sink", Serdes.ByteArray(), Serdes.ByteArray()),
+                            collector
+                    );
+            // Opt-in DSL DLQ path: wrap the configured handler in the DLQ-aware decorator so the deserialization
+            // send site emits the dlq-records-sent metric and the targeted WARN. This observability is gated on the
+            // effective handler being this decorator, so the pre-existing global-config (KIP-1034) path stays unobserved.
+            final DeserializationExceptionHandler deserializationExceptionHandler =
+                    new DeadLetterQueueDeserializationExceptionHandler(
+                            new LogAndContinueExceptionHandler(),
+                            "dlq",
+                            DeadLetterQueueOptions.with("dlq"));
+
+            // Register the dropped-records sensor on the SAME task-level metrics registry the send site uses so the
+            // test can assert that the DLQ RESUME path ALSO increments dropped-records: a dead-lettered record is
+            // still skipped from the main topology. Using the shared threadId/taskId keeps the metric tags aligned
+            // with the internally-created dlq-records-sent sensor.
+            final String threadId = Thread.currentThread().getName();
+            final String taskId = internalProcessorContext.taskId().toString();
+            final Sensor droppedRecordsSensor =
+                    TaskMetrics.droppedRecordsSensor(threadId, taskId, internalProcessorContext.metrics());
+
+            RecordDeserializer.handleDeserializationFailure(
+                    deserializationExceptionHandler,
+                    internalProcessorContext,
+                    new RuntimeException(new NullPointerException("Oopsie")),
+                    new ConsumerRecord<>("source",
+                            0,
+                            0,
+                            123,
+                            TimestampType.CREATE_TIME,
+                            -1,
+                            -1,
+                            "hello".getBytes(StandardCharsets.UTF_8),
+                            "world".getBytes(StandardCharsets.UTF_8),
+                            new RecordHeaders(),
+                            Optional.empty()),
+                    new LogContext().logger(this.getClass()),
+                    droppedRecordsSensor,
+                    "sourceNode"
+            );
+
+            // the dlq-records-sent-total metric fired exactly once for the single dead-lettered record
             assertEquals(1.0, internalProcessorContext.metrics().metrics().get(new MetricName(
                     "dlq-records-sent-total",
                     "stream-task-metrics",
                     "The total number of records sent to the dead letter queue",
                     mkMap(
-                            mkEntry("thread-id", Thread.currentThread().getName()),
-                            mkEntry("task-id", internalProcessorContext.taskId().toString())
+                            mkEntry("thread-id", threadId),
+                            mkEntry("task-id", taskId)
                     ))).metricValue());
 
+            // the DLQ RESUME path ALSO increments dropped-records exactly once (the record is dead-lettered AND
+            // then skipped from the main topology), pinning the interaction between the two observability signals
+            assertEquals(1.0, internalProcessorContext.metrics().metrics().get(new MetricName(
+                    "dropped-records-total",
+                    "stream-task-metrics",
+                    "The total number of dropped records",
+                    mkMap(
+                            mkEntry("thread-id", threadId),
+                            mkEntry("task-id", taskId)
+                    ))).metricValue());
+
+            // EXACTLY ONE targeted DLQ WARN is emitted — cardinality is pinned (not merely "at least one"), so a
+            // duplicated send/observe would be caught
             final List<String> messages = logCaptureAppender.getMessages();
-            final boolean warnPresent = messages.stream().anyMatch(message ->
+            final long dlqWarnCount = messages.stream().filter(message ->
                     message.contains("Sent a failed record to the dead letter queue.")
                             && message.contains("exceptionClass=[java.lang.RuntimeException]")
-                            && message.contains("offset=[0"));
-            assertTrue(warnPresent, "Expected a targeted DLQ WARN log. Captured: " + messages);
+                            && message.contains("offset=[0")).count();
+            assertEquals(1L, dlqWarnCount,
+                    "Expected exactly one targeted DLQ WARN log. Captured: " + messages);
         }
     }
 
