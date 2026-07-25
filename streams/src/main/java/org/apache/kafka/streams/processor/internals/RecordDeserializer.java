@@ -25,6 +25,7 @@ import org.apache.kafka.streams.errors.DeserializationExceptionHandler;
 import org.apache.kafka.streams.errors.StreamsException;
 import org.apache.kafka.streams.errors.internals.DefaultErrorHandlerContext;
 import org.apache.kafka.streams.processor.api.ProcessorContext;
+import org.apache.kafka.streams.processor.internals.metrics.TaskMetrics;
 
 import org.slf4j.Logger;
 
@@ -129,6 +130,26 @@ public class RecordDeserializer {
                         sourceNodeName,
                         (InternalProcessorContext) processorContext,
                         deadLetterQueueRecord
+                );
+            }
+
+            // Observability for the opt-in, DSL-level DLQ path ONLY: record the dlq-records-sent sensor and emit a
+            // targeted WARN (exception class + source coordinates). This is guarded on the effective handler being
+            // the DLQ-aware decorator so that the pre-existing KIP-1034 global-config path (and any custom handler
+            // that returns DLQ records) is left completely unobserved and byte-for-byte unchanged.
+            if (deserializationExceptionHandler instanceof DeadLetterQueueDeserializationExceptionHandler) {
+                final Sensor dlqRecordsSentSensor = TaskMetrics.dlqRecordsSentSensor(
+                    Thread.currentThread().getName(),
+                    processorContext.taskId().toString(),
+                    ((InternalProcessorContext<?, ?>) processorContext).metrics()
+                );
+                DeadLetterQueueObserver.record(
+                    log,
+                    dlqRecordsSentSensor,
+                    deserializationException.getClass().getName(),
+                    rawRecord.topic(),
+                    rawRecord.partition(),
+                    rawRecord.offset()
                 );
             }
         }

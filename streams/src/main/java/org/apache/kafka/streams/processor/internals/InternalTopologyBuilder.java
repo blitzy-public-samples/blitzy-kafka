@@ -27,6 +27,7 @@ import org.apache.kafka.streams.TopologyConfig;
 import org.apache.kafka.streams.errors.TopologyException;
 import org.apache.kafka.streams.internals.ApiUtils;
 import org.apache.kafka.streams.internals.AutoOffsetResetInternal;
+import org.apache.kafka.streams.kstream.DeadLetterQueueOptions;
 import org.apache.kafka.streams.processor.StateStore;
 import org.apache.kafka.streams.processor.StreamPartitioner;
 import org.apache.kafka.streams.processor.TimestampExtractor;
@@ -300,6 +301,10 @@ public class InternalTopologyBuilder {
         private final Deserializer<KIn> keyDeserializer;
         private final Deserializer<VIn> valDeserializer;
         private final TimestampExtractor timestampExtractor;
+        // Opt-in DSL DLQ configuration for this source node; null unless the topology opted in via
+        // KStream#withDeadLetterQueue(String, DeadLetterQueueOptions).
+        private String deadLetterQueueTopic;
+        private DeadLetterQueueOptions deadLetterQueueOptions;
 
         private SourceNodeFactory(final String name,
                                   final String[] topics,
@@ -341,9 +346,18 @@ public class InternalTopologyBuilder {
             return matchedTopics;
         }
 
+        private void setDeadLetterQueue(final String deadLetterQueueTopic, final DeadLetterQueueOptions deadLetterQueueOptions) {
+            this.deadLetterQueueTopic = deadLetterQueueTopic;
+            this.deadLetterQueueOptions = deadLetterQueueOptions;
+        }
+
         @Override
         public ProcessorNode<KIn, VIn, KIn, VIn> build() {
-            return new SourceNode<>(name, timestampExtractor, keyDeserializer, valDeserializer);
+            final SourceNode<KIn, VIn> node = new SourceNode<>(name, timestampExtractor, keyDeserializer, valDeserializer);
+            if (deadLetterQueueTopic != null) {
+                node.setDeadLetterQueue(deadLetterQueueTopic, deadLetterQueueOptions);
+            }
+            return node;
         }
 
         private boolean isMatch(final String topic) {
@@ -487,6 +501,32 @@ public class InternalTopologyBuilder {
         nodeToSourceTopics.put(name, Arrays.asList(topics));
         nodeGrouper.add(name);
         nodeGroups = null;
+    }
+
+    /**
+     * Mark a previously-added source node as opted in to the DSL-level Dead Letter Queue (DLQ), so that records
+     * failing deserialization at that source are routed to {@code deadLetterQueueTopic} with the supplied options.
+     *
+     * <p>This is invoked while a source graph node writes itself to the topology (see
+     * {@code StreamSourceNode#writeToTopology}) after the corresponding {@code addSource(...)} call, on behalf of a
+     * {@link org.apache.kafka.streams.kstream.KStream#withDeadLetterQueue(String, DeadLetterQueueOptions)} DSL call.
+     * It is additive and backward compatible: source nodes for which it is never called keep their default
+     * (non-DLQ) error-handling behaviour. Names that do not resolve to a source node are ignored.
+     *
+     * @param sourceName             the name of the source node to mark
+     * @param deadLetterQueueTopic   the resolved DLQ topic name (must not be null)
+     * @param deadLetterQueueOptions the resolved DLQ options (must not be null)
+     */
+    public final synchronized void markSourceNodeForDeadLetterQueue(final String sourceName,
+                                                                    final String deadLetterQueueTopic,
+                                                                    final DeadLetterQueueOptions deadLetterQueueOptions) {
+        Objects.requireNonNull(sourceName, "sourceName cannot be null");
+        Objects.requireNonNull(deadLetterQueueTopic, "deadLetterQueueTopic cannot be null");
+        Objects.requireNonNull(deadLetterQueueOptions, "deadLetterQueueOptions cannot be null");
+        final NodeFactory<?, ?, ?, ?> nodeFactory = nodeFactories.get(sourceName);
+        if (nodeFactory instanceof SourceNodeFactory) {
+            ((SourceNodeFactory<?, ?>) nodeFactory).setDeadLetterQueue(deadLetterQueueTopic, deadLetterQueueOptions);
+        }
     }
 
     public final void addSource(final AutoOffsetResetInternal offsetReset,

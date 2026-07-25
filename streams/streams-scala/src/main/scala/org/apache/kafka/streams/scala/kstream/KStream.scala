@@ -17,7 +17,13 @@
 package org.apache.kafka.streams.scala
 package kstream
 
-import org.apache.kafka.streams.kstream.{GlobalKTable, JoinWindows, KStream => KStreamJ, Printed}
+import org.apache.kafka.streams.kstream.{
+  DeadLetterQueueOptions,
+  GlobalKTable,
+  JoinWindows,
+  KStream => KStreamJ,
+  Printed
+}
 import org.apache.kafka.streams.processor.TopicNameExtractor
 import org.apache.kafka.streams.processor.api.{FixedKeyProcessorSupplier, ProcessorSupplier}
 import org.apache.kafka.streams.scala.FunctionsCompatConversions.{
@@ -44,6 +50,19 @@ import scala.jdk.CollectionConverters._
  */
 //noinspection ScalaDeprecation
 class KStream[K, V](val inner: KStreamJ[K, V]) {
+
+  /**
+   * Opt this stream in to the DSL-level Dead Letter Queue (DLQ). Records that fail deserialization at this
+   * stream's originating source topic(s) are routed to `dlqTopic` (with the given options) instead of failing
+   * the stream thread or being silently skipped. Streams that never call this method are unaffected.
+   *
+   * @param dlqTopic the name of the (pre-existing) Dead Letter Queue topic
+   * @param options  the [[DeadLetterQueueOptions]] controlling DLQ behaviour
+   * @return this [[KStream]], unchanged, for fluent chaining
+   * @see `org.apache.kafka.streams.kstream.KStream#withDeadLetterQueue`
+   */
+  def withDeadLetterQueue(dlqTopic: String, options: DeadLetterQueueOptions): KStream[K, V] =
+    new KStream(inner.withDeadLetterQueue(dlqTopic, options))
 
   /**
    * Create a new [[KStream]] that consists all records of this stream which satisfies the given predicate.

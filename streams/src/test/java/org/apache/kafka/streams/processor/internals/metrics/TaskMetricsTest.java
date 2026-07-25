@@ -261,4 +261,37 @@ public class TaskMetricsTest {
             assertThat(sensor, is(expectedSensor));
         }
     }
+
+    @Test
+    public void shouldGetDlqRecordsSentSensor() {
+        final String operation = "dlq-records-sent";
+        final String totalDescription = "The total number of records sent to the dead letter queue";
+        final String rateDescription = "The average number of records sent to the dead letter queue per second";
+        when(streamsMetrics.taskLevelSensor(THREAD_ID, TASK_ID, operation, RecordingLevel.INFO)).thenReturn(expectedSensor);
+        when(streamsMetrics.taskLevelTagMap(THREAD_ID, TASK_ID)).thenReturn(tagMap);
+
+        try (final MockedStatic<StreamsMetricsImpl> streamsMetricsStaticMock = mockStatic(StreamsMetricsImpl.class)) {
+            final Sensor sensor = TaskMetrics.dlqRecordsSentSensor(THREAD_ID, TASK_ID, streamsMetrics);
+            streamsMetricsStaticMock.verify(
+                () -> StreamsMetricsImpl.addInvocationRateToSensor(
+                    expectedSensor,
+                    TASK_LEVEL_GROUP,
+                    tagMap,
+                    operation,
+                    rateDescription
+                )
+            );
+            streamsMetricsStaticMock.verify(
+                () -> StreamsMetricsImpl.addSumMetricToSensor(
+                    expectedSensor,
+                    TASK_LEVEL_GROUP,
+                    tagMap,
+                    operation,
+                    true,
+                    totalDescription
+                )
+            );
+            assertThat(sensor, is(expectedSensor));
+        }
+    }
 }

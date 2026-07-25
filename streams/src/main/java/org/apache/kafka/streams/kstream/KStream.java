@@ -61,6 +61,46 @@ import java.time.Duration;
 public interface KStream<K, V> {
 
     /**
+     * Opt this stream in to the DSL-level Dead Letter Queue (DLQ) capability.
+     *
+     * <p>When enabled, records that fail <em>deserialization</em> at this stream's originating source topic(s) are
+     * captured — as their original key/value bytes plus {@code dlq.*} diagnostic headers — and routed to the
+     * supplied {@code dlqTopic}, instead of either terminating the {@code StreamThread} (fail-fast) or being silently
+     * skipped (log-and-continue). Processing then resumes with the next record. The DLQ topic is assumed to already
+     * exist; Kafka Streams does not create it.
+     *
+     * <p>This is an <em>opt-in</em> capability layered on top of the existing exception-handling machinery: it is
+     * scoped to the topology that calls this method and takes precedence over the global
+     * {@code default.deadletterqueue.*} configuration. Topologies that never call {@code withDeadLetterQueue}
+     * exhibit byte-for-byte identical error-handling behaviour. DLQ writes reuse the same Streams producer (and
+     * therefore the same security and authentication configuration) and are a best-effort side output that is not
+     * part of the exactly-once processing transaction.
+     *
+     * <p>This method does not add a processing step to the topology; it returns the same-typed {@code KStream}
+     * unchanged so it can be chained fluently, for example:
+     *
+     * <pre>{@code
+     * builder.stream("input-topic")
+     *        .withDeadLetterQueue("input-topic-dlq", DeadLetterQueueOptions.with("input-topic-dlq"))
+     *        .filter(...)
+     *        .to("output-topic");
+     * }</pre>
+     *
+     * @param dlqTopic
+     *        the name of the (pre-existing) Dead Letter Queue topic that failed records are routed to; must not be null
+     * @param options
+     *        the {@link DeadLetterQueueOptions} controlling DLQ behaviour (max record size and header inclusion);
+     *        must not be null
+     *
+     * @return this {@code KStream}, unchanged, for fluent chaining
+     *
+     * @see DeadLetterQueueOptions
+     */
+    default KStream<K, V> withDeadLetterQueue(final String dlqTopic, final DeadLetterQueueOptions options) {
+        return this;
+    }
+
+    /**
      * Create a new {@code KStream} that consists of all records of this stream which satisfy the given predicate.
      * All records that do not satisfy the predicate are dropped.
      * This is a stateless record-by-record operation (cf. {@link #processValues(FixedKeyProcessorSupplier, String...)}

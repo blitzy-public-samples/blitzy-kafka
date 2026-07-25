@@ -39,6 +39,7 @@ import org.apache.kafka.streams.errors.TaskMigratedException;
 import org.apache.kafka.streams.errors.TopologyException;
 import org.apache.kafka.streams.errors.internals.DefaultErrorHandlerContext;
 import org.apache.kafka.streams.errors.internals.FailedProcessingException;
+import org.apache.kafka.streams.kstream.DeadLetterQueueOptions;
 import org.apache.kafka.streams.processor.Cancellable;
 import org.apache.kafka.streams.processor.PunctuationType;
 import org.apache.kafka.streams.processor.Punctuator;
@@ -65,6 +66,8 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 
 import static java.util.Collections.singleton;
+import static org.apache.kafka.streams.StreamsConfig.DEFAULT_DEAD_LETTER_QUEUE_ENABLED_CONFIG;
+import static org.apache.kafka.streams.StreamsConfig.DEFAULT_DEAD_LETTER_QUEUE_TOPIC_CONFIG;
 import static org.apache.kafka.streams.StreamsConfig.PROCESSING_EXCEPTION_HANDLER_CLASS_CONFIG;
 import static org.apache.kafka.streams.processor.internals.metrics.StreamsMetricsImpl.maybeMeasureLatency;
 import static org.apache.kafka.streams.processor.internals.metrics.StreamsMetricsImpl.maybeRecordSensor;
@@ -1424,10 +1427,57 @@ public class StreamTask extends AbstractTask implements ProcessorNodePunctuator,
                     partition,
                     source,
                     timestampExtractor,
-                    defaultDeserializationExceptionHandler,
+                    resolveDeserializationExceptionHandler(source),
                     processorContext,
                     logContext
             );
+        }
+
+        /**
+         * Resolve the effective deserialization exception handler for a source node, applying the opt-in Dead
+         * Letter Queue (DLQ) precedence: a per-source-node DSL opt-in (via
+         * {@link org.apache.kafka.streams.kstream.KStream#withDeadLetterQueue(String, DeadLetterQueueOptions)})
+         * takes precedence over the global {@code default.deadletterqueue.*} defaults, which are disabled by
+         * default. When neither opt-in applies, the topology's configured handler is returned unchanged so that
+         * non-opted-in topologies retain byte-for-byte identical error-handling behaviour.
+         *
+         * @param source the source node the queue is being created for
+         * @return the configured handler, wrapped in the DLQ-aware decorator only when DLQ is opted in
+         */
+        private DeserializationExceptionHandler resolveDeserializationExceptionHandler(final SourceNode<?, ?> source) {
+            // 1) DSL-level opt-in (most specific) — a topic marked on the source graph node via withDeadLetterQueue.
+            final String dslDlqTopic = source.deadLetterQueueTopic();
+            if (dslDlqTopic != null) {
+                final DeadLetterQueueOptions dslOptions = source.deadLetterQueueOptions() != null
+                    ? source.deadLetterQueueOptions()
+                    : DeadLetterQueueOptions.with(dslDlqTopic);
+                return new DeadLetterQueueDeserializationExceptionHandler(
+                    defaultDeserializationExceptionHandler,
+                    dslDlqTopic,
+                    dslOptions
+                );
+            }
+
+            // 2) Global default.deadletterqueue.* fallback — off unless explicitly enabled with a topic set.
+            final Map<String, Object> appConfigs = processorContext.appConfigs();
+            final Object enabledValue = appConfigs.get(DEFAULT_DEAD_LETTER_QUEUE_ENABLED_CONFIG);
+            final boolean globalEnabled = enabledValue instanceof Boolean
+                ? (Boolean) enabledValue
+                : Boolean.parseBoolean(String.valueOf(enabledValue));
+            if (globalEnabled) {
+                final Object topicValue = appConfigs.get(DEFAULT_DEAD_LETTER_QUEUE_TOPIC_CONFIG);
+                final String globalTopic = topicValue == null ? null : String.valueOf(topicValue);
+                if (globalTopic != null && !globalTopic.trim().isEmpty()) {
+                    return new DeadLetterQueueDeserializationExceptionHandler(
+                        defaultDeserializationExceptionHandler,
+                        globalTopic,
+                        DeadLetterQueueOptions.with(globalTopic)
+                    );
+                }
+            }
+
+            // 3) No opt-in — preserve the existing behaviour exactly.
+            return defaultDeserializationExceptionHandler;
         }
     }
 }
