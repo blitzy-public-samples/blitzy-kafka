@@ -1681,6 +1681,34 @@ public class StreamsConfigTest {
         assertNull(config.getString(StreamsConfig.ERRORS_DEAD_LETTER_QUEUE_TOPIC_NAME_CONFIG));
     }
 
+    @Test
+    public void shouldSetDefaultForNewDeadLetterQueueConfigs() {
+        // Regression coverage for the two new opt-in DSL DLQ global keys:
+        // default.deadletterqueue.topic (STRING, default null) and
+        // default.deadletterqueue.enabled (BOOLEAN, default false). Effective-config precedence is
+        // by design: the DSL KStream#withDeadLetterQueue(topic, options) call overrides any
+        // per-topology setting, which overrides these global default.deadletterqueue.* defaults
+        // (precedence resolution itself is exercised by the DSL/decorator tests, not here).
+
+        // Defaults when no DLQ keys are set on the base props.
+        final StreamsConfig config = new StreamsConfig(props);
+        assertNull(config.getString(StreamsConfig.DEFAULT_DEAD_LETTER_QUEUE_TOPIC_CONFIG));
+        assertFalse(config.getBoolean(StreamsConfig.DEFAULT_DEAD_LETTER_QUEUE_ENABLED_CONFIG));
+
+        // Explicit round-trip parsing when both new keys are set (local props copy, no shared state).
+        final Properties p = new Properties();
+        p.putAll(props);
+        p.put(StreamsConfig.DEFAULT_DEAD_LETTER_QUEUE_TOPIC_CONFIG, "my-dlq");
+        p.put(StreamsConfig.DEFAULT_DEAD_LETTER_QUEUE_ENABLED_CONFIG, true);
+        final StreamsConfig configured = new StreamsConfig(p);
+        assertEquals("my-dlq", configured.getString(StreamsConfig.DEFAULT_DEAD_LETTER_QUEUE_TOPIC_CONFIG));
+        assertTrue(configured.getBoolean(StreamsConfig.DEFAULT_DEAD_LETTER_QUEUE_ENABLED_CONFIG));
+
+        // Coexistence (no conflation): the new keys must not alter the legacy KIP-1034 key,
+        // which remains at its own default (null) and is independent of default.deadletterqueue.*.
+        assertNull(configured.getString(StreamsConfig.ERRORS_DEAD_LETTER_QUEUE_TOPIC_NAME_CONFIG));
+    }
+
     static class MisconfiguredSerde implements Serde<Object> {
         @Override
         public void configure(final Map<String, ?>  configs, final boolean isKey) {
