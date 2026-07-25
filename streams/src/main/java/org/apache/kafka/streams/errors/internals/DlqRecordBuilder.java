@@ -21,7 +21,6 @@ import org.apache.kafka.common.serialization.StringSerializer;
 import org.apache.kafka.streams.errors.ErrorHandlerContext;
 import org.apache.kafka.streams.kstream.DeadLetterQueueOptions;
 
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
@@ -42,23 +41,53 @@ import java.util.Objects;
  *         rather than the {@code __streams.errors.*} family;</li>
  *     <li>it adds a dedicated {@link #HEADER_FAILURE_TIMESTAMP} header carrying the wall-clock time at which
  *         the failure was dead-lettered, and it does not emit a stack-trace header;</li>
- *     <li>it honours the {@link DeadLetterQueueOptions#includeHeaders() header-inclusion toggle} and the
- *         {@link DeadLetterQueueOptions#maxRecordSize() maximum record (value) size}.</li>
+ *     <li>it honours the {@link DeadLetterQueueOptions#includeHeaders() header-inclusion toggle}.</li>
  * </ul>
  *
- * <p>When the configured {@link DeadLetterQueueOptions#maxRecordSize() max record size} is exceeded by the
- * value payload, the value is <em>truncated</em> to fit and a {@link #HEADER_VALUE_TRUNCATED} header is added;
- * the record is <em>never dropped</em>, preserving the guarantee that every DLQ-eligible failed record lands
- * on the DLQ topic.
+ * <h2>Original bytes are preserved verbatim</h2>
+ * <p>Per the DLQ feature's success criteria, the DLQ record carries the failed record's original key/value
+ * bytes <em>exactly</em> as received: the builder never truncates, pads, copies, or otherwise mutates them,
+ * and — when header inclusion is enabled — it always emits <em>exactly the six</em> {@code dlq.*} headers
+ * declared below, no more and no fewer. The bytes are passed through by reference (no defensive copy), so the
+ * failure path adds no memory amplification. Bounding the <em>physical</em> size of a DLQ record is delegated
+ * to the shared producer / broker message-size configuration (for example {@code max.request.size} and the
+ * topic's {@code max.message.bytes}); the builder does <em>not</em> apply
+ * {@link DeadLetterQueueOptions#maxRecordSize()} as a value truncation, because truncating would break the
+ * original-bytes guarantee that inspection/replay tooling relies on.
+ *
+ * <h2>Timestamps</h2>
+ * <p>Two independent timestamps are recorded, with distinct meanings:
+ * <ul>
+ *     <li>the outgoing {@link ProducerRecord}'s own timestamp is the failed record's <em>source event time</em>
+ *         ({@link ErrorHandlerContext#timestamp()}) when it is available. When the source timestamp is
+ *         unavailable — {@link ErrorHandlerContext#timestamp()} returns a negative value such as
+ *         {@code ConsumerRecord.NO_TIMESTAMP} ({@code -1}) — the record timestamp is left {@code null} so the
+ *         producer stamps the send time. This guard is required because {@link ProducerRecord} rejects a
+ *         negative non-null timestamp; building must never throw for a DLQ-eligible record, otherwise the
+ *         record would be lost instead of dead-lettered;</li>
+ *     <li>the {@link #HEADER_FAILURE_TIMESTAMP} header carries the wall-clock time (epoch millis) at which the
+ *         failure was dead-lettered — i.e. when this builder ran — which is independent of, and generally
+ *         later than, the source event time above.</li>
+ * </ul>
+ *
+ * <h2>Data classification / privacy</h2>
+ * <p>When header inclusion is enabled (the default), the {@link #HEADER_EXCEPTION_MESSAGE} header carries the
+ * exception message verbatim. An exception message can contain sensitive data (for example fragments of the
+ * offending payload) and is not size-bounded by this builder. Operators who must not expose such data on the
+ * DLQ topic — or who need to keep DLQ records small — should disable header inclusion via
+ * {@link DeadLetterQueueOptions#withIncludeHeaders(boolean) withIncludeHeaders(false)}, which suppresses all
+ * {@code dlq.*} headers while still preserving the original key/value bytes.
  *
  * <p>The class is stateless (only {@code static} methods) and therefore thread-safe, which is required because
- * DLQ records may be built concurrently across multiple {@code StreamThread} instances.
+ * DLQ records may be built concurrently across multiple {@code StreamThread} instances. The public
+ * {@code build*} methods and the six {@code HEADER_*} constants are consumed from other packages (the DLQ-aware
+ * handler decorator and the runtime send sites), so they are intentionally {@code public}.
  */
 public final class DlqRecordBuilder {
 
     /** Header carrying the fully-qualified class name of the exception that caused the failure. */
     public static final String HEADER_EXCEPTION_CLASS = "dlq.exception.class";
-    /** Header carrying the exception message (may be absent if the exception carried no message). */
+    /** Header carrying the exception message (its value is {@code null} when the exception carried no message). */
     public static final String HEADER_EXCEPTION_MESSAGE = "dlq.exception.message";
     /** Header carrying the source topic of the failed record. */
     public static final String HEADER_SOURCE_TOPIC = "dlq.source.topic";
@@ -68,11 +97,6 @@ public final class DlqRecordBuilder {
     public static final String HEADER_SOURCE_OFFSET = "dlq.source.offset";
     /** Header carrying the wall-clock timestamp (epoch millis) at which the record was dead-lettered. */
     public static final String HEADER_FAILURE_TIMESTAMP = "dlq.failure.timestamp";
-    /**
-     * Header added (with the string value {@code "true"}) when the value payload was truncated to satisfy
-     * {@link DeadLetterQueueOptions#maxRecordSize()}. Absent when no truncation occurred.
-     */
-    public static final String HEADER_VALUE_TRUNCATED = "dlq.value.truncated";
 
     private DlqRecordBuilder() {
         // stateless utility; not instantiable
@@ -87,7 +111,7 @@ public final class DlqRecordBuilder {
      * @param value     the original (non-deserialized) value bytes of the failed record (may be {@code null})
      * @param context   the error handler context of the failure (source coordinates and timestamp)
      * @param exception  the exception that caused the failure
-     * @param options   the effective DLQ options (header toggle and max record size)
+     * @param options   the effective DLQ options (currently the header-inclusion toggle)
      * @return a singleton list holding the built DLQ record, or an empty list when {@code dlqTopic} is null
      */
     public static List<ProducerRecord<byte[], byte[]>> buildDeadLetterQueueRecords(final String dlqTopic,
@@ -105,12 +129,13 @@ public final class DlqRecordBuilder {
     /**
      * Build a single DLQ {@link ProducerRecord} for the supplied failed record.
      *
-     * <p>The outgoing record carries the original key/value bytes (with the value truncated to
-     * {@link DeadLetterQueueOptions#maxRecordSize()} when necessary) and, unless
-     * {@link DeadLetterQueueOptions#includeHeaders()} is {@code false}, the six {@code dlq.*} diagnostic
-     * headers plus (when truncation occurred) the {@link #HEADER_VALUE_TRUNCATED} marker. The producer-record
-     * timestamp is taken from {@link ErrorHandlerContext#timestamp()} so the DLQ record preserves the source
-     * record's event time; the wall-clock failure time is recorded separately in {@link #HEADER_FAILURE_TIMESTAMP}.
+     * <p>The outgoing record carries the <em>original</em> key/value bytes verbatim (never truncated or copied)
+     * and, unless {@link DeadLetterQueueOptions#includeHeaders()} is {@code false}, exactly the six {@code dlq.*}
+     * diagnostic headers declared on this class. The producer-record timestamp is the source record's event time
+     * ({@link ErrorHandlerContext#timestamp()}), or {@code null} when that timestamp is unavailable
+     * (negative, e.g. {@code ConsumerRecord.NO_TIMESTAMP}); the wall-clock failure time is recorded separately in
+     * {@link #HEADER_FAILURE_TIMESTAMP}. See the class Javadoc for the full timestamp and data-classification
+     * contract.
      *
      * @param dlqTopic  the resolved (non-null) DLQ topic name
      * @param key       the original key bytes (may be {@code null})
@@ -131,15 +156,18 @@ public final class DlqRecordBuilder {
         Objects.requireNonNull(exception, "exception cannot be null while building a dead letter queue record");
         Objects.requireNonNull(options, "dead letter queue options cannot be null while building a dead letter queue record");
 
-        final int maxRecordSize = options.maxRecordSize();
-        final boolean truncate = value != null
-            && maxRecordSize >= 0
-            && maxRecordSize != DeadLetterQueueOptions.NO_MAX_RECORD_SIZE
-            && value.length > maxRecordSize;
-        final byte[] outgoingValue = truncate ? Arrays.copyOf(value, maxRecordSize) : value;
+        // The source record's event time may be unavailable: ErrorHandlerContext.timestamp() returns a negative
+        // value (e.g. ConsumerRecord.NO_TIMESTAMP == -1) in that case. ProducerRecord rejects a negative non-null
+        // timestamp, so map any unavailable/negative value to null (the producer then stamps the send time).
+        // Building must never throw for a DLQ-eligible record, otherwise the record would be lost rather than
+        // dead-lettered. (This is a deliberate divergence from ExceptionHandlerUtils, which does not guard.)
+        final long sourceTimestamp = context.timestamp();
+        final Long recordTimestamp = sourceTimestamp < 0 ? null : Long.valueOf(sourceTimestamp);
 
+        // Original key/value bytes are carried verbatim: no truncation and no defensive copy, so the DLQ record
+        // preserves the exact bytes of the failed record and the failure path adds no memory amplification.
         final ProducerRecord<byte[], byte[]> producerRecord =
-            new ProducerRecord<>(dlqTopic, null, context.timestamp(), key, outgoingValue);
+            new ProducerRecord<>(dlqTopic, null, recordTimestamp, key, value);
 
         if (options.includeHeaders()) {
             try (StringSerializer stringSerializer = new StringSerializer()) {
@@ -155,10 +183,6 @@ public final class DlqRecordBuilder {
                     stringSerializer.serialize(null, String.valueOf(context.offset())));
                 producerRecord.headers().add(HEADER_FAILURE_TIMESTAMP,
                     stringSerializer.serialize(null, String.valueOf(System.currentTimeMillis())));
-                if (truncate) {
-                    producerRecord.headers().add(HEADER_VALUE_TRUNCATED,
-                        stringSerializer.serialize(null, "true"));
-                }
             }
         }
 
