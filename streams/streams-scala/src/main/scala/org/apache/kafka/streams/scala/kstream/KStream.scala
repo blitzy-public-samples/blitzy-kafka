@@ -52,19 +52,6 @@ import scala.jdk.CollectionConverters._
 class KStream[K, V](val inner: KStreamJ[K, V]) {
 
   /**
-   * Opt this stream in to the DSL-level Dead Letter Queue (DLQ). Records that fail deserialization at this
-   * stream's originating source topic(s) are routed to `dlqTopic` (with the given options) instead of failing
-   * the stream thread or being silently skipped. Streams that never call this method are unaffected.
-   *
-   * @param dlqTopic the name of the (pre-existing) Dead Letter Queue topic
-   * @param options  the [[DeadLetterQueueOptions]] controlling DLQ behaviour
-   * @return this [[KStream]], unchanged, for fluent chaining
-   * @see `org.apache.kafka.streams.kstream.KStream#withDeadLetterQueue`
-   */
-  def withDeadLetterQueue(dlqTopic: String, options: DeadLetterQueueOptions): KStream[K, V] =
-    new KStream(inner.withDeadLetterQueue(dlqTopic, options))
-
-  /**
    * Create a new [[KStream]] that consists all records of this stream which satisfies the given predicate.
    *
    * @param predicate a filter that is applied to each record
@@ -893,4 +880,19 @@ class KStream[K, V](val inner: KStreamJ[K, V]) {
    */
   def peek(action: (K, V) => Unit, named: Named): KStream[K, V] =
     new KStream(inner.peek(action.asForeachAction, named))
+
+  /**
+   * Enable an opt-in Dead Letter Queue (DLQ) for this stream, routing records that fail deserialization or
+   * processing to the given `dlqTopic` instead of stopping the stream thread (fail-fast) or silently skipping
+   * them (log-and-continue). Only streams on which this method is called participate in DLQ routing; any topology
+   * that does not call it retains its exact, unchanged error-handling behavior.
+   *
+   * @param dlqTopic the name of the (pre-existing) Dead Letter Queue topic to route failed records to
+   * @param options  additional [[org.apache.kafka.streams.kstream.DeadLetterQueueOptions]] such as the maximum
+   *                 record size and the header-inclusion toggle
+   * @return this same [[KStream]], unchanged, so DLQ configuration can be chained fluently
+   * @see `org.apache.kafka.streams.kstream.KStream#withDeadLetterQueue`
+   */
+  def withDeadLetterQueue(dlqTopic: String, options: DeadLetterQueueOptions): KStream[K, V] =
+    new KStream(inner.withDeadLetterQueue(dlqTopic, options))
 }

@@ -72,6 +72,7 @@
                 <li><a class="reference internal" href="#controlling-emit-rate" id="id32">Controlling KTable update rate</a></li>
                 <li><a class="reference internal" href="#versioned-state-stores" id="id36">Using timestamp-based semantics for table processors</a></li>
                 <li><a class="reference internal" href="#writing-streams-back-to-kafka" id="id25">Writing streams back to Kafka</a></li>
+                <li><a class="reference internal" href="#dead-letter-queue" id="id38">Routing failed records to a Dead Letter Queue</a></li>
                 <li><a class="reference internal" href="#testing-a-streams-app" id="id26">Testing a Streams application</a></li>
                 <li><a class="reference internal" href="#scala-dsl" id="id27">Kafka Streams DSL for Scala</a></li>
                 <ul>
@@ -4169,6 +4170,23 @@ stream.to(&quot;my-stream-output-topic&quot;, Produced.with(Serdes.String(), Ser
                     it is now your responsibility to guarantee message delivery semantics when talking to such external systems (e.g., to
                     retry on delivery failure or to prevent message duplication).</p>
             </div>
+        </div>
+        <div class="section" id="dead-letter-queue">
+            <span id="streams-developer-guide-dsl-dlq"></span><h2><a class="toc-backref" href="#id38">Routing failed records to a Dead Letter Queue</a><a class="headerlink" href="#dead-letter-queue" title="Permalink to this headline"></a></h2>
+            <p>Kafka Streams supports an <b>opt-in</b>, per-<code>KStream</code> Dead Letter Queue (DLQ). By calling
+               <code>withDeadLetterQueue(String dlqTopic, DeadLetterQueueOptions options)</code> on a stream, records that fail
+               <b>deserialization</b> or <b>processing</b> are routed to the configured DLQ topic instead of stopping the application
+               or being silently skipped. The call returns the same-typed <code>KStream&lt;K, V&gt;</code>, so it can be chained fluently.</p>
+            <p>Each DLQ record preserves the <b>original key and value bytes</b> of the failed record and attaches six diagnostic
+               headers: <code>dlq.exception.class</code>, <code>dlq.exception.message</code>, <code>dlq.source.topic</code>,
+               <code>dlq.source.partition</code>, <code>dlq.source.offset</code>, and <code>dlq.failure.timestamp</code>.</p>
+            <p><code>DeadLetterQueueOptions</code> configures (1) the DLQ topic name, (2) a maximum record size, and (3) whether the
+               diagnostic headers are included (a header-inclusion toggle that defaults to <code>true</code>).</p>
+            <p>The DLQ topic is assumed to <b>already exist</b>; Kafka Streams does not create it automatically. A
+               <code>withDeadLetterQueue(...)</code> call takes precedence over the global
+               <code>default.deadletterqueue.topic</code> / <code>default.deadletterqueue.enabled</code> configuration defaults.</p>
+            <pre class="line-numbers"><code class="language-java">KStream&lt;String, String&gt; stream = builder.stream("input-topic");
+stream.withDeadLetterQueue("my-dlq-topic", DeadLetterQueueOptions.with("my-dlq-topic"));</code></pre>
         </div>
         <div class="section" id="testing-a-streams-app">
             <h2><a class="headerlink" href="#testing-a-streams-app" title="Permalink to this headline">Testing a Streams application</a></h2>
