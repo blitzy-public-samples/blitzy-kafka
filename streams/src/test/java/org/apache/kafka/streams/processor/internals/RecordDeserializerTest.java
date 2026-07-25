@@ -18,6 +18,7 @@ package org.apache.kafka.streams.processor.internals;
 
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.common.MetricName;
 import org.apache.kafka.common.header.Header;
 import org.apache.kafka.common.header.Headers;
 import org.apache.kafka.common.header.internals.RecordHeader;
@@ -25,6 +26,7 @@ import org.apache.kafka.common.header.internals.RecordHeaders;
 import org.apache.kafka.common.metrics.Metrics;
 import org.apache.kafka.common.record.TimestampType;
 import org.apache.kafka.common.serialization.Serdes;
+import org.apache.kafka.common.utils.LogCaptureAppender;
 import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.streams.StreamsConfig;
 import org.apache.kafka.streams.errors.DeserializationExceptionHandler;
@@ -32,6 +34,7 @@ import org.apache.kafka.streams.errors.ErrorHandlerContext;
 import org.apache.kafka.streams.errors.LogAndContinueExceptionHandler;
 import org.apache.kafka.streams.errors.LogAndFailExceptionHandler;
 import org.apache.kafka.streams.errors.StreamsException;
+import org.apache.kafka.streams.kstream.DeadLetterQueueOptions;
 import org.apache.kafka.streams.processor.TaskId;
 import org.apache.kafka.streams.state.StateSerdes;
 import org.apache.kafka.test.InternalMockProcessorContext;
@@ -47,6 +50,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+import static org.apache.kafka.common.utils.Utils.mkEntry;
+import static org.apache.kafka.common.utils.Utils.mkMap;
 import static org.apache.kafka.streams.StreamsConfig.DESERIALIZATION_EXCEPTION_HANDLER_CLASS_CONFIG;
 import static org.apache.kafka.streams.errors.DeserializationExceptionHandler.Response;
 import static org.apache.kafka.streams.errors.DeserializationExceptionHandler.Result;
@@ -310,6 +315,64 @@ public class RecordDeserializerTest {
             assertEquals("dlq", collector.collected().get(0).topic());
             assertEquals("hello", new String((byte[]) collector.collected().get(0).key()));
             assertEquals("world", new String((byte[]) collector.collected().get(0).value()));
+        }
+    }
+
+    @Test
+    public void shouldRecordDlqSentMetricAndWarnDuringDeserializationException() {
+        try (final LogCaptureAppender logCaptureAppender =
+                     LogCaptureAppender.createAndRegister(RecordDeserializerTest.class);
+             final Metrics metrics = new Metrics()) {
+            final MockRecordCollector collector = new MockRecordCollector();
+            final InternalProcessorContext<Object, Object> internalProcessorContext =
+                    new InternalMockProcessorContext<>(
+                            new StateSerdes<>("sink", Serdes.ByteArray(), Serdes.ByteArray()),
+                            collector
+                    );
+            // Opt-in DSL DLQ path: wrap the configured handler in the DLQ-aware decorator so the deserialization
+            // send site emits the dlq-records-sent metric and the targeted WARN. This observability is gated on the
+            // effective handler being this decorator, so the pre-existing global-config (KIP-1034) path stays unobserved.
+            final DeserializationExceptionHandler deserializationExceptionHandler =
+                    new DeadLetterQueueDeserializationExceptionHandler(
+                            new LogAndContinueExceptionHandler(),
+                            "dlq",
+                            DeadLetterQueueOptions.with("dlq"));
+
+            RecordDeserializer.handleDeserializationFailure(
+                    deserializationExceptionHandler,
+                    internalProcessorContext,
+                    new RuntimeException(new NullPointerException("Oopsie")),
+                    new ConsumerRecord<>("source",
+                            0,
+                            0,
+                            123,
+                            TimestampType.CREATE_TIME,
+                            -1,
+                            -1,
+                            "hello".getBytes(StandardCharsets.UTF_8),
+                            "world".getBytes(StandardCharsets.UTF_8),
+                            new RecordHeaders(),
+                            Optional.empty()),
+                    new LogContext().logger(this.getClass()),
+                    metrics.sensor("dropped-records"),
+                    "sourceNode"
+            );
+
+            assertEquals(1.0, internalProcessorContext.metrics().metrics().get(new MetricName(
+                    "dlq-records-sent-total",
+                    "stream-task-metrics",
+                    "The total number of records sent to the dead letter queue",
+                    mkMap(
+                            mkEntry("thread-id", Thread.currentThread().getName()),
+                            mkEntry("task-id", internalProcessorContext.taskId().toString())
+                    ))).metricValue());
+
+            final List<String> messages = logCaptureAppender.getMessages();
+            final boolean warnPresent = messages.stream().anyMatch(message ->
+                    message.contains("Sent a failed record to the dead letter queue.")
+                            && message.contains("exceptionClass=[java.lang.RuntimeException]")
+                            && message.contains("offset=[0"));
+            assertTrue(warnPresent, "Expected a targeted DLQ WARN log. Captured: " + messages);
         }
     }
 

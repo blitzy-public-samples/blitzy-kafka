@@ -19,80 +19,98 @@ package org.apache.kafka.streams.kstream;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/**
- * Unit tests for {@link DeadLetterQueueOptions}: default values from the {@link DeadLetterQueueOptions#with(String)}
- * factory, immutability of the {@code with*} builder methods, and {@code equals}/{@code hashCode} semantics.
- */
 public class DeadLetterQueueOptionsTest {
 
-    @Test
-    public void shouldApplyDefaultsFromFactory() {
-        final DeadLetterQueueOptions options = DeadLetterQueueOptions.with("dlq");
+    private static final String DLQ_TOPIC = "dlq-topic";
 
-        assertEquals("dlq", options.dlqTopic());
-        // default: no size limit
+    @Test
+    public void shouldUseDefaultsWhenCreatedWithTopicOnly() {
+        final DeadLetterQueueOptions options = DeadLetterQueueOptions.with(DLQ_TOPIC);
+
+        assertEquals(DLQ_TOPIC, options.dlqTopic());
         assertEquals(DeadLetterQueueOptions.NO_MAX_RECORD_SIZE, options.maxRecordSize());
-        assertEquals(Integer.MAX_VALUE, DeadLetterQueueOptions.NO_MAX_RECORD_SIZE);
-        // default: headers included
+        assertEquals(Integer.MAX_VALUE, options.maxRecordSize());
         assertTrue(options.includeHeaders());
     }
 
     @Test
-    public void shouldSetMaxRecordSizeWithoutMutatingReceiver() {
-        final DeadLetterQueueOptions base = DeadLetterQueueOptions.with("dlq");
-        final DeadLetterQueueOptions withSize = base.withMaxRecordSize(1024);
+    public void shouldReturnNewInstanceAndNotMutateOriginalWhenSettingMaxRecordSize() {
+        final DeadLetterQueueOptions original = DeadLetterQueueOptions.with(DLQ_TOPIC);
+        final DeadLetterQueueOptions updated = original.withMaxRecordSize(1024);
 
-        assertNotSame(base, withSize);
-        assertEquals(1024, withSize.maxRecordSize());
-        // receiver is unchanged (immutability)
-        assertEquals(DeadLetterQueueOptions.NO_MAX_RECORD_SIZE, base.maxRecordSize());
-        // other fields are copied through
-        assertEquals("dlq", withSize.dlqTopic());
-        assertTrue(withSize.includeHeaders());
+        assertNotSame(original, updated);
+        assertEquals(DeadLetterQueueOptions.NO_MAX_RECORD_SIZE, original.maxRecordSize());
+        assertEquals(1024, updated.maxRecordSize());
     }
 
     @Test
-    public void shouldSetIncludeHeadersWithoutMutatingReceiver() {
-        final DeadLetterQueueOptions base = DeadLetterQueueOptions.with("dlq");
-        final DeadLetterQueueOptions withoutHeaders = base.withIncludeHeaders(false);
+    public void shouldReturnNewInstanceAndNotMutateOriginalWhenSettingIncludeHeaders() {
+        final DeadLetterQueueOptions original = DeadLetterQueueOptions.with(DLQ_TOPIC);
+        final DeadLetterQueueOptions updated = original.withIncludeHeaders(false);
 
-        assertNotSame(base, withoutHeaders);
-        assertEquals(false, withoutHeaders.includeHeaders());
-        // receiver is unchanged (immutability)
-        assertTrue(base.includeHeaders());
-        // other fields are copied through
-        assertEquals("dlq", withoutHeaders.dlqTopic());
-        assertEquals(DeadLetterQueueOptions.NO_MAX_RECORD_SIZE, withoutHeaders.maxRecordSize());
+        assertNotSame(original, updated);
+        assertTrue(original.includeHeaders());
+        assertFalse(updated.includeHeaders());
     }
 
     @Test
-    public void shouldChainBuilderMethods() {
-        final DeadLetterQueueOptions options = DeadLetterQueueOptions.with("dlq")
-            .withMaxRecordSize(2048)
+    public void shouldCopyUnrelatedFieldsWhenSettingMaxRecordSize() {
+        final DeadLetterQueueOptions options = DeadLetterQueueOptions.with(DLQ_TOPIC)
+            .withIncludeHeaders(false)
+            .withMaxRecordSize(2048);
+
+        assertEquals(DLQ_TOPIC, options.dlqTopic());
+        assertEquals(2048, options.maxRecordSize());
+        assertFalse(options.includeHeaders());
+    }
+
+    @Test
+    public void shouldApplyChainedBuilderValues() {
+        final DeadLetterQueueOptions options = DeadLetterQueueOptions.with(DLQ_TOPIC)
+            .withMaxRecordSize(512)
             .withIncludeHeaders(false);
 
-        assertEquals("dlq", options.dlqTopic());
-        assertEquals(2048, options.maxRecordSize());
-        assertEquals(false, options.includeHeaders());
+        assertEquals(DLQ_TOPIC, options.dlqTopic());
+        assertEquals(512, options.maxRecordSize());
+        assertFalse(options.includeHeaders());
     }
 
     @Test
-    public void shouldImplementEqualsAndHashCode() {
-        final DeadLetterQueueOptions a = DeadLetterQueueOptions.with("dlq").withMaxRecordSize(512);
-        final DeadLetterQueueOptions b = DeadLetterQueueOptions.with("dlq").withMaxRecordSize(512);
-        final DeadLetterQueueOptions differentTopic = DeadLetterQueueOptions.with("other").withMaxRecordSize(512);
-        final DeadLetterQueueOptions differentSize = DeadLetterQueueOptions.with("dlq").withMaxRecordSize(256);
-        final DeadLetterQueueOptions differentHeaders = DeadLetterQueueOptions.with("dlq")
-            .withMaxRecordSize(512).withIncludeHeaders(false);
+    public void shouldBeEqualWithSameHashCodeWhenAllFieldsMatch() {
+        final DeadLetterQueueOptions a = DeadLetterQueueOptions.with(DLQ_TOPIC).withMaxRecordSize(256);
+        final DeadLetterQueueOptions b = DeadLetterQueueOptions.with(DLQ_TOPIC).withMaxRecordSize(256);
 
+        assertNotSame(a, b);
         assertEquals(a, b);
         assertEquals(a.hashCode(), b.hashCode());
-        assertNotEquals(a, differentTopic);
-        assertNotEquals(a, differentSize);
-        assertNotEquals(a, differentHeaders);
+    }
+
+    @Test
+    public void shouldNotBeEqualWhenTopicDiffers() {
+        final DeadLetterQueueOptions a = DeadLetterQueueOptions.with("topic-a");
+        final DeadLetterQueueOptions b = DeadLetterQueueOptions.with("topic-b");
+
+        assertNotEquals(a, b);
+    }
+
+    @Test
+    public void shouldNotBeEqualWhenMaxRecordSizeDiffers() {
+        final DeadLetterQueueOptions a = DeadLetterQueueOptions.with(DLQ_TOPIC).withMaxRecordSize(128);
+        final DeadLetterQueueOptions b = DeadLetterQueueOptions.with(DLQ_TOPIC).withMaxRecordSize(256);
+
+        assertNotEquals(a, b);
+    }
+
+    @Test
+    public void shouldNotBeEqualWhenIncludeHeadersDiffers() {
+        final DeadLetterQueueOptions a = DeadLetterQueueOptions.with(DLQ_TOPIC).withIncludeHeaders(true);
+        final DeadLetterQueueOptions b = DeadLetterQueueOptions.with(DLQ_TOPIC).withIncludeHeaders(false);
+
+        assertNotEquals(a, b);
     }
 }

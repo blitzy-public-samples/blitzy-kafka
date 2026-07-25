@@ -18,11 +18,13 @@ package org.apache.kafka.streams.processor.internals;
 
 import org.apache.kafka.clients.consumer.InvalidOffsetException;
 import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.common.MetricName;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.header.internals.RecordHeaders;
 import org.apache.kafka.common.metrics.Metrics;
 import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.common.serialization.StringSerializer;
+import org.apache.kafka.common.utils.LogCaptureAppender;
 import org.apache.kafka.common.utils.MockTime;
 import org.apache.kafka.streams.StreamsBuilder;
 import org.apache.kafka.streams.StreamsConfig;
@@ -62,6 +64,8 @@ import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
 
+import static org.apache.kafka.common.utils.Utils.mkEntry;
+import static org.apache.kafka.common.utils.Utils.mkMap;
 import static org.apache.kafka.streams.errors.ProcessingExceptionHandler.Response;
 import static org.apache.kafka.streams.errors.ProcessingExceptionHandler.Result;
 import static org.apache.kafka.streams.processor.internals.metrics.StreamsMetricsImpl.ROLLUP_VALUE;
@@ -69,6 +73,7 @@ import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -224,6 +229,52 @@ public class ProcessorNodeTest {
         assertEquals("dlq", collector.collected().get(0).topic());
         assertEquals("sourceKey", new String((byte[]) collector.collected().get(0).key()));
         assertEquals("sourceValue", new String((byte[]) collector.collected().get(0).value()));
+    }
+
+    @Test
+    public void shouldNotEmitOptInDlqObservabilityForNonOptInProcessingException() {
+        // Regression: the opt-in DSL DLQ observability (dlq-records-sent metric + targeted WARN) must NOT fire for
+        // the pre-existing global-config (KIP-1034) processing path. A processing failure with the global DLQ topic
+        // configured still produces the DLQ record (unchanged behaviour), but the new observability stays absent so
+        // topologies that do not opt in via withDeadLetterQueue keep byte-for-byte identical behaviour.
+        final ProcessorNode<Object, Object, Object, Object> node = new ProcessorNode<>("processor",
+                (Processor<Object, Object, Object, Object>) record -> {
+                    throw new NullPointerException("Oopsie!");
+                }, Collections.emptySet());
+
+        final MockRecordCollector collector = new MockRecordCollector();
+        final InternalProcessorContext<Object, Object> internalProcessorContext =
+                new InternalMockProcessorContext<>(
+                        new StateSerdes<>("sink", Serdes.ByteArray(), Serdes.ByteArray()),
+                        collector
+                );
+        final ProcessingExceptionHandler processingExceptionHandler = new LogAndContinueProcessingExceptionHandler();
+        processingExceptionHandler.configure(Collections.singletonMap(StreamsConfig.ERRORS_DEAD_LETTER_QUEUE_TOPIC_NAME_CONFIG, "dlq"));
+        node.init(internalProcessorContext, processingExceptionHandler);
+
+        try (final LogCaptureAppender logCaptureAppender = LogCaptureAppender.createAndRegister(ProcessorNode.class)) {
+            node.process(new Record<>("hello", "world", 0L));
+
+            // The global-config DLQ record is still produced (KIP-1034 behaviour unchanged).
+            assertEquals(1, collector.collected().size());
+            assertEquals("dlq", collector.collected().get(0).topic());
+
+            // ...but the opt-in dlq-records-sent metric is never registered for the non-opt-in path.
+            assertNull(internalProcessorContext.metrics().metrics().get(new MetricName(
+                    "dlq-records-sent-total",
+                    "stream-task-metrics",
+                    "The total number of records sent to the dead letter queue",
+                    mkMap(
+                            mkEntry("thread-id", Thread.currentThread().getName()),
+                            mkEntry("task-id", internalProcessorContext.taskId().toString())
+                    ))));
+
+            // ...and the targeted opt-in DLQ WARN is never emitted for the non-opt-in path.
+            final List<String> messages = logCaptureAppender.getMessages();
+            final boolean warnPresent = messages.stream().anyMatch(message ->
+                    message.contains("Sent a failed record to the dead letter queue."));
+            assertFalse(warnPresent, "Opt-in DLQ WARN must not fire for the non-opt-in path. Captured: " + messages);
+        }
     }
 
     private static class ExceptionalProcessor implements Processor<Object, Object, Object, Object> {

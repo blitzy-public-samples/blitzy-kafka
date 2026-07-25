@@ -1889,6 +1889,103 @@ public class RecordCollectorTest {
     }
 
     @Test
+    public void shouldNotEmitOptInDlqObservabilityForNonOptInSerializationException() {
+        // Regression: the opt-in DSL DLQ observability (dlq-records-sent metric + targeted WARN) must NOT fire for
+        // the pre-existing global-config (KIP-1034) production path. A serialization failure with the global DLQ
+        // topic configured still produces the DLQ record (unchanged behaviour), but the new observability stays
+        // absent so topologies that do not opt in via withDeadLetterQueue keep byte-for-byte identical behaviour.
+        try (final LogCaptureAppender logCaptureAppender = LogCaptureAppender.createAndRegister(RecordCollectorImpl.class);
+             final ErrorStringSerializer errorSerializer = new ErrorStringSerializer()) {
+            final DefaultProductionExceptionHandler productionExceptionHandler = new DefaultProductionExceptionHandler();
+            productionExceptionHandler.configure(Collections.singletonMap(
+                StreamsConfig.ERRORS_DEAD_LETTER_QUEUE_TOPIC_NAME_CONFIG,
+                "dlq"
+            ));
+            final RecordCollector collector = newRecordCollector(productionExceptionHandler);
+            collector.initialize();
+
+            assertThrows(
+                StreamsException.class,
+                () ->
+                    collector.send(topic, "hello", "world", null, 0, null, errorSerializer, stringSerializer, sinkNodeName, context)
+            );
+
+            // The global-config DLQ record is still produced (KIP-1034 behaviour unchanged).
+            assertEquals(1, mockProducer.history().size());
+            assertEquals("dlq", mockProducer.history().get(0).topic());
+
+            // ...but the opt-in dlq-records-sent metric is never registered for the non-opt-in path.
+            assertNull(streamsMetrics.metrics().get(new MetricName(
+                "dlq-records-sent-total",
+                "stream-task-metrics",
+                "The total number of records sent to the dead letter queue",
+                mkMap(
+                    mkEntry("thread-id", Thread.currentThread().getName()),
+                    mkEntry("task-id", taskId.toString())
+                )
+            )));
+
+            // ...and the targeted opt-in DLQ WARN is never emitted for the non-opt-in path.
+            final List<String> messages = logCaptureAppender.getMessages();
+            final boolean warnPresent = messages.stream().anyMatch(message ->
+                message.contains("Sent a failed record to the dead letter queue."));
+            assertFalse(warnPresent, "Opt-in DLQ WARN must not fire for the non-opt-in path. Captured: " + messages);
+        }
+    }
+
+    @Test
+    public void shouldNotEmitOptInDlqObservabilityForNonOptInProduceException() {
+        // Regression: the opt-in DSL DLQ observability (dlq-records-sent metric + targeted WARN) must NOT fire for
+        // the pre-existing global-config (KIP-1034) production path. A produce-time failure with the global DLQ
+        // topic configured still produces the DLQ record (unchanged behaviour), but the new observability stays
+        // absent so topologies that do not opt in via withDeadLetterQueue keep byte-for-byte identical behaviour.
+        try (final LogCaptureAppender logCaptureAppender = LogCaptureAppender.createAndRegister(RecordCollectorImpl.class)) {
+            final KafkaException exception = new KafkaException("KABOOM!");
+            final StreamsProducer streamProducer = getExceptionalStreamsProducerOnSend(exception);
+            final MockProducer<byte[], byte[]> mockProducer = (MockProducer<byte[], byte[]>) streamProducer.kafkaProducer();
+            final DefaultProductionExceptionHandler productionExceptionHandler = new DefaultProductionExceptionHandler();
+            productionExceptionHandler.configure(Collections.singletonMap(
+                StreamsConfig.ERRORS_DEAD_LETTER_QUEUE_TOPIC_NAME_CONFIG,
+                "dlq"
+            ));
+            final RecordCollector collector = new RecordCollectorImpl(
+                logContext,
+                taskId,
+                streamProducer,
+                productionExceptionHandler,
+                streamsMetrics,
+                topology
+            );
+
+            collector.initialize();
+
+            collector.send(topic, "hello", "world", null, 0, null, stringSerializer, stringSerializer, sinkNodeName, context);
+            assertThrows(StreamsException.class, collector::flush);
+
+            // The global-config DLQ record is still produced (KIP-1034 behaviour unchanged).
+            assertEquals(1, mockProducer.history().size());
+            assertEquals("dlq", mockProducer.history().get(0).topic());
+
+            // ...but the opt-in dlq-records-sent metric is never registered for the non-opt-in path.
+            assertNull(streamsMetrics.metrics().get(new MetricName(
+                "dlq-records-sent-total",
+                "stream-task-metrics",
+                "The total number of records sent to the dead letter queue",
+                mkMap(
+                    mkEntry("thread-id", Thread.currentThread().getName()),
+                    mkEntry("task-id", taskId.toString())
+                )
+            )));
+
+            // ...and the targeted opt-in DLQ WARN is never emitted for the non-opt-in path.
+            final List<String> messages = logCaptureAppender.getMessages();
+            final boolean warnPresent = messages.stream().anyMatch(message ->
+                message.contains("Sent a failed record to the dead letter queue."));
+            assertFalse(warnPresent, "Opt-in DLQ WARN must not fire for the non-opt-in path. Captured: " + messages);
+        }
+    }
+
+    @Test
     public void shouldNotSendIfSendOfOtherTaskFailedInCallback() {
         final TaskId taskId1 = new TaskId(0, 0);
         final TaskId taskId2 = new TaskId(0, 1);
