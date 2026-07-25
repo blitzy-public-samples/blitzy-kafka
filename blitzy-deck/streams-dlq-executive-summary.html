@@ -1,0 +1,827 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Opt-In Dead Letter Queue for Kafka Streams &mdash; Executive Summary</title>
+
+  <!-- Blitzy brand typography: Inter (body), Space Grotesk (display), Fira Code (mono/eyebrow) -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500&amp;family=Inter:wght@400;500;600;700&amp;family=Space+Grotesk:wght@500;600;700&amp;display=swap" rel="stylesheet">
+
+  <!-- reveal.js core (pinned 5.1.0). No reveal theme CSS is loaded: the inline Blitzy theme below must win. -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reset.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.css">
+
+  <!-- ============================================================= -->
+  <!-- Inline Blitzy reveal.js theme (canonical theme file is absent  -->
+  <!-- from the repo; theme is embedded here per the deliverable).    -->
+  <!-- ============================================================= -->
+  <style>
+    :root {
+      /* Brand palette */
+      --blitzy-primary: #5B39F3;   /* primary purple */
+      --blitzy-dark: #2D1C77;      /* dark purple */
+      --blitzy-teal: #94FAD5;      /* teal accent */
+      --blitzy-navy: #1A105F;      /* navy */
+      --blitzy-grad-start: #7A6DEC;
+      --blitzy-grad-mid: #5B39F3;
+      --blitzy-grad-end: #4101DB;
+
+      /* Neutrals */
+      --blitzy-ink: #333333;       /* primary text */
+      --blitzy-bg: #FFFFFF;
+      --blitzy-muted: #6B7280;
+      --blitzy-surface: #F2F0FE;
+      --blitzy-surface-2: #F4EFF6;
+      --blitzy-border: #E5E7EB;
+
+      /* Signature hero gradient */
+      --blitzy-hero: linear-gradient(68deg, #7A6DEC 15.56%, #5B39F3 62.74%, #4101DB 84.44%);
+
+      /* Typography */
+      --font-body: 'Inter', system-ui, sans-serif;
+      --font-display: 'Space Grotesk', 'Inter', sans-serif;
+      --font-mono: 'Fira Code', monospace;
+    }
+
+    /* ---------- Base canvas (designed at 1920x1080) ---------- */
+    .reveal {
+      font-family: var(--font-body);
+      font-size: 32px;
+      font-weight: 400;
+      color: var(--blitzy-ink);
+      background: var(--blitzy-bg);
+      -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
+    }
+    .reveal .slides { text-align: left; }
+
+    .reveal h1, .reveal h2, .reveal h3 {
+      font-family: var(--font-display);
+      color: var(--blitzy-ink);
+      font-weight: 700;
+      line-height: 1.06;
+      margin: 0 0 0.35em 0;
+      text-transform: none;
+      letter-spacing: -0.01em;
+    }
+    .reveal h1 { font-size: 96px; }
+    .reveal h2 { font-size: 68px; }
+    .reveal h3 { font-size: 40px; }
+    .reveal p { line-height: 1.45; margin: 0 0 0.6em 0; }
+    .reveal strong { font-weight: 700; color: var(--blitzy-dark); }
+    .reveal em { font-style: normal; color: var(--blitzy-primary); font-weight: 600; }
+
+    /* Every content section gets generous padding and column layout */
+    .reveal .slides > section,
+    .reveal .slides > section > section {
+      width: 100%;
+      height: 100%;
+      box-sizing: border-box;
+      padding: 90px 110px;
+      top: 0 !important;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+    }
+
+    /* ---------- Eyebrow ---------- */
+    .eyebrow {
+      font-family: var(--font-mono);
+      font-size: 20px;
+      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: 0.16em;
+      color: var(--blitzy-primary);
+      margin: 0 0 18px 0;
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .eyebrow .lucide,
+    .eyebrow svg { width: 22px; height: 22px; stroke-width: 2.25; }
+
+    /* ---------- Bulleted lists with leading Lucide icons ---------- */
+    .reveal ul.blist { list-style: none; margin: 18px 0 0 0; padding: 0; }
+    .reveal ul.blist > li {
+      position: relative;
+      display: flex;
+      align-items: flex-start;
+      gap: 20px;
+      padding: 16px 0;
+      line-height: 1.4;
+      border-bottom: 1px solid var(--blitzy-border);
+    }
+    .reveal ul.blist > li:last-child { border-bottom: none; }
+    .reveal ul.blist > li .bicon {
+      flex: 0 0 auto;
+      width: 44px; height: 44px;
+      border-radius: 12px;
+      background: var(--blitzy-surface);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      margin-top: 2px;
+    }
+    .reveal ul.blist > li .bicon svg { width: 26px; height: 26px; color: var(--blitzy-primary); stroke-width: 2.25; }
+    .reveal ul.blist > li .btext { flex: 1 1 auto; }
+    .reveal ul.blist.tight > li { padding: 12px 0; }
+
+    /* ---------- Cards / stat cards ---------- */
+    .card {
+      background: var(--blitzy-surface);
+      border-radius: 16px;
+      border-left: 6px solid var(--blitzy-primary);
+      padding: 28px 30px;
+      box-sizing: border-box;
+    }
+    .card h3 { margin-bottom: 8px; font-size: 30px; }
+    .card p { font-size: 26px; color: var(--blitzy-ink); margin: 0; }
+    .card .card-head { display: flex; align-items: center; gap: 14px; margin-bottom: 8px; }
+    .card .card-head svg { width: 30px; height: 30px; color: var(--blitzy-primary); stroke-width: 2.25; }
+    .card .card-head h3 { margin: 0; }
+
+    .stat-card {
+      background: var(--blitzy-surface);
+      border-radius: 16px;
+      border-left: 6px solid var(--blitzy-primary);
+      padding: 30px 32px;
+      box-sizing: border-box;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .stat-card .num {
+      font-family: var(--font-display);
+      font-size: 88px;
+      font-weight: 700;
+      line-height: 1;
+      color: var(--blitzy-primary);
+      letter-spacing: -0.02em;
+    }
+    .stat-card .label { font-size: 24px; color: var(--blitzy-ink); font-weight: 500; }
+    .stat-card .sub { font-size: 20px; color: var(--blitzy-muted); }
+
+    .stat-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 26px; margin-top: 30px; }
+    .card-row { display: grid; grid-template-columns: repeat(2, 1fr); gap: 24px; margin-top: 26px; }
+
+    /* ---------- Chips / header grid ---------- */
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      font-family: var(--font-mono);
+      font-size: 26px;
+      font-weight: 500;
+      color: var(--blitzy-primary);
+      background: var(--blitzy-surface);
+      border: 1px solid var(--blitzy-border);
+      border-radius: 999px;
+      padding: 14px 24px;
+    }
+    .chip svg { width: 22px; height: 22px; stroke-width: 2.25; }
+    .chip.small { font-size: 22px; padding: 10px 18px; }
+
+    .header-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 22px; margin-top: 28px; }
+    .header-grid .chip {
+      justify-content: flex-start;
+      border-radius: 14px;
+      border-left: 6px solid var(--blitzy-primary);
+      font-size: 27px;
+      padding: 22px 26px;
+    }
+
+    /* ---------- Inline mono token ---------- */
+    .mono {
+      font-family: var(--font-mono);
+      font-size: 0.92em;
+      background: var(--blitzy-surface);
+      color: var(--blitzy-dark);
+      border-radius: 8px;
+      padding: 2px 10px;
+      border: 1px solid var(--blitzy-border);
+      white-space: nowrap;
+    }
+
+    /* ---------- Callout ---------- */
+    .callout {
+      background: var(--blitzy-surface-2);
+      border-radius: 16px;
+      border-left: 6px solid var(--blitzy-teal);
+      padding: 26px 30px;
+      display: flex;
+      gap: 18px;
+      align-items: center;
+      margin-top: 26px;
+    }
+    .callout svg { width: 40px; height: 40px; color: var(--blitzy-primary); flex: 0 0 auto; stroke-width: 2.25; }
+    .callout p { margin: 0; font-size: 27px; }
+
+    /* ---------- Two-column layout (text + visual) ---------- */
+    .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 56px; align-items: center; }
+    .two-col.wide-right { grid-template-columns: 0.82fr 1.18fr; }
+    .two-col .col-visual { display: flex; flex-direction: column; }
+
+    /* ---------- Diagram panel + legend (Rule 1) ---------- */
+    .diagram-panel {
+      background: var(--blitzy-bg);
+      border: 1px solid var(--blitzy-border);
+      border-radius: 18px;
+      padding: 24px 26px;
+      box-shadow: 0 10px 30px rgba(45, 28, 119, 0.08);
+    }
+    .reveal .mermaid { display: flex; justify-content: center; margin: 0; }
+    .reveal .mermaid svg { max-width: 100%; max-height: 62vh; height: auto; }
+    /* Safety net: keep node/edge labels on their intended lines (explicit
+       <br/> still breaks) and let any width rounding overshoot show rather
+       than clip the final glyph. overflow:visible is applied to EVERY
+       Mermaid foreignObject (node labels, subgraph/cluster titles and edge
+       labels) so no label text is ever cut at a box edge. */
+    .reveal .mermaid .nodeLabel,
+    .reveal .mermaid .edgeLabel { white-space: nowrap; }
+    .reveal .mermaid foreignObject { overflow: visible; }
+    /* Subgraph containers: transparent fill + brand-purple border. The panel
+       behind the diagram is already white, so the previous opaque-white
+       cluster fill was invisible anyway; making it transparent means a long
+       subgraph title that visually overruns toward a neighbouring container
+       is never hidden behind an opaque box (every glyph stays readable), and
+       the purple outline reads more clearly on screen. */
+    .reveal .mermaid .cluster > rect,
+    .reveal .mermaid .cluster rect {
+      fill: transparent !important;
+      stroke: #5B39F3 !important;
+      stroke-width: 1.5px !important;
+    }
+    .legend {
+      font-family: var(--font-body);
+      font-size: 20px;
+      line-height: 1.4;
+      color: var(--blitzy-muted);
+      margin-top: 18px;
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+    }
+    .legend svg { width: 22px; height: 22px; color: var(--blitzy-primary); flex: 0 0 auto; margin-top: 2px; stroke-width: 2.25; }
+    .legend .lg-title { font-weight: 600; color: var(--blitzy-ink); }
+
+    /* ---------- Precedence ladder (slide 10) ---------- */
+    .ladder { display: flex; align-items: stretch; gap: 18px; margin-top: 30px; }
+    .ladder .rung {
+      flex: 1 1 0;
+      background: var(--blitzy-surface);
+      border-radius: 16px;
+      border-top: 6px solid var(--blitzy-primary);
+      padding: 26px 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .ladder .rung .rank { font-family: var(--font-mono); font-size: 18px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--blitzy-muted); }
+    .ladder .rung .name { font-family: var(--font-display); font-size: 27px; font-weight: 600; color: var(--blitzy-dark); }
+    .ladder .rung .desc { font-size: 21px; color: var(--blitzy-muted); }
+    .ladder .arrow { display: flex; align-items: center; }
+    .ladder .arrow svg { width: 40px; height: 40px; color: var(--blitzy-primary); stroke-width: 2.25; }
+
+    /* ---------- Numbered step row (slide 15) ---------- */
+    .steps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 22px; margin-top: 30px; }
+    .step {
+      background: var(--blitzy-surface);
+      border-radius: 16px;
+      padding: 26px 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .step .step-top { display: flex; align-items: center; gap: 14px; }
+    .step .step-num {
+      width: 46px; height: 46px; border-radius: 12px;
+      background: var(--blitzy-primary); color: #fff;
+      font-family: var(--font-display); font-weight: 700; font-size: 26px;
+      display: inline-flex; align-items: center; justify-content: center;
+      flex: 0 0 auto;
+    }
+    .step .step-top svg { width: 30px; height: 30px; color: var(--blitzy-primary); stroke-width: 2.25; }
+    .step .step-text { font-size: 23px; color: var(--blitzy-ink); line-height: 1.35; }
+
+    /* ---------- Icon-bullet variant that shows a distinct icon per row ---------- */
+    .reveal ul.blist > li .bicon.teal { background: rgba(148, 250, 213, 0.35); }
+    .reveal ul.blist > li .bicon.teal svg { color: var(--blitzy-dark); }
+
+    /* =============================================================
+       Slide type: TITLE (hero gradient)
+       ============================================================= */
+    .reveal .slides > section.slide-title {
+      background: var(--blitzy-hero);
+      color: #FFFFFF;
+      justify-content: center;
+      padding: 90px 120px;
+    }
+    .reveal section.slide-title h1 { color: #FFFFFF; font-size: 104px; max-width: 20ch; }
+    .reveal section.slide-title .eyebrow { color: var(--blitzy-teal); }
+    .reveal section.slide-title .subtitle {
+      font-size: 36px; font-weight: 400; color: rgba(255,255,255,0.92);
+      max-width: 34ch; margin-top: 6px;
+    }
+    .reveal section.slide-title .hero-icon {
+      position: absolute; top: 90px; right: 120px;
+      width: 220px; height: 220px; opacity: 0.9;
+    }
+    .reveal section.slide-title .hero-icon svg { width: 220px; height: 220px; color: var(--blitzy-teal); stroke-width: 1.25; }
+    .reveal section.slide-title .brand-row {
+      display: flex; align-items: center; gap: 14px;
+      margin-top: 56px; font-family: var(--font-mono);
+      font-size: 22px; letter-spacing: 0.16em; text-transform: uppercase;
+      color: rgba(255,255,255,0.85);
+    }
+    .reveal section.slide-title .brand-row svg { width: 26px; height: 26px; color: var(--blitzy-teal); }
+
+    /* =============================================================
+       Slide type: DIVIDER (dark navy)
+       ============================================================= */
+    .reveal .slides > section.slide-divider {
+      background: radial-gradient(120% 120% at 12% 12%, #2D1C77 0%, #1A105F 60%, #120A45 100%);
+      color: #FFFFFF;
+      justify-content: center;
+    }
+    .reveal section.slide-divider .section-num {
+      font-family: var(--font-display);
+      font-weight: 700;
+      font-size: 260px;
+      line-height: 0.9;
+      color: var(--blitzy-teal);
+      letter-spacing: -0.03em;
+      margin: 0;
+    }
+    .reveal section.slide-divider h2 { color: #FFFFFF; font-size: 82px; margin-top: 8px; }
+    .reveal section.slide-divider .accent-rule {
+      width: 180px; height: 6px; border-radius: 6px;
+      background: var(--blitzy-teal); margin-top: 30px;
+    }
+    .reveal section.slide-divider .eyebrow { color: var(--blitzy-teal); }
+
+    /* =============================================================
+       Slide type: CLOSING (hero gradient, centered)
+       ============================================================= */
+    .reveal .slides > section.slide-closing {
+      background: var(--blitzy-hero);
+      color: #FFFFFF;
+      align-items: center;
+      text-align: center;
+      justify-content: center;
+    }
+    .reveal section.slide-closing .close-icon svg { width: 92px; height: 92px; color: var(--blitzy-teal); stroke-width: 1.5; margin-bottom: 12px; }
+    .reveal section.slide-closing h2 { color: #FFFFFF; font-size: 76px; max-width: 22ch; }
+    .reveal section.slide-closing .close-chips { display: flex; gap: 20px; justify-content: center; flex-wrap: wrap; margin-top: 40px; }
+    .reveal section.slide-closing .close-chips .chip {
+      background: rgba(255,255,255,0.12);
+      color: #FFFFFF;
+      border: 1px solid rgba(148, 250, 213, 0.5);
+      font-family: var(--font-body);
+      font-weight: 500;
+      font-size: 24px;
+    }
+    .reveal section.slide-closing .close-chips .chip svg { color: var(--blitzy-teal); }
+    .reveal section.slide-closing .brand-row {
+      margin-top: 52px; font-family: var(--font-mono);
+      font-size: 22px; letter-spacing: 0.18em; text-transform: uppercase;
+      color: rgba(255,255,255,0.85);
+    }
+
+    /* ---------- Slide number ---------- */
+    .reveal .slide-number { font-family: var(--font-mono); background: transparent; color: var(--blitzy-muted); font-size: 18px; }
+    .reveal section.slide-title .slide-number,
+    .reveal section.slide-divider .slide-number,
+    .reveal section.slide-closing .slide-number { color: rgba(255,255,255,0.7); }
+
+    /* ---------- Small helpers ---------- */
+    .lead { font-size: 30px; color: var(--blitzy-ink); }
+    .note { font-size: 22px; color: var(--blitzy-muted); margin-top: 22px; }
+    .kicker-icons { display: flex; gap: 16px; margin-top: 8px; }
+    .kicker-icons .kbtn { width: 56px; height: 56px; border-radius: 14px; background: var(--blitzy-surface); display: inline-flex; align-items: center; justify-content: center; }
+    .kicker-icons .kbtn svg { width: 30px; height: 30px; color: var(--blitzy-primary); stroke-width: 2.25; }
+  </style>
+</head>
+<body>
+<div class="reveal">
+<div class="slides">
+
+  <!-- ================= Slide 1 - TITLE ================= -->
+  <section class="slide-title">
+    <div class="hero-icon"><i data-lucide="inbox"></i></div>
+    <div class="eyebrow"><i data-lucide="shield-alert"></i> BLITZY &middot; APACHE KAFKA STREAMS</div>
+    <h1>Opt-In Dead Letter Queue for the Kafka Streams DSL</h1>
+    <p class="subtitle">Capture and route failed records &mdash; no lost data, no stopped threads.</p>
+    <div class="brand-row"><i data-lucide="zap"></i> Executive Summary</div>
+  </section>
+
+  <!-- ================= Slide 2 - DIVIDER 01 ================= -->
+  <section class="slide-divider">
+    <div class="eyebrow">Section</div>
+    <p class="section-num">01</p>
+    <h2>What We Built &amp; Why</h2>
+    <div class="accent-rule"></div>
+  </section>
+
+  <!-- ================= Slide 3 - What was done ================= -->
+  <section>
+    <div class="eyebrow"><i data-lucide="git-branch"></i> The Capability</div>
+    <h2>A DSL-level DLQ, opt-in per stream</h2>
+    <ul class="blist">
+      <li>
+        <span class="bicon"><i data-lucide="git-branch"></i></span>
+        <span class="btext">New DSL method <span class="mono">KStream.withDeadLetterQueue(...)</span></span>
+      </li>
+      <li>
+        <span class="bicon"><i data-lucide="send"></i></span>
+        <span class="btext">Failed records are routed to a configured DLQ topic</span>
+      </li>
+      <li>
+        <span class="bicon"><i data-lucide="shield-check"></i></span>
+        <span class="btext">Added as a Java <span class="mono">default</span> method &mdash; fully backward compatible</span>
+      </li>
+      <li>
+        <span class="bicon"><i data-lucide="recycle"></i></span>
+        <span class="btext">Reuses the existing Streams producer</span>
+      </li>
+    </ul>
+  </section>
+
+  <!-- ================= Slide 4 - Why it matters ================= -->
+  <section>
+    <div class="eyebrow"><i data-lucide="trending-up"></i> Business Value</div>
+    <h2>Resilience without disruption</h2>
+    <div class="two-col">
+      <div class="col-text">
+        <ul class="blist tight">
+          <li><span class="bicon"><i data-lucide="activity"></i></span><span class="btext">No stopped stream threads on one bad record</span></li>
+          <li><span class="bicon"><i data-lucide="eye"></i></span><span class="btext">No silent data loss</span></li>
+          <li><span class="bicon"><i data-lucide="search"></i></span><span class="btext">Full diagnostics via record headers</span></li>
+          <li><span class="bicon"><i data-lucide="gauge"></i></span><span class="btext">Zero impact on healthy traffic</span></li>
+        </ul>
+      </div>
+      <div class="col-visual">
+        <div class="stat-row" style="grid-template-columns: 1fr; gap: 22px; margin-top: 0;">
+          <div class="stat-card"><span class="num">0</span><span class="label">Uncaught terminations when enabled</span></div>
+          <div class="stat-card"><span class="num">100%</span><span class="label">Eligible failures captured</span></div>
+          <div class="stat-card"><span class="num">&le;5ms</span><span class="label">p99 added to the failure path only</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= Slide 5 - DIVIDER 02 ================= -->
+  <section class="slide-divider">
+    <div class="eyebrow">Section</div>
+    <p class="section-num">02</p>
+    <h2>Architecture &amp; Data Flow</h2>
+    <div class="accent-rule"></div>
+  </section>
+
+  <!-- ================= Slide 6 - DLQ Component Interaction Diagram (Diagram A) ================= -->
+  <section>
+    <div class="eyebrow"><i data-lucide="boxes"></i> Component View</div>
+    <h2>New components wrap the existing runtime</h2>
+    <div class="diagram-panel">
+<pre class="mermaid">
+graph TD
+    subgraph New["New Components (this feature)"]
+        DSL["KStream.withDeadLetterQueue()<br/>default method"]
+        OPTS["DeadLetterQueueOptions<br/>(immutable options)"]
+        DEC["DLQ-Aware Handler Decorator<br/>(internal)"]
+        BUILDER["DlqRecordBuilder<br/>(dlq.* headers)"]
+        CFG["StreamsConfig keys<br/>default.deadletterqueue.*"]
+        MET["dlq-records-sent-total<br/>sensor + WARN log"]
+    end
+
+    subgraph Existing["Existing Streams Runtime (wrapped, unmodified contracts)"]
+        IMPL["KStreamImpl<br/>graph node wiring"]
+        HANDLERS["Deserialization / Production /<br/>Processing ExceptionHandler"]
+        COLLECTOR["RecordCollectorImpl.send()"]
+        PRODUCER["Shared Streams Producer"]
+        METRICS["StreamsMetricsImpl"]
+    end
+
+    DLQTOPIC["Configured DLQ Topic<br/>(assumed to pre-exist)"]
+
+    DSL --> IMPL
+    OPTS --> DSL
+    CFG -. global default .-> IMPL
+    IMPL --> DEC
+    DEC --> HANDLERS
+    DEC --> BUILDER
+    BUILDER --> COLLECTOR
+    COLLECTOR --> PRODUCER
+    PRODUCER --> DLQTOPIC
+    DEC --> MET
+    MET --> METRICS
+</pre>
+    </div>
+    <div class="legend">
+      <i data-lucide="info"></i>
+      <span><span class="lg-title">DLQ Component Interaction Diagram.</span> New-Components group = artifacts created by this feature; Existing group = reused, wrapped runtime (contracts unchanged); solid arrow = runtime / data path; dotted arrow = configuration fallback to the global default.</span>
+    </div>
+  </section>
+
+  <!-- ================= Slide 7 - Error-Handling Data Flow: Before (Diagram B) ================= -->
+  <section>
+    <div class="eyebrow"><i data-lucide="history"></i> Before</div>
+    <h2>Today: global-config-only path (KIP-1034)</h2>
+    <div class="diagram-panel">
+<pre class="mermaid">
+flowchart TD
+    REC["Incoming record"] --> DESER{"Deserialize /<br/>process OK?"}
+    DESER -- Yes --> CONT["Continue topology"]
+    DESER -- No --> HANDLER["Configured ExceptionHandler<br/>handleError(...)"]
+    HANDLER --> GLOBAL{"Global topic<br/>errors.dead.letter.queue<br/>.topic.name set?"}
+    GLOBAL -- No --> RESP{"Handler Result"}
+    GLOBAL -- Yes --> BUILD["ExceptionHandlerUtils builds record<br/>(__streams.errors.* headers)"]
+    BUILD --> SEND["RecordCollector.send to DLQ topic"]
+    SEND --> RESP
+    RESP -- FAIL --> STOP["Throw StreamsException<br/>(StreamThread stops)"]
+    RESP -- RESUME --> SKIP["Skip record<br/>(dropped-records sensor + generic WARN)"]
+</pre>
+    </div>
+    <div class="legend">
+      <i data-lucide="info"></i>
+      <span><span class="lg-title">Error-Handling Data Flow &mdash; Before.</span> Diamonds = decisions; rectangles = actions / states. The current path uses <span class="mono">__streams.errors.*</span> headers and only a generic dropped-records sensor plus a generic WARN.</span>
+    </div>
+  </section>
+
+  <!-- ================= Slide 8 - Error-Handling Data Flow: After (Diagram C) ================= -->
+  <section>
+    <div class="eyebrow"><i data-lucide="arrow-right-circle"></i> After</div>
+    <h2>Opt-in layer routes failures to the DLQ</h2>
+    <div class="diagram-panel">
+<pre class="mermaid">
+flowchart TD
+    REC["Incoming record"] --> DESER{"Deserialize /<br/>process OK?"}
+    DESER -- Yes --> CONT["Continue topology"]
+    DESER -- No --> OPTIN{"Topology opted in via<br/>withDeadLetterQueue?"}
+    OPTIN -- No --> LEGACY["Existing unchanged path<br/>(see Before diagram)"]
+    OPTIN -- Yes --> DEC["DLQ-Aware Handler Decorator<br/>(delegates to configured handler)"]
+    DEC --> RESOLVE["Resolve effective DLQ topic<br/>(DSL overrides global default)"]
+    RESOLVE --> NEWBUILD["DlqRecordBuilder builds record<br/>(dlq.* headers, raw bytes,<br/>header toggle + max size)"]
+    NEWBUILD --> SEND["RecordCollector.send to DLQ topic<br/>(shared producer, same security/auth)"]
+    SEND --> OBS["Increment dlq-records-sent-total<br/>+ WARN (exception class, source offset)"]
+    OBS --> RESUME["Response.resume -> topology continues"]
+</pre>
+    </div>
+    <div class="legend">
+      <i data-lucide="info"></i>
+      <span><span class="lg-title">Error-Handling Data Flow &mdash; After.</span> The highlighted path is the new opt-in DSL layer; non-opted-in topologies follow the unchanged legacy path (byte-for-byte identical).</span>
+    </div>
+  </section>
+
+  <!-- ================= Slide 9 - The DLQ record (six headers) ================= -->
+  <section>
+    <div class="eyebrow"><i data-lucide="tags"></i> Diagnostics</div>
+    <h2>Every DLQ record carries six headers</h2>
+    <div class="header-grid">
+      <span class="chip"><i data-lucide="alert-octagon"></i> dlq.exception.class</span>
+      <span class="chip"><i data-lucide="message-square"></i> dlq.exception.message</span>
+      <span class="chip"><i data-lucide="folder"></i> dlq.source.topic</span>
+      <span class="chip"><i data-lucide="grid-2x2"></i> dlq.source.partition</span>
+      <span class="chip"><i data-lucide="hash"></i> dlq.source.offset</span>
+      <span class="chip"><i data-lucide="clock"></i> dlq.failure.timestamp</span>
+    </div>
+    <div class="callout">
+      <i data-lucide="binary"></i>
+      <p>Original key and value bytes are preserved via a passthrough serializer.</p>
+    </div>
+  </section>
+
+  <!-- ================= Slide 10 - Configuration & precedence ================= -->
+  <section>
+    <div class="eyebrow"><i data-lucide="layers"></i> Configuration</div>
+    <h2>One clear precedence order</h2>
+    <div class="ladder">
+      <div class="rung">
+        <span class="rank">Most specific</span>
+        <span class="name"><span class="mono">withDeadLetterQueue(...)</span></span>
+        <span class="desc">Per-stream DSL call wins</span>
+      </div>
+      <div class="arrow"><i data-lucide="arrow-right"></i></div>
+      <div class="rung">
+        <span class="rank">Then</span>
+        <span class="name">Per-topology setting</span>
+        <span class="desc">Applies to the topology</span>
+      </div>
+      <div class="arrow"><i data-lucide="arrow-right"></i></div>
+      <div class="rung">
+        <span class="rank">Fallback</span>
+        <span class="name">Global defaults</span>
+        <span class="desc">Applied when nothing else is set</span>
+      </div>
+    </div>
+    <div class="kicker-icons" style="margin-top: 30px; gap: 20px; flex-wrap: wrap;">
+      <span class="chip small"><i data-lucide="key"></i> default.deadletterqueue.topic</span>
+      <span class="chip small"><i data-lucide="toggle-left"></i> default.deadletterqueue.enabled &nbsp;=&nbsp; false</span>
+    </div>
+  </section>
+
+  <!-- ================= Slide 11 - Observability ================= -->
+  <section>
+    <div class="eyebrow"><i data-lucide="activity"></i> Observability</div>
+    <h2>Measure and alert on dead-letters</h2>
+    <div class="two-col">
+      <div class="col-text">
+        <ul class="blist tight">
+          <li><span class="bicon"><i data-lucide="activity"></i></span><span class="btext">New metric <span class="mono">dlq-records-sent-total</span>, tagged by thread and task</span></li>
+          <li><span class="bicon"><i data-lucide="file-warning"></i></span><span class="btext">WARN log on each DLQ write (exception class + source offset)</span></li>
+          <li><span class="bicon"><i data-lucide="bell"></i></span><span class="btext">Alert on DLQ growth</span></li>
+        </ul>
+      </div>
+      <div class="col-visual">
+        <div class="stat-card">
+          <span class="num">1</span>
+          <span class="label">counter: <span class="mono">dlq-records-sent-total</span></span>
+          <span class="sub">Incremented on every record routed to the DLQ</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= Slide 12 - DIVIDER 03 ================= -->
+  <section class="slide-divider">
+    <div class="eyebrow">Section</div>
+    <p class="section-num">03</p>
+    <h2>Adoption, Risks &amp; Next Steps</h2>
+    <div class="accent-rule"></div>
+  </section>
+
+  <!-- ================= Slide 13 - Risks & mitigations ================= -->
+  <section>
+    <div class="eyebrow"><i data-lucide="alert-triangle"></i> Risks &amp; Mitigations</div>
+    <h2>Known trade-offs, handled</h2>
+    <div class="card-row">
+      <div class="card">
+        <div class="card-head"><i data-lucide="shuffle"></i><h3>Best-effort side output</h3></div>
+        <p>Not exactly-once &mdash; monitor the metric and alert on growth.</p>
+      </div>
+      <div class="card">
+        <div class="card-head"><i data-lucide="database"></i><h3>DLQ topic must pre-exist</h3></div>
+        <p>Provision it via standard admin tooling before enabling.</p>
+      </div>
+      <div class="card">
+        <div class="card-head"><i data-lucide="scissors"></i><h3>Oversized record</h3></div>
+        <p>Truncate-and-annotate &mdash; the record is never dropped.</p>
+      </div>
+      <div class="card">
+        <div class="card-head"><i data-lucide="git-fork"></i><h3>Naming coexistence</h3></div>
+        <p>New <span class="mono">dlq.*</span> scheme coexists with the legacy KIP-1034 path.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= Slide 14 - Safety & backward compatibility ================= -->
+  <section>
+    <div class="eyebrow"><i data-lucide="shield-check"></i> Safety</div>
+    <h2>Nothing changes unless you opt in</h2>
+    <div class="two-col">
+      <div class="col-text">
+        <ul class="blist tight">
+          <li><span class="bicon"><i data-lucide="equal"></i></span><span class="btext">Non-DLQ topologies byte-for-byte identical</span></li>
+          <li><span class="bicon"><i data-lucide="git-merge"></i></span><span class="btext">Public interfaces unchanged (wrapped, not modified)</span></li>
+          <li><span class="bicon"><i data-lucide="lock"></i></span><span class="btext">Same producer, same security/auth &mdash; no new credential surface</span></li>
+          <li><span class="bicon"><i data-lucide="git-branch"></i></span><span class="btext">DLQ logic confined to the failure branch</span></li>
+        </ul>
+      </div>
+      <div class="col-visual">
+        <div class="callout" style="margin-top:0;">
+          <i data-lucide="shield-check"></i>
+          <p>Opt-in by design: the healthy record path is untouched.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= Slide 15 - Onboarding & continuing development ================= -->
+  <section>
+    <div class="eyebrow"><i data-lucide="rocket"></i> Get Started</div>
+    <h2>How the team adopts and extends it</h2>
+    <div class="steps">
+      <div class="step">
+        <div class="step-top"><span class="step-num">1</span><i data-lucide="play"></i></div>
+        <div class="step-text">Call <span class="mono">withDeadLetterQueue("topic", options)</span> or set the global defaults</div>
+      </div>
+      <div class="step">
+        <div class="step-top"><span class="step-num">2</span><i data-lucide="database"></i></div>
+        <div class="step-text">Ensure the DLQ topic exists</div>
+      </div>
+      <div class="step">
+        <div class="step-top"><span class="step-num">3</span><i data-lucide="activity"></i></div>
+        <div class="step-text">Monitor the metric and WARN logs</div>
+      </div>
+      <div class="step">
+        <div class="step-top"><span class="step-num">4</span><i data-lucide="search"></i></div>
+        <div class="step-text">Consume the DLQ topic and read <span class="mono">dlq.*</span> headers to remediate</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= Slide 16 - CLOSING ================= -->
+  <section class="slide-closing">
+    <div class="close-icon"><i data-lucide="check-circle"></i></div>
+    <h2>Failed records now have a safe destination &mdash; and full visibility.</h2>
+    <div class="close-chips">
+      <span class="chip"><i data-lucide="shield-check"></i> Zero uncaught terminations when enabled</span>
+      <span class="chip"><i data-lucide="target"></i> 100% of eligible failures captured within one poll cycle</span>
+      <span class="chip"><i data-lucide="equal"></i> Unchanged behavior for non-adopters</span>
+    </div>
+    <div class="brand-row">BLITZY &middot; Apache Kafka Streams</div>
+  </section>
+
+</div>
+</div>
+
+<!-- ============================================================= -->
+<!-- Libraries (pinned CDNs) + initialization wiring               -->
+<!-- ============================================================= -->
+
+<!-- reveal.js 5.1.0 (UMD -> window.Reveal) -->
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.js"></script>
+<!-- Lucide 0.460.0 (UMD -> window.lucide) -->
+<script src="https://cdn.jsdelivr.net/npm/lucide@0.460.0/dist/umd/lucide.min.js"></script>
+
+<!-- Mermaid 11.4.0 (ESM) + reveal.js / Lucide init. This module is
+     deferred by default, so window.Reveal and window.lucide (loaded
+     by the classic scripts above) are already available. -->
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11.4.0/dist/mermaid.esm.min.mjs';
+
+  // Do NOT auto-run; reveal controls when diagrams render.
+  mermaid.initialize({
+    startOnLoad: false,
+    theme: 'base',
+    securityLevel: 'loose',
+    // Measure and render node labels with the same webfont the deck uses,
+    // so Mermaid's label width matches the rendered Inter text (prevents
+    // the last character clipping at a node's right edge).
+    fontFamily: "'Inter', system-ui, sans-serif",
+    themeVariables: {
+      primaryColor: '#F2F0FE',
+      primaryTextColor: '#333333',
+      primaryBorderColor: '#5B39F3',
+      lineColor: '#999999',
+      secondaryColor: '#F4EFF6',
+      fontFamily: "'Inter', system-ui, sans-serif"
+    },
+    // wrappingWidth widened so multi-word subgraph/cluster titles get a box
+    // wide enough to hold their full text (default 200px clipped them);
+    // node labels use explicit <br/> so this does not force auto-wrapping.
+    flowchart: { htmlLabels: true, useMaxWidth: true, wrappingWidth: 640 }
+  });
+
+  // (Re)create all Lucide SVG icons. Safe to call repeatedly.
+  function renderIcons() {
+    if (window.lucide && typeof window.lucide.createIcons === 'function') {
+      window.lucide.createIcons();
+    }
+  }
+
+  // Render only the diagram on the currently-presented slide, so Mermaid
+  // measures a visible container and sizes the SVG correctly. mermaid.run()
+  // is always invoked (satisfying the render-on-ready contract); it selects
+  // the present slide's not-yet-processed diagram and no-ops otherwise.
+  // Already-processed nodes are skipped internally, so re-runs are safe.
+  async function renderMermaid() {
+    try {
+      // Ensure the brand webfonts are fully loaded before Mermaid measures
+      // label widths, so node boxes are sized for the real Inter metrics.
+      if (document.fonts && document.fonts.ready) {
+        try { await document.fonts.ready; } catch (e) { /* non-fatal */ }
+      }
+      await mermaid.run({
+        querySelector: '.reveal .slides section.present pre.mermaid:not([data-processed])'
+      });
+    } catch (err) {
+      // Ignore benign "already processed" races; surface anything else.
+      if (!/processed/i.test(String(err && err.message))) {
+        console.warn('Mermaid render issue:', err);
+      }
+    }
+  }
+
+  // reveal.js initialization (mandatory keys verbatim; extras aid fit).
+  Reveal.initialize({
+    hash: true,
+    transition: 'slide',
+    controlsTutorial: false,
+    width: 1920,
+    height: 1080,
+    slideNumber: 'c/t',
+    margin: 0.04,
+    minScale: 0.2,
+    maxScale: 2.0
+  });
+
+  // Initial render after reveal is ready, then re-render on every change.
+  Reveal.on('ready', () => { renderIcons(); renderMermaid(); });
+  Reveal.on('slidechanged', () => { renderIcons(); renderMermaid(); });
+</script>
+
+</body>
+</html>
