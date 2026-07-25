@@ -39,8 +39,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * Unit tests for {@link DlqRecordBuilder}, the opt-in DSL-level Dead Letter Queue record builder. Verifies the
  * six {@code dlq.*} headers, the producer-record timestamp/raw-bytes, the header-inclusion toggle, and the
- * max-record-size truncate-and-annotate behaviour. Mirrors {@code ExceptionHandlerUtilsTest} for the pre-existing
- * KIP-1034 record builder.
+ * max-record-size truncate-and-annotate behaviour. This coverage targets the {@code dlq.*} scheme only and is
+ * fully independent of the pre-existing KIP-1034 record-builder path, which remains unchanged.
  */
 public class DlqRecordBuilderTest {
 
@@ -141,6 +141,34 @@ public class DlqRecordBuilderTest {
         final ProducerRecord<byte[], byte[]> record = DlqRecordBuilder.buildDeadLetterQueueRecord(
             DLQ_TOPIC, null, value, context(), new RuntimeException("x"),
             DeadLetterQueueOptions.with(DLQ_TOPIC).withMaxRecordSize(8));
+
+        assertArrayEquals(value, record.value());
+        assertNull(record.headers().lastHeader(DlqRecordBuilder.HEADER_VALUE_TRUNCATED));
+    }
+
+    @Test
+    public void shouldNotTruncateWhenMaxRecordSizeIsUnbounded() {
+        // A value larger than any finite limit is left intact when the unbounded sentinel is configured,
+        // proving that NO_MAX_RECORD_SIZE (Integer.MAX_VALUE) disables truncation regardless of value length.
+        final byte[] value = "0123456789".getBytes(StandardCharsets.UTF_8); // 10 bytes
+
+        final ProducerRecord<byte[], byte[]> record = DlqRecordBuilder.buildDeadLetterQueueRecord(
+            DLQ_TOPIC, "k".getBytes(StandardCharsets.UTF_8), value, context(), new RuntimeException("x"),
+            DeadLetterQueueOptions.with(DLQ_TOPIC).withMaxRecordSize(DeadLetterQueueOptions.NO_MAX_RECORD_SIZE));
+
+        assertArrayEquals(value, record.value());
+        assertNull(record.headers().lastHeader(DlqRecordBuilder.HEADER_VALUE_TRUNCATED));
+    }
+
+    @Test
+    public void shouldNotTruncateWhenMaxRecordSizeIsNegative() {
+        // A negative max-record-size is documented as "no limit"; the builder's maxRecordSize >= 0 guard
+        // must therefore leave the value untouched and add no truncation marker.
+        final byte[] value = "0123456789".getBytes(StandardCharsets.UTF_8); // 10 bytes
+
+        final ProducerRecord<byte[], byte[]> record = DlqRecordBuilder.buildDeadLetterQueueRecord(
+            DLQ_TOPIC, "k".getBytes(StandardCharsets.UTF_8), value, context(), new RuntimeException("x"),
+            DeadLetterQueueOptions.with(DLQ_TOPIC).withMaxRecordSize(-1));
 
         assertArrayEquals(value, record.value());
         assertNull(record.headers().lastHeader(DlqRecordBuilder.HEADER_VALUE_TRUNCATED));
