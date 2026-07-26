@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Executive summary: an opt-in Dead Letter Queue for the Apache Kafka Streams DSL that captures and routes failed records without lost data or stopped stream threads.">
 
   <!-- Content Security Policy: restrict every fetch to self + the pinned CDNs and
        Google Fonts only. Inline <style> and the inline ES-module below require
@@ -13,6 +14,10 @@
        `import` cannot carry an integrity attribute). base-uri/object-src are denied. -->
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'none'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; font-src https://fonts.gstatic.com data:; img-src 'self' data:; connect-src https://cdn.jsdelivr.net; base-uri 'none'; object-src 'none'">
+
+  <!-- Inline SVG data-URI favicon (permitted by CSP img-src 'self' data:); avoids a
+       separate network request and keeps the deck a single self-contained file. -->
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%235B39F3'/><g fill='none' stroke='%2394FAD5' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'><path d='M7 16h5l1.6 2.6h4.8L20 16h5'/><path d='M9 8h14l2 8v6a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2v-6z'/></g></svg>">
 
   <title>Opt-In Dead Letter Queue for Kafka Streams &mdash; Executive Summary</title>
 
@@ -249,7 +254,12 @@
       box-shadow: 0 10px 30px rgba(45, 28, 119, 0.08);
     }
     .reveal .mermaid { display: flex; justify-content: center; margin: 0; }
-    .reveal .mermaid svg { max-width: 100%; max-height: 62vh; height: auto; }
+    /* Cap the diagram height in CANVAS pixels, not viewport vh. reveal.js lays out
+       this slide in a fixed 1920x1080 canvas and then transform-scales it; a vh cap
+       is resolved against the real window height, so at viewport heights > 1080px the
+       svg grew past the fixed canvas and the bottom node was clipped. A constant px
+       cap keeps the diagram a fixed fraction of the 1080 canvas at every viewport. */
+    .reveal .mermaid svg { max-width: 100%; max-height: 620px; height: auto; }
     /* Safety net: keep node/edge labels on their intended lines (explicit
        <br/> still breaks) and let any width rounding overshoot show rather
        than clip the final glyph. overflow:visible is applied to EVERY
@@ -302,7 +312,9 @@
     .ladder .arrow svg { width: 40px; height: 40px; color: var(--blitzy-primary); stroke-width: 2.25; }
 
     /* ---------- Numbered step row (slide 15) ---------- */
-    .steps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 22px; margin-top: 30px; }
+    /* minmax(0, 1fr) lets tracks shrink below their min-content width so a long
+       nowrap token in one card cannot inflate that column wider than its siblings. */
+    .steps { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 22px; margin-top: 30px; }
     .step {
       background: var(--blitzy-surface);
       border-radius: 16px;
@@ -321,6 +333,9 @@
     }
     .step .step-top svg { width: 30px; height: 30px; color: var(--blitzy-primary); stroke-width: 2.25; }
     .step .step-text { font-size: 23px; color: var(--blitzy-ink); line-height: 1.35; }
+    /* Allow the inline code chip inside a step card to wrap; the global .mono chip
+       stays nowrap (used as single-line chips elsewhere). Scoped to .steps only. */
+    .reveal .steps .step .mono { white-space: normal; }
 
     /* ---------- Icon-bullet variant that shows a distinct icon per row ---------- */
     .reveal ul.blist > li .bicon.teal { background: rgba(148, 250, 213, 0.35); }
@@ -389,7 +404,9 @@
       justify-content: center;
     }
     .reveal section.slide-closing .close-icon svg { width: 92px; height: 92px; color: var(--blitzy-teal); stroke-width: 1.5; margin-bottom: 12px; }
-    .reveal section.slide-closing h2 { color: #FFFFFF; font-size: 76px; max-width: 22ch; }
+    /* auto side-margins center the max-width:22ch box even when reveal.js forces
+       inline display:block on the section (which defeats the flex align-items:center). */
+    .reveal section.slide-closing h2 { color: #FFFFFF; font-size: 76px; max-width: 22ch; margin-left: auto; margin-right: auto; }
     .reveal section.slide-closing .close-chips { display: flex; gap: 20px; justify-content: center; flex-wrap: wrap; margin-top: 40px; }
     .reveal section.slide-closing .close-chips .chip {
       background: rgba(255,255,255,0.12);
@@ -408,9 +425,32 @@
 
     /* ---------- Slide number ---------- */
     .reveal .slide-number { font-family: var(--font-mono); background: transparent; color: var(--blitzy-muted); font-size: 18px; }
-    .reveal section.slide-title .slide-number,
-    .reveal section.slide-divider .slide-number,
-    .reveal section.slide-closing .slide-number { color: rgba(255,255,255,0.7); }
+    /* reveal.js renders the slide-number, nav controls and progress bar as direct
+       children of .reveal (not inside the <section>), so section-scoped selectors
+       never match them. Match the current dark slide with :has() to recolor these
+       chrome elements for legible contrast over the hero/navy backgrounds. */
+    .reveal:has(section.slide-title.present) .slide-number,
+    .reveal:has(section.slide-divider.present) .slide-number,
+    .reveal:has(section.slide-closing.present) .slide-number { color: rgba(255,255,255,0.75); }
+    .reveal:has(section.slide-title.present) .controls,
+    .reveal:has(section.slide-divider.present) .controls,
+    .reveal:has(section.slide-closing.present) .controls { color: rgba(255,255,255,0.9); }
+    /* Base progress-bar fill: reveal.js defaults to white (invisible on the white
+       content slides). Use the brand primary so it is visible on light content, then
+       switch to teal on dark slides below. */
+    .reveal .progress { color: var(--blitzy-primary); }
+    .reveal:has(section.slide-title.present) .progress,
+    .reveal:has(section.slide-divider.present) .progress,
+    .reveal:has(section.slide-closing.present) .progress { color: var(--blitzy-teal); }
+    /* Full-bleed the dark backdrop across the whole viewport on dark slides. reveal.js
+       paints the empty margin/letterbox area with the .reveal background (default white),
+       which pushed the corner chrome (slide-number, controls, progress) onto a white band
+       at letterbox/large viewports. Extending the slide's dark gradient onto .reveal removes
+       that white frame so the light chrome stays legible at every viewport and aspect ratio.
+       The slide <section> keeps its own gradient; on dark slides content slides are unaffected. */
+    .reveal:has(section.slide-title.present),
+    .reveal:has(section.slide-closing.present) { background: var(--blitzy-hero); }
+    .reveal:has(section.slide-divider.present) { background: radial-gradient(120% 120% at 12% 12%, #2D1C77 0%, #1A105F 60%, #120A45 100%); }
 
     /* ---------- Small helpers ---------- */
     .lead { font-size: 30px; color: var(--blitzy-ink); }
@@ -950,8 +990,16 @@ flowchart TD
     height: 1080,
     slideNumber: 'c/t',
     margin: 0.04,
-    minScale: 0.2,
-    maxScale: 2.0
+    // Allow the fixed 1920x1080 canvas to scale down far enough to remain fully
+    // visible on narrow (~320px) viewports without clipping the hero gradient.
+    minScale: 0.14,
+    maxScale: 2.0,
+    // Fixed-canvas leadership deck: disable reveal.js responsive scroll view so
+    // narrow viewports letterbox the 1920x1080 canvas instead of relocating each
+    // <section> out of .slides (which dropped the CSS-scoped dark gradients).
+    // With 0 the activation guard (presentationWidth > 0 && <= scrollActivationWidth)
+    // can never be satisfied, so auto scroll view stays off at every width.
+    scrollActivationWidth: 0
   });
 
   // Initial render after reveal is ready, then re-render on every change.
