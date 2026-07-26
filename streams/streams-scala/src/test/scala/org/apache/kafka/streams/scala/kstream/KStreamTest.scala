@@ -18,7 +18,7 @@ package org.apache.kafka.streams.scala.kstream
 
 import java.time.Duration.ofSeconds
 import java.time.{Duration, Instant}
-import org.apache.kafka.streams.kstream.{JoinWindows, Named}
+import org.apache.kafka.streams.kstream.{DeadLetterQueueOptions, JoinWindows, Named}
 import org.apache.kafka.streams.processor.api
 import org.apache.kafka.streams.processor.api.{FixedKeyRecord, Processor, ProcessorSupplier}
 import org.apache.kafka.streams.scala.ImplicitConversions._
@@ -415,5 +415,65 @@ class KStreamTest extends TestDriver {
 
     val transformNode = builder.build().describe().subtopologies().asScala.head.nodes().asScala.toList(1)
     assertEquals("my-name", transformNode.name())
+  }
+
+  @Test
+  def testWithDeadLetterQueuePreservesHappyPathAndIsFluent(): Unit = {
+    // Scala/API parity (MA-10): the Scala withDeadLetterQueue wrapper must delegate to the underlying Java stream,
+    // return the same-typed KStream[K, V] so it can be chained fluently, and leave the non-failing (happy) record
+    // path completely unchanged. Full DLQ-routing behavior on a deserialization failure is covered end-to-end by
+    // the Java EmbeddedKafkaCluster integration test; here we assert the Scala DSL surface and happy-path fidelity.
+    val builder = new StreamsBuilder()
+    val sourceTopic = "source"
+    val sinkTopic = "sink"
+
+    val stream: KStream[String, String] = builder.stream[String, String](sourceTopic)
+    // The wrapper returns a Scala KStream[String, String] (not the Java type), and remains chainable.
+    val opted: KStream[String, String] =
+      stream.withDeadLetterQueue(sourceTopic + "-dlq", DeadLetterQueueOptions.`with`(sourceTopic + "-dlq"))
+    opted.filter((_, value) => value != "value2").to(sinkTopic)
+
+    val testDriver = createTestDriver(builder)
+    val testInput = testDriver.createInput[String, String](sourceTopic)
+    val testOutput = testDriver.createOutput[String, String](sinkTopic)
+
+    // Records that do not fail flow through exactly as they would without the opt-in.
+    testInput.pipeInput("1", "value1")
+    assertEquals("value1", testOutput.readValue)
+
+    testInput.pipeInput("2", "value2")
+    assertTrue(testOutput.isEmpty)
+
+    testInput.pipeInput("3", "value3")
+    assertEquals("value3", testOutput.readValue)
+
+    assertTrue(testOutput.isEmpty)
+
+    testDriver.close()
+  }
+
+  @Test
+  def testWithDeadLetterQueueAcceptsCustomOptions(): Unit = {
+    // Scala/API parity (MA-10): the Scala DSL must accept the full DeadLetterQueueOptions surface (custom max
+    // record size and header-inclusion toggle) and still return a chainable, same-typed KStream so the resulting
+    // topology builds successfully.
+    val builder = new StreamsBuilder()
+    val sourceTopic = "source"
+    val sinkTopic = "sink"
+    val dlqTopic = "source-dlq"
+
+    val options = DeadLetterQueueOptions
+      .`with`(dlqTopic)
+      .withMaxRecordSize(1024)
+      .withIncludeHeaders(false)
+
+    val stream: KStream[String, String] = builder.stream[String, String](sourceTopic)
+    stream
+      .withDeadLetterQueue(dlqTopic, options)
+      .to(sinkTopic)
+
+    // The topology assembles without error, proving the Scala wrapper delegates a fully-configured options object.
+    val topology = builder.build()
+    assertTrue(topology.describe().subtopologies().asScala.nonEmpty)
   }
 }

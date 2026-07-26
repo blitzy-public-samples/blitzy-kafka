@@ -104,11 +104,15 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -1983,6 +1987,102 @@ public class RecordCollectorTest {
                 message.contains("Sent a failed record to the dead letter queue."));
             assertFalse(warnPresent, "Opt-in DLQ WARN must not fire for the non-opt-in path. Captured: " + messages);
         }
+    }
+
+    @Test
+    public void shouldEscalateOnceAndNotReRouteWhenDeadLetterQueueRecordSendFailsAsynchronously() {
+        // MA-05 recursion guard (asynchronous callback): when a DLQ record itself fails to be produced, the failure
+        // must be escalated exactly once via the shared sendException (so it surfaces through the StreamThread's
+        // uncaught-exception path on the next send/flush/close) and must NOT be routed back through the production
+        // exception handler — otherwise the handler could return another DLQ record and recurse indefinitely.
+        final StreamsProducer streamsProducer = mock(StreamsProducer.class);
+        final AtomicReference<KafkaException> sendException = new AtomicReference<>(null);
+        when(streamsProducer.sendException()).thenReturn(sendException);
+        when(streamsProducer.send(any(), any())).thenAnswer(invocation -> {
+            ((Callback) invocation.getArgument(1)).onCompletion(null, new KafkaException("DLQ produce boom"));
+            return null;
+        });
+        // If the production handler is ever consulted for the DLQ record's own failure, that is the recursion bug.
+        final ProductionExceptionHandler recursionSentinel = mock(ProductionExceptionHandler.class);
+        final ProcessorTopology topology = mock(ProcessorTopology.class);
+
+        final RecordCollectorImpl collector = new RecordCollectorImpl(
+            logContext, taskId, streamsProducer, recursionSentinel, streamsMetrics, topology);
+
+        final ProducerRecord<byte[], byte[]> dlqRecord =
+            new ProducerRecord<>("dlqTopic", null, 0L, "k".getBytes(), "v".getBytes());
+
+        // The failed DLQ send is a best-effort side output: it must NOT throw synchronously here.
+        assertDoesNotThrow(() -> collector.sendDeadLetterQueueRecord(dlqRecord, sinkNodeName, context));
+
+        // Escalated exactly once: a DLQ-specific StreamsException naming the DLQ topic is latched.
+        final KafkaException latched = sendException.get();
+        assertNotNull(latched, "A failed DLQ send must latch an exception for escalation");
+        assertInstanceOf(StreamsException.class, latched);
+        assertTrue(latched.getMessage().contains("dlqTopic"),
+            "Escalated exception should identify the DLQ topic. Was: " + latched.getMessage());
+
+        // No recursion: the producer was asked to send exactly once (the DLQ record itself), and the production
+        // exception handler was never consulted for the DLQ record's own failure.
+        verify(streamsProducer, times(1)).send(any(), any());
+        verifyNoInteractions(recursionSentinel);
+    }
+
+    @Test
+    public void shouldEscalateWhenDeadLetterQueueRecordSendFailsSynchronously() {
+        // MA-05 recursion guard (synchronous throw): a synchronous failure from the producer send for a DLQ record
+        // is escalated exactly once (latched) and is NOT propagated to the caller, mirroring the asynchronous path.
+        final StreamsProducer streamsProducer = mock(StreamsProducer.class);
+        final AtomicReference<KafkaException> sendException = new AtomicReference<>(null);
+        when(streamsProducer.sendException()).thenReturn(sendException);
+        when(streamsProducer.send(any(), any())).thenThrow(new StreamsException("synchronous DLQ produce boom"));
+        final ProductionExceptionHandler recursionSentinel = mock(ProductionExceptionHandler.class);
+        final ProcessorTopology topology = mock(ProcessorTopology.class);
+
+        final RecordCollectorImpl collector = new RecordCollectorImpl(
+            logContext, taskId, streamsProducer, recursionSentinel, streamsMetrics, topology);
+
+        final ProducerRecord<byte[], byte[]> dlqRecord =
+            new ProducerRecord<>("dlqTopic", null, 0L, "k".getBytes(), "v".getBytes());
+
+        // Must not propagate the synchronous failure to the caller (best-effort side output).
+        assertDoesNotThrow(() -> collector.sendDeadLetterQueueRecord(dlqRecord, sinkNodeName, context));
+
+        final KafkaException latched = sendException.get();
+        assertNotNull(latched, "A synchronous DLQ send failure must be latched for escalation");
+        assertInstanceOf(StreamsException.class, latched);
+        assertTrue(latched.getMessage().contains("dlqTopic"));
+        verifyNoInteractions(recursionSentinel);
+    }
+
+    @Test
+    public void shouldNotOverwriteFirstEscalatedExceptionOnSubsequentDeadLetterQueueSendFailure() {
+        // MA-05 escalate-ONCE: once a failed DLQ send has latched an exception, a subsequent failed DLQ send must
+        // not overwrite it or pile up additional escalations (first error wins), keeping the failure signal stable.
+        final StreamsProducer streamsProducer = mock(StreamsProducer.class);
+        final AtomicReference<KafkaException> sendException = new AtomicReference<>(null);
+        when(streamsProducer.sendException()).thenReturn(sendException);
+        when(streamsProducer.send(any(), any())).thenAnswer(invocation -> {
+            ((Callback) invocation.getArgument(1)).onCompletion(null, new KafkaException("DLQ produce boom"));
+            return null;
+        });
+        final ProcessorTopology topology = mock(ProcessorTopology.class);
+        final RecordCollectorImpl collector = new RecordCollectorImpl(
+            logContext, taskId, streamsProducer, productionExceptionHandler, streamsMetrics, topology);
+
+        final ProducerRecord<byte[], byte[]> firstDlqRecord =
+            new ProducerRecord<>("dlqTopic", null, 0L, "k1".getBytes(), "v1".getBytes());
+        final ProducerRecord<byte[], byte[]> secondDlqRecord =
+            new ProducerRecord<>("dlqTopic", null, 0L, "k2".getBytes(), "v2".getBytes());
+
+        collector.sendDeadLetterQueueRecord(firstDlqRecord, sinkNodeName, context);
+        final KafkaException firstLatched = sendException.get();
+        assertNotNull(firstLatched, "The first failed DLQ send must latch an exception");
+
+        // A second failed DLQ send must not replace the first escalation.
+        collector.sendDeadLetterQueueRecord(secondDlqRecord, sinkNodeName, context);
+        assertSame(firstLatched, sendException.get(),
+            "The first escalated exception must be preserved (escalate once, first error wins)");
     }
 
     @Test

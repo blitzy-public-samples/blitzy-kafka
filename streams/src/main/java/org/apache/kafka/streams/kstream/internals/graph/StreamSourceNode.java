@@ -19,7 +19,6 @@ package org.apache.kafka.streams.kstream.internals.graph;
 
 import org.apache.kafka.streams.AutoOffsetReset;
 import org.apache.kafka.streams.errors.TopologyException;
-import org.apache.kafka.streams.kstream.DeadLetterQueueOptions;
 import org.apache.kafka.streams.kstream.internals.ConsumedInternal;
 import org.apache.kafka.streams.processor.internals.InternalTopologyBuilder;
 
@@ -33,11 +32,6 @@ public class StreamSourceNode<K, V> extends SourceGraphNode<K, V> {
 
     private static final Logger log = LoggerFactory.getLogger(StreamSourceNode.class);
 
-    // Opt-in DSL Dead Letter Queue (DLQ) configuration for this source; null unless a downstream KStream opted in
-    // via KStream#withDeadLetterQueue(String, DeadLetterQueueOptions), which marks its originating source node(s).
-    private String deadLetterQueueTopic;
-    private DeadLetterQueueOptions deadLetterQueueOptions;
-
     public StreamSourceNode(final String nodeName,
                             final Collection<String> topicNames,
                             final ConsumedInternal<K, V> consumedInternal) {
@@ -49,26 +43,6 @@ public class StreamSourceNode<K, V> extends SourceGraphNode<K, V> {
                             final ConsumedInternal<K, V> consumedInternal) {
 
         super(nodeName, topicPattern, consumedInternal);
-    }
-
-    /**
-     * Record that this source has opted in to the DSL-level Dead Letter Queue. Invoked by
-     * {@code KStreamImpl#withDeadLetterQueue(String, DeadLetterQueueOptions)} on the stream's originating source
-     * node(s); the configuration is applied to the built topology in {@link #writeToTopology(InternalTopologyBuilder)}.
-     *
-     * @param deadLetterQueueTopic   the resolved DLQ topic name (must not be null)
-     * @param deadLetterQueueOptions the resolved DLQ options (must not be null)
-     */
-    public void setDeadLetterQueue(final String deadLetterQueueTopic, final DeadLetterQueueOptions deadLetterQueueOptions) {
-        this.deadLetterQueueTopic = deadLetterQueueTopic;
-        this.deadLetterQueueOptions = deadLetterQueueOptions;
-    }
-
-    /**
-     * @return the DLQ topic this source opted in to, or {@code null} if it did not opt in
-     */
-    public String deadLetterQueueTopic() {
-        return deadLetterQueueTopic;
     }
 
     public void merge(final StreamSourceNode<?, ?> other) {
@@ -112,13 +86,6 @@ public class StreamSourceNode<K, V> extends SourceGraphNode<K, V> {
                                       consumedInternal().keyDeserializer(),
                                       consumedInternal().valueDeserializer(),
                                       topicNames().get().toArray(new String[0]));
-        }
-
-        // If a downstream KStream opted in to the DSL-level Dead Letter Queue, propagate the resolved topic and
-        // options onto the just-registered source node so that failed-record routing can be wired at task creation.
-        // Sources that did not opt in are left completely untouched, preserving byte-for-byte identical behavior.
-        if (deadLetterQueueTopic != null) {
-            topologyBuilder.markSourceNodeForDeadLetterQueue(nodeName(), deadLetterQueueTopic, deadLetterQueueOptions);
         }
     }
 

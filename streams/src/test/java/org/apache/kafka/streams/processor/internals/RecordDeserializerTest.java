@@ -36,6 +36,7 @@ import org.apache.kafka.streams.errors.LogAndContinueExceptionHandler;
 import org.apache.kafka.streams.errors.LogAndFailExceptionHandler;
 import org.apache.kafka.streams.errors.StreamsException;
 import org.apache.kafka.streams.kstream.DeadLetterQueueOptions;
+import org.apache.kafka.streams.kstream.internals.DeadLetterQueueExceptionHandlerDecorator;
 import org.apache.kafka.streams.processor.TaskId;
 import org.apache.kafka.streams.processor.internals.metrics.TaskMetrics;
 import org.apache.kafka.streams.state.StateSerdes;
@@ -395,7 +396,7 @@ public class RecordDeserializerTest {
             // send site emits the dlq-records-sent metric and the targeted WARN. This observability is gated on the
             // effective handler being this decorator, so the pre-existing global-config (KIP-1034) path stays unobserved.
             final DeserializationExceptionHandler deserializationExceptionHandler =
-                    new DeadLetterQueueDeserializationExceptionHandler(
+                    new DeadLetterQueueExceptionHandlerDecorator.DeserializationDecorator(
                             new LogAndContinueExceptionHandler(),
                             "dlq",
                             DeadLetterQueueOptions.with("dlq"));

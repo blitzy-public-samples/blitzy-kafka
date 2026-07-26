@@ -30,6 +30,8 @@ import org.apache.kafka.common.config.ConfigDef.Importance;
 import org.apache.kafka.common.config.ConfigDef.Type;
 import org.apache.kafka.common.config.ConfigException;
 import org.apache.kafka.common.config.TopicConfig;
+import org.apache.kafka.common.errors.InvalidTopicException;
+import org.apache.kafka.common.internals.Topic;
 import org.apache.kafka.common.metrics.JmxReporter;
 import org.apache.kafka.common.metrics.Sensor;
 import org.apache.kafka.common.metrics.Sensor.RecordingLevel;
@@ -573,13 +575,12 @@ public class StreamsConfig extends AbstractConfig {
 
     public static final String DEFAULT_DEAD_LETTER_QUEUE_TOPIC_CONFIG = "default.deadletterqueue.topic";
     private static final String DEFAULT_DEAD_LETTER_QUEUE_TOPIC_DOC = "Global default Dead Letter Queue (DLQ) topic name for the opt-in DSL DLQ layer.\n" +
-            "If set (and the DLQ layer is enabled), records that fail deserialization or processing on a topology that opted in via " +
-            "KStream#withDeadLetterQueue(String, DeadLetterQueueOptions) are routed to this topic as their original key/value bytes plus dlq.* diagnostic headers.\n" +
-            "The DSL-level withDeadLetterQueue(topic, options) call takes precedence over this global default. This key is independent of, and coexists with, the handler-level errors.dead.letter.queue.topic.name configuration. The DLQ topic is assumed to already exist.";
+            "When the DLQ layer is enabled (default.deadletterqueue.enabled=true) and this topic is set, records that fail deserialization, processing, or serialization/production across all of the application's source topics are routed to this topic as their original key/value bytes plus dlq.* diagnostic headers; retriable broker/producer failures are not dead-lettered and continue to use the producer's retry configuration.\n" +
+            "A DSL-level KStream#withDeadLetterQueue(String, DeadLetterQueueOptions) call takes precedence over this global default and routes even when the global switch is off. If this topic is set it must be a valid Kafka topic name (validated at startup, otherwise construction fails). This key is independent of, and coexists with, the handler-level errors.dead.letter.queue.topic.name configuration. The DLQ topic is assumed to already exist.";
 
     public static final String DEFAULT_DEAD_LETTER_QUEUE_ENABLED_CONFIG = "default.deadletterqueue.enabled";
     private static final String DEFAULT_DEAD_LETTER_QUEUE_ENABLED_DOC = "Global switch that enables the opt-in DSL Dead Letter Queue (DLQ) layer. Defaults to false.\n" +
-            "When false (default), the new DSL DLQ layer is inactive and error handling is unchanged. Per-topology / DSL-level configuration via KStream#withDeadLetterQueue(String, DeadLetterQueueOptions) takes precedence over this global default.";
+            "When false (default), the new DSL DLQ layer is inactive and error handling is unchanged. When set to true, default.deadletterqueue.topic must also be set to a valid topic name (validated at startup, otherwise construction fails), and DLQ routing then applies to all of the application's source topics even without a per-KStream withDeadLetterQueue call. Per-topology / DSL-level configuration via KStream#withDeadLetterQueue(String, DeadLetterQueueOptions) takes precedence over this global default.";
 
     /** {@code log.summary.interval.ms} */
     public static final String LOG_SUMMARY_INTERVAL_MS_CONFIG = "log.summary.interval.ms";
@@ -1505,6 +1506,50 @@ public class StreamsConfig extends AbstractConfig {
         verifyTopologyOptimizationConfigs(getString(TOPOLOGY_OPTIMIZATION_CONFIG));
         verifyClientTelemetryConfigs();
         verifyStreamsProtocolCompatibility(doLog);
+        verifyDeadLetterQueueConfigs();
+    }
+
+    /**
+     * Fail fast on an incomplete or invalid global Dead Letter Queue (DLQ) configuration (MA-02 / MA-17). Because the
+     * global {@code default.deadletterqueue.enabled} switch turns on DLQ routing for <em>every</em> source of any
+     * topology built with this configuration (unless a more specific per-source DSL opt-in applies), an enabled-but-
+     * unconfigured global DLQ would otherwise silently route nothing (blank topic) or fail obscurely at produce time
+     * (invalid topic). Validating here — at {@code StreamsConfig} construction, before any topology is built — surfaces
+     * the misconfiguration immediately.
+     *
+     * <ul>
+     *   <li>If {@code default.deadletterqueue.enabled=true} but {@code default.deadletterqueue.topic} is unset or
+     *       blank, a {@link ConfigException} is thrown.</li>
+     *   <li>If {@code default.deadletterqueue.topic} is set (regardless of the enabled flag), it must be a valid Kafka
+     *       topic name per the canonical {@link Topic#validate(String)} rules; otherwise a {@link ConfigException} is
+     *       thrown.</li>
+     * </ul>
+     */
+    private void verifyDeadLetterQueueConfigs() {
+        final boolean dlqEnabled = getBoolean(DEFAULT_DEAD_LETTER_QUEUE_ENABLED_CONFIG);
+        final String dlqTopic = getString(DEFAULT_DEAD_LETTER_QUEUE_TOPIC_CONFIG);
+        final boolean dlqTopicSet = dlqTopic != null && !dlqTopic.trim().isEmpty();
+
+        if (dlqEnabled && !dlqTopicSet) {
+            throw new ConfigException(
+                DEFAULT_DEAD_LETTER_QUEUE_ENABLED_CONFIG,
+                dlqEnabled,
+                "When " + DEFAULT_DEAD_LETTER_QUEUE_ENABLED_CONFIG + " is set to true, "
+                    + DEFAULT_DEAD_LETTER_QUEUE_TOPIC_CONFIG + " must be set to a non-blank Kafka topic name."
+            );
+        }
+
+        if (dlqTopicSet) {
+            try {
+                Topic.validate(dlqTopic);
+            } catch (final InvalidTopicException invalidTopicException) {
+                throw new ConfigException(
+                    DEFAULT_DEAD_LETTER_QUEUE_TOPIC_CONFIG,
+                    dlqTopic,
+                    "Invalid dead letter queue topic name: " + invalidTopicException.getMessage()
+                );
+            }
+        }
     }
 
     private void verifyStreamsProtocolCompatibility(final boolean doLog) {

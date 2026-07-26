@@ -347,6 +347,24 @@ public class InternalTopologyBuilder {
         }
 
         private void setDeadLetterQueue(final String deadLetterQueueTopic, final DeadLetterQueueOptions deadLetterQueueOptions) {
+            if (this.deadLetterQueueTopic != null) {
+                // This source was already opted in to the DSL-level DLQ (for example two KStream sub-graphs derived
+                // from the same source each called withDeadLetterQueue). Identical configuration is idempotent;
+                // conflicting configuration is a topology error, because a single source deserializes each record
+                // exactly once and therefore cannot route the same failure to two different DLQ topics or policies.
+                final boolean sameConfig = this.deadLetterQueueTopic.equals(deadLetterQueueTopic)
+                    && Objects.equals(this.deadLetterQueueOptions, deadLetterQueueOptions);
+                if (sameConfig) {
+                    return;
+                }
+                throw new TopologyException(
+                    "Conflicting dead letter queue configuration for source node '" + name + "': already configured "
+                        + "with topic '" + this.deadLetterQueueTopic + "' and options " + this.deadLetterQueueOptions
+                        + ", cannot reconfigure with topic '" + deadLetterQueueTopic + "' and options "
+                        + deadLetterQueueOptions + ". A source can route deserialization failures to only a single "
+                        + "dead letter queue; use identical DeadLetterQueueOptions on every withDeadLetterQueue call "
+                        + "that resolves to this source.");
+            }
             this.deadLetterQueueTopic = deadLetterQueueTopic;
             this.deadLetterQueueOptions = deadLetterQueueOptions;
         }
@@ -507,15 +525,21 @@ public class InternalTopologyBuilder {
      * Mark a previously-added source node as opted in to the DSL-level Dead Letter Queue (DLQ), so that records
      * failing deserialization at that source are routed to {@code deadLetterQueueTopic} with the supplied options.
      *
-     * <p>This is invoked while a source graph node writes itself to the topology (see
-     * {@code StreamSourceNode#writeToTopology}) after the corresponding {@code addSource(...)} call, on behalf of a
+     * <p>This is invoked while a {@code DeadLetterQueueGraphNode} writes itself to the topology (after the
+     * originating source's {@code addSource(...)} call), on behalf of a
      * {@link org.apache.kafka.streams.kstream.KStream#withDeadLetterQueue(String, DeadLetterQueueOptions)} DSL call.
      * It is additive and backward compatible: source nodes for which it is never called keep their default
      * (non-DLQ) error-handling behaviour. Names that do not resolve to a source node are ignored.
      *
+     * <p>Marking is conflict-aware. Marking the same source with identical topic and options more than once (for
+     * example from sibling branches that resolve to a shared source) is idempotent; marking it with a different
+     * topic or different options raises a {@link TopologyException}, because a source deserializes each record
+     * exactly once and therefore cannot route the same failure to more than one DLQ.
+     *
      * @param sourceName             the name of the source node to mark
      * @param deadLetterQueueTopic   the resolved DLQ topic name (must not be null)
      * @param deadLetterQueueOptions the resolved DLQ options (must not be null)
+     * @throws TopologyException if this source is already opted in with a conflicting topic or options
      */
     public final synchronized void markSourceNodeForDeadLetterQueue(final String sourceName,
                                                                     final String deadLetterQueueTopic,

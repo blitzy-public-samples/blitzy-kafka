@@ -27,6 +27,8 @@ import org.apache.kafka.common.serialization.StringSerializer;
 import org.apache.kafka.streams.KafkaStreams;
 import org.apache.kafka.streams.KeyValue;
 import org.apache.kafka.streams.StreamsBuilder;
+import org.apache.kafka.streams.StreamsConfig;
+import org.apache.kafka.streams.errors.LogAndContinueExceptionHandler;
 import org.apache.kafka.streams.errors.internals.DlqRecordBuilder;
 import org.apache.kafka.streams.integration.utils.EmbeddedKafkaCluster;
 import org.apache.kafka.streams.integration.utils.IntegrationTestUtils;
@@ -70,8 +72,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *         opted-in stream lands the original bytes plus the six {@code dlq.*} headers on the configured DLQ topic,
  *         that valid records continue to the output topic, and that the stream does not terminate (zero uncaught
  *         terminations when DLQ is enabled);</li>
- *     <li>{@link #shouldFailFastAndNotDeadLetterForNonOptInTopology()} is the regression guard: a topology that does
- *         NOT opt in retains byte-for-byte identical default (fail-fast) error handling and produces no DLQ records.</li>
+ *     <li>{@link #shouldFailFastAndNotDeadLetterForNonOptInTopology()} is a regression guard: a topology that does
+ *         NOT opt in retains byte-for-byte identical default (fail-fast) error handling and produces no DLQ records;</li>
+ *     <li>{@link #shouldNotWriteToDlqForNonOptInLogAndContinueTopology()} is the complementary regression guard: a
+ *         non-opted-in topology configured with the log-and-continue handler still skips the bad record and writes
+ *         nothing to the DLQ, confirming neither pre-existing non-DLQ path is perturbed by the feature.</li>
  * </ul>
  */
 @Tag("integration")
@@ -170,6 +175,11 @@ public class DeadLetterQueueDslIntegrationTest {
             final long failureTimestamp = Long.parseLong(
                 new String(dlqRecord.headers().lastHeader(DlqRecordBuilder.HEADER_FAILURE_TIMESTAMP).value()));
             assertTrue(failureTimestamp > 0L, "Failure timestamp header should be a positive epoch-millis value");
+
+            // Exactly the six dlq.* headers are present — no more, no fewer. This pins the AAP's frozen six-header
+            // contract end-to-end (the builder never adds a seventh "truncated" marker header).
+            assertEquals(6, dlqRecord.headers().toArray().length,
+                "DLQ record must carry exactly the six dlq.* headers");
         }
     }
 
@@ -198,6 +208,69 @@ public class DeadLetterQueueDslIntegrationTest {
         }
     }
 
+    @Test
+    public void shouldNotWriteToDlqForNonOptInLogAndContinueTopology() throws Exception {
+        try (final KafkaStreams streams = getNonOptInLogAndContinueStreams()) {
+
+            startApplicationAndWaitUntilRunning(streams);
+
+            // Produce the same data, including the record that fails Long deserialization.
+            IntegrationTestUtils.produceKeyValuesSynchronously(
+                INPUT_TOPIC,
+                bytesData,
+                TestUtils.producerConfig(cluster.bootstrapServers(), StringSerializer.class, ByteArraySerializer.class),
+                cluster.time
+            );
+
+            // Regression (log-and-continue): with no DLQ opt-in and the LogAndContinue handler, the two valid records
+            // still reach the output topic and the bad record is silently skipped — byte-for-byte legacy behaviour.
+            final List<ConsumerRecord<String, String>> outputRecords =
+                readResult(OUTPUT_TOPIC, 2, StringDeserializer.class, StringDeserializer.class, 30000L);
+            assertEquals(2, outputRecords.size(), "Two valid records should reach the output topic");
+            assertEquals("1", outputRecords.get(0).value());
+            assertEquals("3", outputRecords.get(1).value());
+
+            // And nothing is routed to the DLQ topic (no behavioural change from before this feature existed).
+            assertThrows(AssertionError.class,
+                () -> readResult(DLQ_TOPIC, 1, ByteArrayDeserializer.class, ByteArrayDeserializer.class, 10000L),
+                "No records should be dead-lettered for a non-opted-in log-and-continue topology");
+        }
+    }
+
+    @Test
+    public void shouldIncurNoDlqWritesForAllValidRecordsWhenOptedIn() throws Exception {
+        // MA-11 (failure-path-only overhead): a topology that opts in to the DLQ but processes only valid records
+        // must write NOTHING to the DLQ topic — the DLQ machinery is confined to the exception branch, so the
+        // non-failing (happy) path is untouched. This is the verifiable, mutation-sensitive guarantee behind the
+        // "non-failure throughput is unaffected" performance goal; specific p99-latency figures are a design target
+        // rather than a suite assertion, since a failure-path microbenchmark belongs in the dedicated JMH module.
+        try (final KafkaStreams streams = getDslOptInStreams()) {
+            startApplicationAndWaitUntilRunning(streams);
+
+            // Only valid Long-encoded records — none fail deserialization.
+            final List<KeyValue<String, byte[]>> allValid = new ArrayList<>();
+            allValid.add(new KeyValue<>("key", ByteBuffer.allocate(Long.BYTES).putLong(10L).array()));
+            allValid.add(new KeyValue<>("key", ByteBuffer.allocate(Long.BYTES).putLong(20L).array()));
+            IntegrationTestUtils.produceKeyValuesSynchronously(
+                INPUT_TOPIC,
+                allValid,
+                TestUtils.producerConfig(cluster.bootstrapServers(), StringSerializer.class, ByteArraySerializer.class),
+                cluster.time
+            );
+
+            // All records flow through to the output topic...
+            final List<ConsumerRecord<String, String>> outputRecords =
+                readResult(OUTPUT_TOPIC, 2, StringDeserializer.class, StringDeserializer.class, 30000L);
+            assertEquals(2, outputRecords.size(), "All valid records should reach the output topic");
+
+            // ...and the DLQ topic receives nothing (reading even one record times out), proving the happy path
+            // incurs zero DLQ overhead even when the topology has opted in.
+            assertThrows(AssertionError.class,
+                () -> readResult(DLQ_TOPIC, 1, ByteArrayDeserializer.class, ByteArrayDeserializer.class, 10000L),
+                "An opted-in topology with only valid records must incur zero DLQ writes");
+        }
+    }
+
     private KafkaStreams getDslOptInStreams() {
         final StreamsBuilder builder = new StreamsBuilder();
         builder.stream(INPUT_TOPIC, Consumed.with(Serdes.String(), Serdes.Long()))
@@ -215,6 +288,20 @@ public class DeadLetterQueueDslIntegrationTest {
             .to(OUTPUT_TOPIC, Produced.with(Serdes.String(), Serdes.String()));
 
         return new KafkaStreams(builder.build(), getBaseProperties());
+    }
+
+    private KafkaStreams getNonOptInLogAndContinueStreams() {
+        final StreamsBuilder builder = new StreamsBuilder();
+        builder.stream(INPUT_TOPIC, Consumed.with(Serdes.String(), Serdes.Long()))
+            .mapValues((k, v) -> String.valueOf(v))
+            .to(OUTPUT_TOPIC, Produced.with(Serdes.String(), Serdes.String()));
+
+        final Properties properties = getBaseProperties();
+        // Pre-existing default (non-DLQ) behaviour: log-and-continue skips the bad record; no DLQ anywhere.
+        properties.put(
+            StreamsConfig.DESERIALIZATION_EXCEPTION_HANDLER_CLASS_CONFIG,
+            LogAndContinueExceptionHandler.class.getName());
+        return new KafkaStreams(builder.build(), properties);
     }
 
     private Properties getBaseProperties() {

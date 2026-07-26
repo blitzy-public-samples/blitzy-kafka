@@ -24,6 +24,7 @@ import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.streams.errors.DeserializationExceptionHandler;
 import org.apache.kafka.streams.errors.StreamsException;
 import org.apache.kafka.streams.errors.internals.DefaultErrorHandlerContext;
+import org.apache.kafka.streams.kstream.internals.DeadLetterQueueExceptionHandlerDecorator;
 import org.apache.kafka.streams.processor.api.ProcessorContext;
 import org.apache.kafka.streams.processor.internals.metrics.TaskMetrics;
 
@@ -121,31 +122,46 @@ public class RecordDeserializer {
         }
 
         final List<ProducerRecord<byte[], byte[]>> deadLetterQueueRecords = response.deadLetterQueueRecords();
+        // The opt-in, DSL-level DLQ path is identified by the effective handler being the DLQ-aware decorator. Only on
+        // that path do we route through the recursion-guarded DLQ send (MA-05), count each record (MA-08), emit the
+        // single targeted WARN (MA-09) and suppress the generic throwable WARN below. The pre-existing KIP-1034
+        // global-config path (and any custom handler that returns DLQ records) is left byte-for-byte unchanged.
+        final boolean optInDeadLetterQueue =
+            deserializationExceptionHandler instanceof DeadLetterQueueExceptionHandlerDecorator.DeserializationDecorator;
+        final boolean deadLetterQueueRecordSent = optInDeadLetterQueue && !deadLetterQueueRecords.isEmpty();
         if (!deadLetterQueueRecords.isEmpty()) {
             final RecordCollector collector = ((RecordCollector.Supplier) processorContext).recordCollector();
-            for (final ProducerRecord<byte[], byte[]> deadLetterQueueRecord : deadLetterQueueRecords) {
-                collector.send(
-                        deadLetterQueueRecord.key(),
-                        deadLetterQueueRecord.value(),
-                        sourceNodeName,
-                        (InternalProcessorContext) processorContext,
-                        deadLetterQueueRecord
-                );
-            }
-
-            // Observability for the opt-in, DSL-level DLQ path ONLY: record the dlq-records-sent sensor and emit a
-            // targeted WARN (exception class + source coordinates). This is guarded on the effective handler being
-            // the DLQ-aware decorator so that the pre-existing KIP-1034 global-config path (and any custom handler
-            // that returns DLQ records) is left completely unobserved and byte-for-byte unchanged.
-            if (deserializationExceptionHandler instanceof DeadLetterQueueDeserializationExceptionHandler) {
-                final Sensor dlqRecordsSentSensor = TaskMetrics.dlqRecordsSentSensor(
+            final Sensor dlqRecordsSentSensor = optInDeadLetterQueue
+                ? TaskMetrics.dlqRecordsSentSensor(
                     Thread.currentThread().getName(),
                     processorContext.taskId().toString(),
-                    ((InternalProcessorContext<?, ?>) processorContext).metrics()
-                );
-                DeadLetterQueueObserver.record(
+                    ((InternalProcessorContext<?, ?>) processorContext).metrics())
+                : null;
+            for (final ProducerRecord<byte[], byte[]> deadLetterQueueRecord : deadLetterQueueRecords) {
+                if (optInDeadLetterQueue) {
+                    // Recursion-guarded DLQ send + per-record count (MA-05 / MA-08).
+                    collector.sendDeadLetterQueueRecord(
+                        deadLetterQueueRecord,
+                        sourceNodeName,
+                        (InternalProcessorContext<?, ?>) processorContext
+                    );
+                    DeadLetterQueueObserver.recordSent(dlqRecordsSentSensor);
+                } else {
+                    // Pre-existing KIP-1034 / custom-handler path: unchanged behaviour.
+                    collector.send(
+                            deadLetterQueueRecord.key(),
+                            deadLetterQueueRecord.value(),
+                            sourceNodeName,
+                            (InternalProcessorContext) processorContext,
+                            deadLetterQueueRecord
+                    );
+                }
+            }
+
+            // Opt-in path only: a single targeted WARN per failure event, WITHOUT the throwable (MA-09).
+            if (optInDeadLetterQueue) {
+                DeadLetterQueueObserver.warn(
                     log,
-                    dlqRecordsSentSensor,
                     deserializationException.getClass().getName(),
                     rawRecord.topic(),
                     rawRecord.partition(),
@@ -160,6 +176,11 @@ public class RecordDeserializer {
                 " continue after a deserialization error, please set the " +
                 DESERIALIZATION_EXCEPTION_HANDLER_CLASS_CONFIG + " appropriately.",
                 deserializationException);
+        } else if (deadLetterQueueRecordSent) {
+            // Opt-in path that actually dead-lettered the record: the targeted WARN above already logged the event
+            // (exception class + source coordinates, no throwable), so suppress the generic throwable WARN to avoid
+            // the double-log and stacktrace leak of MA-09, while preserving the dropped-records bookkeeping.
+            droppedRecordsSensor.record();
         } else {
             log.warn(
                 "Skipping record due to deserialization error. topic=[{}] partition=[{}] offset=[{}]",

@@ -56,6 +56,37 @@ public interface RecordCollector {
                      ProducerRecord<byte[], byte[]> serializedRecord);
 
     /**
+     * Send an already-serialized Dead Letter Queue (DLQ) record produced by the opt-in, DSL-level DLQ layer.
+     *
+     * <p>DLQ records are a <em>best-effort side output</em>: they are produced through the same Streams producer as
+     * every other record (reusing its security/authentication configuration and, under exactly-once, participating in
+     * the task's transaction), but a DLQ record that itself fails to produce must <strong>not</strong> be routed back
+     * through the {@link org.apache.kafka.streams.errors.ProductionExceptionHandler}. Doing so could return yet another
+     * DLQ record and recurse indefinitely. Implementations that route through the production error path (such as
+     * {@link RecordCollectorImpl}) therefore override this method to escalate a failed DLQ send exactly once through
+     * the uncaught-exception path instead of re-handling it.
+     *
+     * <p>The default implementation simply delegates to {@link #send(Object, Object, String, InternalProcessorContext,
+     * ProducerRecord)} so that test doubles and collectors that do not implement the production error path inherit
+     * safe behaviour without change.
+     *
+     * @param deadLetterQueueRecord the fully-serialized {@code ProducerRecord<byte[], byte[]>} to route to the DLQ topic
+     * @param processorNodeId       the id of the processor node on whose behalf the record is being sent
+     * @param context               the current processor context
+     */
+    default void sendDeadLetterQueueRecord(final ProducerRecord<byte[], byte[]> deadLetterQueueRecord,
+                                           final String processorNodeId,
+                                           final InternalProcessorContext<?, ?> context) {
+        send(
+            deadLetterQueueRecord.key(),
+            deadLetterQueueRecord.value(),
+            processorNodeId,
+            context,
+            deadLetterQueueRecord
+        );
+    }
+
+    /**
      * Initialize the internal {@link Producer}; note this function should be made idempotent
      *
      * @throws org.apache.kafka.common.errors.TimeoutException if producer initializing txn id timed out

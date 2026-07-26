@@ -115,11 +115,13 @@
     <p>
         Kafka Streams 4.2.0 introduces an opt-in, DSL-level Dead Letter Queue (DLQ) capability. A new DSL method
         <code>KStream.withDeadLetterQueue(String dlqTopic, DeadLetterQueueOptions options)</code> lets a topology opt in,
-        per <code>KStream</code>, to route records that fail <b>deserialization</b> or <b>processing</b> &mdash; together with
-        their original key and value bytes plus diagnostic <code>dlq.*</code> headers &mdash; to a configured DLQ topic.
-        The method returns the same-typed <code>KStream&lt;K, V&gt;</code> so it can be used in a fluent chain. The
-        <code>DeadLetterQueueOptions</code> object controls the DLQ topic name, a maximum record size, and whether the
-        diagnostic headers are attached (enabled by default).
+        per <code>KStream</code>, to route records that fail <b>deserialization</b>, <b>processing</b>, or
+        <b>serialization/production</b> &mdash; together with their original key and value bytes plus diagnostic
+        <code>dlq.*</code> headers &mdash; to a configured DLQ topic. Retriable broker/producer failures are not
+        dead-lettered and continue to use the producer's existing retry configuration. The method returns the same-typed
+        <code>KStream&lt;K, V&gt;</code> so it can be used in a fluent chain. The <code>DeadLetterQueueOptions</code> object
+        controls the DLQ topic name, an optional maximum record size (over-sized values are truncated to fit rather than
+        dropped), and whether the diagnostic headers are attached (enabled by default).
     </p>
 
     <p>
@@ -132,8 +134,11 @@
 
     <p>
         This feature is strictly additive: topologies that do not call <code>withDeadLetterQueue(...)</code> and do not
-        enable the new defaults retain byte-for-byte identical error-handling behavior. As with the existing DLQ mechanism,
-        the DLQ topic is assumed to already exist and is <b>not</b> automatically created by Kafka Streams.
+        enable the new defaults retain byte-for-byte identical error-handling behavior. DLQ records reuse the same Streams
+        producer (and therefore its security and authentication configuration); under exactly-once they are produced within
+        the task's transaction and committed or aborted atomically, and a DLQ write that itself fails to be produced is
+        escalated once rather than retried indefinitely. As with the existing DLQ mechanism, the DLQ topic is assumed to
+        already exist and is <b>not</b> automatically created by Kafka Streams.
     </p>
 
     <h3><a id="streams_api_changes_410" href="#streams_api_changes_410">Streams API changes in 4.1.0</a></h3>

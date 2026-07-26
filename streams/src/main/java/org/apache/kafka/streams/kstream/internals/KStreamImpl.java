@@ -16,6 +16,7 @@
  */
 package org.apache.kafka.streams.kstream.internals;
 
+import org.apache.kafka.common.internals.Topic;
 import org.apache.kafka.common.serialization.Serde;
 import org.apache.kafka.common.utils.Bytes;
 import org.apache.kafka.streams.KeyValue;
@@ -44,6 +45,7 @@ import org.apache.kafka.streams.kstream.ValueMapper;
 import org.apache.kafka.streams.kstream.ValueMapperWithKey;
 import org.apache.kafka.streams.kstream.internals.graph.BaseRepartitionNode;
 import org.apache.kafka.streams.kstream.internals.graph.BaseRepartitionNode.BaseRepartitionNodeBuilder;
+import org.apache.kafka.streams.kstream.internals.graph.DeadLetterQueueGraphNode;
 import org.apache.kafka.streams.kstream.internals.graph.GraphNode;
 import org.apache.kafka.streams.kstream.internals.graph.OptimizableRepartitionNode;
 import org.apache.kafka.streams.kstream.internals.graph.OptimizableRepartitionNode.OptimizableRepartitionNodeBuilder;
@@ -51,7 +53,6 @@ import org.apache.kafka.streams.kstream.internals.graph.ProcessorGraphNode;
 import org.apache.kafka.streams.kstream.internals.graph.ProcessorParameters;
 import org.apache.kafka.streams.kstream.internals.graph.ProcessorToStateConnectorNode;
 import org.apache.kafka.streams.kstream.internals.graph.StreamSinkNode;
-import org.apache.kafka.streams.kstream.internals.graph.StreamSourceNode;
 import org.apache.kafka.streams.kstream.internals.graph.StreamTableJoinNode;
 import org.apache.kafka.streams.kstream.internals.graph.StreamToTableNode;
 import org.apache.kafka.streams.kstream.internals.graph.UnoptimizableRepartitionNode;
@@ -68,10 +69,8 @@ import org.apache.kafka.streams.state.StoreBuilder;
 import org.apache.kafka.streams.state.VersionedBytesStoreSupplier;
 import org.apache.kafka.streams.state.internals.RocksDBTimeOrderedKeyValueBuffer;
 
-import java.util.ArrayDeque;
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.Deque;
 import java.util.HashSet;
 import java.util.Objects;
 import java.util.Optional;
@@ -131,6 +130,8 @@ public class KStreamImpl<K, V> extends AbstractStream<K, V> implements KStream<K
 
     private static final String REPARTITION_NAME = "KSTREAM-REPARTITION-";
 
+    private static final String DEAD_LETTER_QUEUE_NAME = "KSTREAM-DEADLETTERQUEUE-";
+
     private final boolean repartitionRequired;
 
     private OptimizableRepartitionNode<K, V> repartitionNode;
@@ -153,53 +154,37 @@ public class KStreamImpl<K, V> extends AbstractStream<K, V> implements KStream<K
         if (dlqTopic.trim().isEmpty()) {
             throw new IllegalArgumentException("dlqTopic cannot be blank");
         }
+        // Validate the DLQ topic name with Kafka's canonical topic validator at topology-build time so an invalid
+        // name fails fast here rather than at first produce.
+        Topic.validate(dlqTopic);
+        // The supplied options always carry their own DLQ topic (they can only be created via
+        // DeadLetterQueueOptions.with(topic)); reject an incoherent call in which the method argument and the
+        // options disagree, so there is a single unambiguous effective topic.
+        if (options.dlqTopic() != null && !options.dlqTopic().equals(dlqTopic)) {
+            throw new IllegalArgumentException(
+                "dlqTopic argument '" + dlqTopic + "' does not match the topic configured on the supplied "
+                    + "DeadLetterQueueOptions ('" + options.dlqTopic() + "'); they must be identical");
+        }
 
-        // Mark every originating source graph node of this stream as opted in to the DSL-level Dead Letter Queue.
-        // Records that fail deserialization at those source topics are routed to dlqTopic (see
-        // StreamSourceNode#writeToTopology -> InternalTopologyBuilder#markSourceNodeForDeadLetterQueue and the
-        // decorator installed at task creation). This does not add a processing step to the topology, so the same
-        // KStream is returned unchanged for fluent chaining, and topologies that never call this method are
-        // completely unaffected.
-        final Set<StreamSourceNode<?, ?>> sourceNodes = findSourceGraphNodes(graphNode);
-        if (sourceNodes.isEmpty()) {
+        // Eagerly verify this stream has at least one originating source (or repartition) boundary that can be
+        // marked. The authoritative, optimization-aware marking is performed later by
+        // DeadLetterQueueGraphNode#writeToTopology.
+        if (DeadLetterQueueGraphNode.resolveSourceNames(graphNode).isEmpty()) {
             throw new IllegalStateException(
                 "withDeadLetterQueue could not locate an originating source node for this stream; "
                     + "the dead letter queue can only be enabled on streams derived from a source topic");
         }
-        for (final StreamSourceNode<?, ?> sourceNode : sourceNodes) {
-            sourceNode.setDeadLetterQueue(dlqTopic, options);
-        }
+
+        // Carry the immutable DLQ policy on a dedicated metadata node in this sub-graph rather than mutating shared
+        // source objects. The node marks the resolved source(s) for DLQ routing at topology-build time; it adds no
+        // processing step, so the same KStream is returned unchanged for fluent chaining, and topologies that never
+        // call this method are completely unaffected.
+        final String name = builder.newProcessorName(DEAD_LETTER_QUEUE_NAME);
+        final DeadLetterQueueGraphNode<K, V> deadLetterQueueNode =
+            new DeadLetterQueueGraphNode<>(name, dlqTopic, options);
+        builder.addGraphNode(graphNode, deadLetterQueueNode);
 
         return this;
-    }
-
-    /**
-     * Traverse the topology build graph upward from {@code startNode} (following parent links) and collect every
-     * {@link StreamSourceNode} ancestor. When {@code startNode} is itself a source node (as for a stream created
-     * directly via {@code builder.stream(...)}), it is returned as the sole result. Traversal terminates naturally
-     * at source nodes, which have no parents.
-     *
-     * @param startNode the graph node to start the upward search from
-     * @return the set of originating {@link StreamSourceNode}s (never null; may be empty if none are reachable)
-     */
-    private static Set<StreamSourceNode<?, ?>> findSourceGraphNodes(final GraphNode startNode) {
-        final Set<StreamSourceNode<?, ?>> sourceNodes = new HashSet<>();
-        final Set<GraphNode> visited = new HashSet<>();
-        final Deque<GraphNode> toVisit = new ArrayDeque<>();
-        toVisit.add(startNode);
-        while (!toVisit.isEmpty()) {
-            final GraphNode current = toVisit.poll();
-            if (current == null || !visited.add(current)) {
-                continue;
-            }
-            if (current instanceof StreamSourceNode) {
-                // A source node is a topology root; do not traverse beyond it.
-                sourceNodes.add((StreamSourceNode<?, ?>) current);
-            } else {
-                toVisit.addAll(current.parentNodes());
-            }
-        }
-        return sourceNodes;
     }
 
     @Override

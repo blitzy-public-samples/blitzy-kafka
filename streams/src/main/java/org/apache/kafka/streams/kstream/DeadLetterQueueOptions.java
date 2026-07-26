@@ -16,6 +16,8 @@
  */
 package org.apache.kafka.streams.kstream;
 
+import org.apache.kafka.common.internals.Topic;
+
 import java.util.Objects;
 
 /**
@@ -32,11 +34,11 @@ import java.util.Objects;
  *         (see {@link #includeHeaders()}).</li>
  * </ul>
  *
- * <p>Instances are immutable and therefore thread-safe: all fields are {@code final}, there are no setters, and
- * every {@code with*} method returns a brand-new instance rather than mutating the receiver. This is required
- * because the same options object may be read concurrently across multiple {@code StreamThread}s while a topology
- * is running. Build an instance with the {@link #with(String)} factory and refine it with
- * {@link #withMaxRecordSize(int)} and {@link #withIncludeHeaders(boolean)}, for example:
+ * <p>Instances are immutable and therefore thread-safe: the class is {@code final}, all fields are {@code final},
+ * there are no setters, and every {@code with*} method returns a brand-new instance rather than mutating the
+ * receiver. This is required because the same options object may be read concurrently across multiple
+ * {@code StreamThread}s while a topology is running. Build an instance with the {@link #with(String)} factory and
+ * refine it with {@link #withMaxRecordSize(int)} and {@link #withIncludeHeaders(boolean)}, for example:
  *
  * <pre>{@code
  * DeadLetterQueueOptions options = DeadLetterQueueOptions.with("my-dlq-topic")
@@ -44,13 +46,21 @@ import java.util.Objects;
  *                                                        .withIncludeHeaders(true);
  * }</pre>
  *
+ * <h2>Validation</h2>
+ * <p>The options object is a closed, self-validating value type. {@link #with(String)} rejects a {@code null},
+ * blank, or otherwise invalid Kafka topic name (it applies the same canonical {@link Topic#validate(String) topic
+ * validation} the broker uses), and {@link #withMaxRecordSize(int)} rejects any value that is not strictly
+ * positive (use {@link #NO_MAX_RECORD_SIZE} to express "no limit"). Because the type is {@code final} and
+ * validated at construction, callers can rely on every instance carrying a valid topic and size.
+ *
  * @see KStream#withDeadLetterQueue(String, DeadLetterQueueOptions)
  */
-public class DeadLetterQueueOptions {
+public final class DeadLetterQueueOptions {
 
     /**
      * Sentinel value for {@link #maxRecordSize()} meaning "no size limit"; when configured with this value, DLQ
-     * record values are never truncated. This is the default applied by {@link #with(String)}.
+     * record values are never truncated (they are carried through verbatim). This is the default applied by
+     * {@link #with(String)}.
      */
     public static final int NO_MAX_RECORD_SIZE = Integer.MAX_VALUE;
 
@@ -67,38 +77,46 @@ public class DeadLetterQueueOptions {
     }
 
     /**
-     * Copy constructor that creates a new {@code DeadLetterQueueOptions} with the same settings as the supplied
-     * instance. Provided for parity with the other DSL options objects (for example {@code Produced} and
-     * {@code Repartitioned}) so that subclasses within this package can share the immutable state.
-     *
-     * @param options the options instance to copy; its {@code dlqTopic}, {@code maxRecordSize} and
-     *                {@code includeHeaders} values are copied
-     */
-    protected DeadLetterQueueOptions(final DeadLetterQueueOptions options) {
-        this(options.dlqTopic, options.maxRecordSize, options.includeHeaders);
-    }
-
-    /**
      * Create a {@code DeadLetterQueueOptions} for the given DLQ topic, with no record-size limit
      * ({@link #NO_MAX_RECORD_SIZE}) and header inclusion enabled.
      *
-     * @param dlqTopic the name of the (pre-existing) Dead Letter Queue topic
+     * @param dlqTopic the name of the (pre-existing) Dead Letter Queue topic; must be a non-null, non-blank,
+     *                 canonically valid Kafka topic name
      * @return a new {@code DeadLetterQueueOptions} instance
+     * @throws NullPointerException            if {@code dlqTopic} is {@code null}
+     * @throws IllegalArgumentException        if {@code dlqTopic} is blank
+     * @throws org.apache.kafka.common.errors.InvalidTopicException
+     *                                         if {@code dlqTopic} is not a valid Kafka topic name
      */
     public static DeadLetterQueueOptions with(final String dlqTopic) {
+        Objects.requireNonNull(dlqTopic, "dlqTopic cannot be null");
+        if (dlqTopic.trim().isEmpty()) {
+            throw new IllegalArgumentException("dlqTopic cannot be blank");
+        }
+        // Apply the same canonical topic-name validation the broker uses so an invalid DLQ topic is rejected
+        // eagerly (fail-fast) rather than surfacing as an obscure produce-time failure on the exception branch.
+        Topic.validate(dlqTopic);
         return new DeadLetterQueueOptions(dlqTopic, NO_MAX_RECORD_SIZE, true);
     }
 
     /**
      * Return a new instance configured with the provided maximum DLQ record (value) size in bytes. Use
-     * {@link #NO_MAX_RECORD_SIZE} (or a negative value) to indicate no limit. This method never mutates the
-     * receiver; it returns a new {@code DeadLetterQueueOptions} that copies the existing topic and
-     * header-inclusion settings.
+     * {@link #NO_MAX_RECORD_SIZE} to indicate no limit. When a positive limit is set and a failed record's value
+     * exceeds it, {@link org.apache.kafka.streams.errors.internals.DlqRecordBuilder} truncates the value to fit
+     * (the record is still routed to the DLQ, never dropped); with {@link #NO_MAX_RECORD_SIZE} the original value
+     * bytes are carried through verbatim. This method never mutates the receiver; it returns a new
+     * {@code DeadLetterQueueOptions} that copies the existing topic and header-inclusion settings.
      *
-     * @param maxRecordSize the maximum record value size in bytes
+     * @param maxRecordSize the maximum record value size in bytes; must be strictly positive
+     *                      (use {@link #NO_MAX_RECORD_SIZE} for no limit)
      * @return a new {@code DeadLetterQueueOptions} instance
+     * @throws IllegalArgumentException if {@code maxRecordSize} is not strictly positive
      */
     public DeadLetterQueueOptions withMaxRecordSize(final int maxRecordSize) {
+        if (maxRecordSize <= 0) {
+            throw new IllegalArgumentException(
+                "maxRecordSize must be strictly positive (use DeadLetterQueueOptions.NO_MAX_RECORD_SIZE for no limit)");
+        }
         return new DeadLetterQueueOptions(dlqTopic, maxRecordSize, includeHeaders);
     }
 

@@ -25,6 +25,7 @@ import org.apache.kafka.streams.errors.TaskCorruptedException;
 import org.apache.kafka.streams.errors.TaskMigratedException;
 import org.apache.kafka.streams.errors.internals.DefaultErrorHandlerContext;
 import org.apache.kafka.streams.errors.internals.FailedProcessingException;
+import org.apache.kafka.streams.kstream.internals.DeadLetterQueueExceptionHandlerDecorator;
 import org.apache.kafka.streams.processor.api.FixedKeyProcessor;
 import org.apache.kafka.streams.processor.api.FixedKeyProcessorContext;
 import org.apache.kafka.streams.processor.api.InternalFixedKeyRecordFactory;
@@ -246,13 +247,38 @@ public class ProcessorNode<KIn, VIn, KOut, VOut> {
             final List<ProducerRecord<byte[], byte[]>> deadLetterQueueRecords = response.deadLetterQueueRecords();
             if (!deadLetterQueueRecords.isEmpty()) {
                 final RecordCollector collector = ((RecordCollector.Supplier) internalProcessorContext).recordCollector();
+                // Opt-in, DSL-level DLQ path: route through the recursion-guarded DLQ send (MA-05) and count each
+                // record on the dlq-records-sent sensor (MA-08). The pre-existing / custom-handler path is unchanged.
+                final boolean optInDeadLetterQueue =
+                    processingExceptionHandler instanceof DeadLetterQueueExceptionHandlerDecorator.ProcessingDecorator;
+                final Sensor dlqRecordsSentSensor = optInDeadLetterQueue
+                    ? TaskMetrics.dlqRecordsSentSensor(
+                        Thread.currentThread().getName(),
+                        internalProcessorContext.taskId().toString(),
+                        internalProcessorContext.metrics())
+                    : null;
                 for (final ProducerRecord<byte[], byte[]> deadLetterQueueRecord : deadLetterQueueRecords) {
-                    collector.send(
-                            deadLetterQueueRecord.key(),
-                            deadLetterQueueRecord.value(),
-                            name(),
-                            internalProcessorContext,
-                            deadLetterQueueRecord
+                    if (optInDeadLetterQueue) {
+                        collector.sendDeadLetterQueueRecord(deadLetterQueueRecord, name(), internalProcessorContext);
+                        DeadLetterQueueObserver.recordSent(dlqRecordsSentSensor);
+                    } else {
+                        collector.send(
+                                deadLetterQueueRecord.key(),
+                                deadLetterQueueRecord.value(),
+                                name(),
+                                internalProcessorContext,
+                                deadLetterQueueRecord
+                        );
+                    }
+                }
+                // Opt-in path only: a single targeted WARN per failure event, WITHOUT the throwable (MA-09).
+                if (optInDeadLetterQueue) {
+                    DeadLetterQueueObserver.warn(
+                        log,
+                        processingException.getClass().getName(),
+                        errorHandlerContext.topic(),
+                        errorHandlerContext.partition(),
+                        errorHandlerContext.offset()
                     );
                 }
             }

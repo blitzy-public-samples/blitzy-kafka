@@ -44,6 +44,7 @@ import static org.apache.kafka.streams.StreamsConfig.DEFAULT_DEAD_LETTER_QUEUE_T
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -55,17 +56,24 @@ import static org.mockito.Mockito.when;
  * Unit tests for the three internal {@link DeadLetterQueueExceptionHandlerDecorator} nested decorators
  * ({@code DeserializationDecorator}, {@code ProductionDecorator} and {@code ProcessingDecorator}).
  *
- * <p>Because {@code resolveTopic}, {@code isEnabled} and {@code merge} are private static helpers, they are
+ * <p>Because {@code resolveTopic}, {@code isEnabled} and the eligibility classifier are internal helpers, they are
  * exercised through the public {@code configure} / {@code handleError} / {@code handleSerializationError} entry
  * points and asserted on the returned {@code Response}. The tests pin the AAP-critical contracts:
  * <ul>
  *     <li>effective-topic precedence: DSL topic &rarr; options topic &rarr; global default topic;</li>
  *     <li>the enablement matrix (DSL/options opt-in always enables; the global-only path defers to
  *         {@code default.deadletterqueue.enabled}; a {@code null} resolved topic disables);</li>
- *     <li>retriable production failures are passed through verbatim and are <em>never</em> dead-lettered;</li>
+ *     <li>the delegate is invoked <em>exactly once</em> and its response is returned unchanged whenever the DLQ is
+ *         disabled or the failure is ineligible (preserving custom / KIP-1034 / FAIL decisions);</li>
+ *     <li>eligibility: retriable and fatal/framework failures are never dead-lettered, and a punctuation-origin
+ *         processing failure (no source record) is excluded;</li>
+ *     <li>forced resume is applied only to eligible, opted-in records (a delegate {@code FAIL} is overridden to
+ *         {@code RESUME} only then);</li>
  *     <li>{@code null}-delegate defaults (resume for deserialization/processing; retry-or-fail for production);</li>
- *     <li>the serialization-error path falls back to the error-context raw bytes; and</li>
- *     <li>the delegate's DLQ records are preserved and the newly built record is appended after them.</li>
+ *     <li>raw-byte selection per path (deserialization: context bytes then {@code ConsumerRecord} bytes;
+ *         production: the offending output-record bytes; serialization/processing: error-context bytes); and</li>
+ *     <li><em>exactly one</em> routing result per failure — the built {@code dlq.*} record <em>replaces</em> any
+ *         records the delegate produced, so an opted-in node never double-routes.</li>
  * </ul>
  */
 public class DeadLetterQueueExceptionHandlerDecoratorTest {
@@ -104,6 +112,23 @@ public class DeadLetterQueueExceptionHandlerDecoratorTest {
 
     private static DefaultErrorHandlerContext context() {
         return context(RAW_KEY, RAW_VALUE);
+    }
+
+    // A punctuation-origin error context: no source record, so topic is null and partition/offset are the -1
+    // sentinel (see ErrorHandlerContext#topic()/partition()/offset()).
+    private static DefaultErrorHandlerContext punctuationContext() {
+        return new DefaultErrorHandlerContext(
+            null,
+            null,
+            -1,
+            -1,
+            null,
+            "source-node",
+            new TaskId(0, 0),
+            SOURCE_TIMESTAMP,
+            null,
+            null
+        );
     }
 
     private static Map<String, Object> configs(final String globalTopic, final boolean globalEnabled) {
@@ -257,14 +282,15 @@ public class DeadLetterQueueExceptionHandlerDecoratorTest {
     }
 
     @Test
-    public void shouldAppendDlqRecordAfterDelegateRecordsForDeserialization() {
+    public void shouldReplaceDelegateRecordsWithSingleDlqRecordForDeserialization() {
+        // no-double-routing: if the wrapped delegate (e.g. an existing KIP-1034 handler) already produced a DLQ
+        // record, the decorator must REPLACE it with exactly one dlq.* record — never emit both.
         final ProducerRecord<byte[], byte[]> delegateRecord =
             new ProducerRecord<>("delegate-dlq", "dk".getBytes(StandardCharsets.UTF_8), "dv".getBytes(StandardCharsets.UTF_8));
         final DeserializationExceptionHandler delegate = mock(DeserializationExceptionHandler.class);
         when(delegate.handleError(any(), any(), any()))
             .thenReturn(DeserializationExceptionHandler.Response.resume(Collections.singletonList(delegateRecord)));
 
-        // merge() must preserve the delegate's existing DLQ records and append the newly built record after them.
         final DeadLetterQueueExceptionHandlerDecorator.DeserializationDecorator decorator =
             new DeadLetterQueueExceptionHandlerDecorator.DeserializationDecorator(delegate, DLQ_DSL_TOPIC, null);
         decorator.configure(configs(null, false));
@@ -273,9 +299,51 @@ public class DeadLetterQueueExceptionHandlerDecoratorTest {
             decorator.handleError(context(), consumerRecord(), new RuntimeException("boom"));
 
         final List<ProducerRecord<byte[], byte[]>> records = response.deadLetterQueueRecords();
-        assertEquals(2, records.size());
-        assertSame(delegateRecord, records.get(0));
-        assertEquals(DLQ_DSL_TOPIC, records.get(1).topic());
+        assertEquals(1, records.size());
+        assertEquals(DLQ_DSL_TOPIC, records.get(0).topic());
+        assertNotSame(delegateRecord, records.get(0));
+        // delegate invoked exactly once — its side effects and decision are observed, not suppressed
+        verify(delegate).handleError(any(), any(), any());
+    }
+
+    @Test
+    public void shouldOverrideDelegateFailWithResumeForEligibleOptedInDeserialization() {
+        // forced resume is scoped to eligible + opted-in records: a delegate that FAILs is overridden to RESUME so
+        // a DLQ-eligible deserialization failure is dead-lettered and the thread continues.
+        final DeserializationExceptionHandler delegate = mock(DeserializationExceptionHandler.class);
+        when(delegate.handleError(any(), any(), any())).thenReturn(DeserializationExceptionHandler.Response.fail());
+
+        final DeadLetterQueueExceptionHandlerDecorator.DeserializationDecorator decorator =
+            new DeadLetterQueueExceptionHandlerDecorator.DeserializationDecorator(delegate, DLQ_DSL_TOPIC, null);
+        decorator.configure(configs(null, false));
+
+        final DeserializationExceptionHandler.Response response =
+            decorator.handleError(context(), consumerRecord(), new RuntimeException("boom"));
+
+        assertEquals(DeserializationExceptionHandler.Result.RESUME, response.result());
+        assertEquals(1, response.deadLetterQueueRecords().size());
+        assertEquals(DLQ_DSL_TOPIC, response.deadLetterQueueRecords().get(0).topic());
+        verify(delegate).handleError(any(), any(), any());
+    }
+
+    @Test
+    public void shouldNotRouteFatalDeserializationFailureEvenWhenOptedIn() {
+        // A fatal/framework failure (here an Error carried as the cause) must never be dead-lettered — the
+        // delegate's decision is preserved even though the node opted in.
+        final DeserializationExceptionHandler delegate = mock(DeserializationExceptionHandler.class);
+        final DeserializationExceptionHandler.Response delegateResponse =
+            DeserializationExceptionHandler.Response.fail();
+        when(delegate.handleError(any(), any(), any())).thenReturn(delegateResponse);
+
+        final DeadLetterQueueExceptionHandlerDecorator.DeserializationDecorator decorator =
+            new DeadLetterQueueExceptionHandlerDecorator.DeserializationDecorator(delegate, DLQ_DSL_TOPIC, null);
+        decorator.configure(configs(null, false));
+
+        final DeserializationExceptionHandler.Response response = decorator.handleError(
+            context(), consumerRecord(), new RuntimeException("wrapper", new OutOfMemoryError("fatal")));
+
+        assertSame(delegateResponse, response);
+        assertTrue(response.deadLetterQueueRecords().isEmpty());
     }
 
     @Test
@@ -397,7 +465,31 @@ public class DeadLetterQueueExceptionHandlerDecoratorTest {
 
         assertEquals(ProductionExceptionHandler.Result.RESUME, response.result());
         assertEquals(1, response.deadLetterQueueRecords().size());
-        assertEquals(DLQ_DSL_TOPIC, response.deadLetterQueueRecords().get(0).topic());
+        final ProducerRecord<byte[], byte[]> dlqRecord = response.deadLetterQueueRecords().get(0);
+        assertEquals(DLQ_DSL_TOPIC, dlqRecord.topic());
+        // a produce failure dead-letters the offending OUTPUT record's bytes (not the source-context bytes)
+        assertArrayEquals(RECORD_KEY, dlqRecord.key());
+        assertArrayEquals(RECORD_VALUE, dlqRecord.value());
+        verify(delegate).handleError(any(), any(), any());
+    }
+
+    @Test
+    public void shouldNotRouteFatalProductionFailureEvenWhenOptedIn() {
+        // A fatal/framework production failure (here an authorization error) must never be dead-lettered.
+        final ProductionExceptionHandler delegate = mock(ProductionExceptionHandler.class);
+        final ProductionExceptionHandler.Response delegateResponse = ProductionExceptionHandler.Response.fail();
+        when(delegate.handleError(any(), any(), any())).thenReturn(delegateResponse);
+
+        final DeadLetterQueueExceptionHandlerDecorator.ProductionDecorator decorator =
+            new DeadLetterQueueExceptionHandlerDecorator.ProductionDecorator(delegate, DLQ_DSL_TOPIC, null);
+        decorator.configure(configs(null, false));
+
+        final ProductionExceptionHandler.Response response = decorator.handleError(
+            context(), producerRecord(),
+            new org.apache.kafka.common.errors.TopicAuthorizationException("no acl"));
+
+        assertSame(delegateResponse, response);
+        assertTrue(response.deadLetterQueueRecords().isEmpty());
     }
 
     @Test
@@ -408,7 +500,7 @@ public class DeadLetterQueueExceptionHandlerDecoratorTest {
 
         // No opt-in and the global switch is off: the delegate response is returned verbatim.
         final DeadLetterQueueExceptionHandlerDecorator.ProductionDecorator decorator =
-            new DeadLetterQueueExceptionHandlerDecorator.ProductionDecorator(delegate, null, null);
+            new DeadLetterQueueExceptionHandlerDecorator.ProductionDecorator(delegate, (String) null, null);
         decorator.configure(configs(GLOBAL_TOPIC, false));
 
         final ProductionExceptionHandler.Response response =
@@ -463,7 +555,7 @@ public class DeadLetterQueueExceptionHandlerDecoratorTest {
         when(delegate.handleSerializationError(any(), any(), any(), any())).thenReturn(delegateResponse);
 
         final DeadLetterQueueExceptionHandlerDecorator.ProductionDecorator decorator =
-            new DeadLetterQueueExceptionHandlerDecorator.ProductionDecorator(delegate, null, null);
+            new DeadLetterQueueExceptionHandlerDecorator.ProductionDecorator(delegate, (String) null, null);
         decorator.configure(configs(null, false));
 
         final ProductionExceptionHandler.Response response = decorator.handleSerializationError(
@@ -530,7 +622,7 @@ public class DeadLetterQueueExceptionHandlerDecoratorTest {
         when(delegate.handleError(any(), any(), any())).thenReturn(ProcessingExceptionHandler.Response.resume());
 
         final DeadLetterQueueExceptionHandlerDecorator.ProcessingDecorator decorator =
-            new DeadLetterQueueExceptionHandlerDecorator.ProcessingDecorator(delegate, null, null);
+            new DeadLetterQueueExceptionHandlerDecorator.ProcessingDecorator(delegate, (String) null, null);
         decorator.configure(configs(GLOBAL_TOPIC, true));
 
         final ProcessingExceptionHandler.Response response =
@@ -547,7 +639,7 @@ public class DeadLetterQueueExceptionHandlerDecoratorTest {
         when(delegate.handleError(any(), any(), any())).thenReturn(delegateResponse);
 
         final DeadLetterQueueExceptionHandlerDecorator.ProcessingDecorator decorator =
-            new DeadLetterQueueExceptionHandlerDecorator.ProcessingDecorator(delegate, null, null);
+            new DeadLetterQueueExceptionHandlerDecorator.ProcessingDecorator(delegate, (String) null, null);
         decorator.configure(configs(GLOBAL_TOPIC, false));
 
         final ProcessingExceptionHandler.Response response =
@@ -557,7 +649,8 @@ public class DeadLetterQueueExceptionHandlerDecoratorTest {
     }
 
     @Test
-    public void shouldAppendDlqRecordAfterDelegateRecordsForProcessing() {
+    public void shouldReplaceDelegateRecordsWithSingleDlqRecordForProcessing() {
+        // no-double-routing: the built dlq.* record REPLACES any records the delegate produced.
         final ProducerRecord<byte[], byte[]> delegateRecord =
             new ProducerRecord<>("delegate-dlq", "dk".getBytes(StandardCharsets.UTF_8), "dv".getBytes(StandardCharsets.UTF_8));
         final ProcessingExceptionHandler delegate = mock(ProcessingExceptionHandler.class);
@@ -572,10 +665,30 @@ public class DeadLetterQueueExceptionHandlerDecoratorTest {
             decorator.handleError(context(), new Record<>("k", "v", SOURCE_TIMESTAMP), new RuntimeException("boom"));
 
         final List<ProducerRecord<byte[], byte[]>> records = response.deadLetterQueueRecords();
-        assertEquals(2, records.size());
-        assertSame(delegateRecord, records.get(0));
-        assertEquals(DLQ_DSL_TOPIC, records.get(1).topic());
-        assertNotNull(records.get(1).value());
+        assertEquals(1, records.size());
+        assertEquals(DLQ_DSL_TOPIC, records.get(0).topic());
+        assertNotSame(delegateRecord, records.get(0));
+        assertNotNull(records.get(0).value());
+        verify(delegate).handleError(any(), any(), any());
+    }
+
+    @Test
+    public void shouldNotRouteProcessingPunctuationFailureWithNoSourceRecord() {
+        // A punctuation-origin failure has no source record (topic == null, partition/offset == -1), so there is
+        // nothing to dead-letter: the delegate's decision is preserved even though the node opted in.
+        final ProcessingExceptionHandler delegate = mock(ProcessingExceptionHandler.class);
+        final ProcessingExceptionHandler.Response delegateResponse = ProcessingExceptionHandler.Response.resume();
+        when(delegate.handleError(any(), any(), any())).thenReturn(delegateResponse);
+
+        final DeadLetterQueueExceptionHandlerDecorator.ProcessingDecorator decorator =
+            new DeadLetterQueueExceptionHandlerDecorator.ProcessingDecorator(delegate, DLQ_DSL_TOPIC, null);
+        decorator.configure(configs(null, false));
+
+        final ProcessingExceptionHandler.Response response = decorator.handleError(
+            punctuationContext(), new Record<>("k", "v", SOURCE_TIMESTAMP), new RuntimeException("in punctuate"));
+
+        assertSame(delegateResponse, response);
+        assertTrue(response.deadLetterQueueRecords().isEmpty());
     }
 
     @Test

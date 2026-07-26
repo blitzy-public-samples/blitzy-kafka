@@ -26,6 +26,7 @@ import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.Metric;
 import org.apache.kafka.common.MetricName;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.config.ConfigException;
 import org.apache.kafka.common.errors.TimeoutException;
 import org.apache.kafka.common.header.internals.RecordHeaders;
 import org.apache.kafka.common.metrics.JmxReporter;
@@ -61,6 +62,7 @@ import org.apache.kafka.streams.errors.TaskMigratedException;
 import org.apache.kafka.streams.errors.TopologyException;
 import org.apache.kafka.streams.errors.internals.FailedProcessingException;
 import org.apache.kafka.streams.kstream.DeadLetterQueueOptions;
+import org.apache.kafka.streams.kstream.internals.DeadLetterQueueExceptionHandlerDecorator;
 import org.apache.kafka.streams.processor.FailOnInvalidTimestamp;
 import org.apache.kafka.streams.processor.LogAndSkipOnInvalidTimestamp;
 import org.apache.kafka.streams.processor.PunctuationType;
@@ -3291,8 +3293,8 @@ public class StreamTaskTest {
 
         final DeserializationExceptionHandler resolved = resolveDeserializationExceptionHandler(task, source);
 
-        final DeadLetterQueueDeserializationExceptionHandler dlqHandler =
-            assertInstanceOf(DeadLetterQueueDeserializationExceptionHandler.class, resolved);
+        final DeadLetterQueueExceptionHandlerDecorator.DeserializationDecorator dlqHandler =
+            assertInstanceOf(DeadLetterQueueExceptionHandlerDecorator.DeserializationDecorator.class, resolved);
         assertEquals("dsl-dlq", dlqHandler.deadLetterQueueTopic());
         assertSame(options, dlqHandler.deadLetterQueueOptions());
     }
@@ -3307,8 +3309,8 @@ public class StreamTaskTest {
 
         final DeserializationExceptionHandler resolved = resolveDeserializationExceptionHandler(task, source);
 
-        final DeadLetterQueueDeserializationExceptionHandler dlqHandler =
-            assertInstanceOf(DeadLetterQueueDeserializationExceptionHandler.class, resolved);
+        final DeadLetterQueueExceptionHandlerDecorator.DeserializationDecorator dlqHandler =
+            assertInstanceOf(DeadLetterQueueExceptionHandlerDecorator.DeserializationDecorator.class, resolved);
         assertEquals("dsl-dlq", dlqHandler.deadLetterQueueTopic());
         assertEquals(DeadLetterQueueOptions.with("dsl-dlq"), dlqHandler.deadLetterQueueOptions());
     }
@@ -3322,22 +3324,22 @@ public class StreamTaskTest {
 
         final DeserializationExceptionHandler resolved = resolveDeserializationExceptionHandler(task, source);
 
-        final DeadLetterQueueDeserializationExceptionHandler dlqHandler =
-            assertInstanceOf(DeadLetterQueueDeserializationExceptionHandler.class, resolved);
+        final DeadLetterQueueExceptionHandlerDecorator.DeserializationDecorator dlqHandler =
+            assertInstanceOf(DeadLetterQueueExceptionHandlerDecorator.DeserializationDecorator.class, resolved);
         assertEquals("global-dlq", dlqHandler.deadLetterQueueTopic());
         assertEquals(DeadLetterQueueOptions.with("global-dlq"), dlqHandler.deadLetterQueueOptions());
     }
 
     @Test
-    public void shouldNotWrapWhenGlobalDeadLetterQueueEnabledButTopicIsBlank() throws Exception {
-        when(stateManager.taskId()).thenReturn(taskId);
-        when(stateManager.taskType()).thenReturn(TaskType.ACTIVE);
-        task = createStatelessTask(createConfigWithDeadLetterQueue(true, "   "));
-        final MockSourceNode<Integer, Integer> source = new MockSourceNode<>(intDeserializer, intDeserializer);
-
-        final DeserializationExceptionHandler resolved = resolveDeserializationExceptionHandler(task, source);
-
-        assertSame(defaultDeserializationExceptionHandler(task), resolved);
+    public void shouldFailFastWhenGlobalDeadLetterQueueEnabledButTopicIsBlank() {
+        // MA-02: an enabled-but-unconfigured global DLQ (blank topic) is rejected at StreamsConfig construction
+        // (fail-fast) rather than silently routing nothing. The misconfiguration is surfaced before any task is
+        // built, so the blank-topic scenario is no longer reachable at task/handler-resolution time.
+        final ConfigException error = assertThrows(
+            ConfigException.class,
+            () -> createConfigWithDeadLetterQueue(true, "   ")
+        );
+        assertTrue(error.getMessage().contains(StreamsConfig.DEFAULT_DEAD_LETTER_QUEUE_TOPIC_CONFIG));
     }
 
     @Test
@@ -3375,8 +3377,8 @@ public class StreamTaskTest {
 
         final DeserializationExceptionHandler resolved = resolveDeserializationExceptionHandler(task, source);
 
-        final DeadLetterQueueDeserializationExceptionHandler dlqHandler =
-            assertInstanceOf(DeadLetterQueueDeserializationExceptionHandler.class, resolved);
+        final DeadLetterQueueExceptionHandlerDecorator.DeserializationDecorator dlqHandler =
+            assertInstanceOf(DeadLetterQueueExceptionHandlerDecorator.DeserializationDecorator.class, resolved);
         assertEquals("dsl-dlq", dlqHandler.deadLetterQueueTopic());
         assertSame(options, dlqHandler.deadLetterQueueOptions());
     }

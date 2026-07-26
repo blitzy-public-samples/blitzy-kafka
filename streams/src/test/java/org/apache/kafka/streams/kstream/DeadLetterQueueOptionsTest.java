@@ -16,13 +16,15 @@
  */
 package org.apache.kafka.streams.kstream;
 
+import org.apache.kafka.common.errors.InvalidTopicException;
+
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
-import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class DeadLetterQueueOptionsTest {
@@ -128,31 +130,45 @@ public class DeadLetterQueueOptionsTest {
     }
 
     @Test
-    public void shouldPreserveAllFieldsViaProtectedCopyConstructor() {
-        final DeadLetterQueueOptions original = DeadLetterQueueOptions.with(DLQ_TOPIC)
-            .withMaxRecordSize(1024)
-            .withIncludeHeaders(false);
-
-        // The protected copy-constructor is exercised through a package-local subclass; it must copy every field.
-        final DeadLetterQueueOptions copy = new SubclassedDeadLetterQueueOptions(original);
-
-        assertEquals(DLQ_TOPIC, copy.dlqTopic());
-        assertEquals(1024, copy.maxRecordSize());
-        assertFalse(copy.includeHeaders());
+    public void shouldBeAClosedFinalValueType() {
+        // The options object is a closed, immutable value type: making it final prevents a subclass from
+        // overriding accessors or the class-exact equals/hashCode contract, which is required for safe concurrent
+        // sharing across StreamThreads. This asserts the design contract rather than relying on the compiler.
+        assertTrue(java.lang.reflect.Modifier.isFinal(DeadLetterQueueOptions.class.getModifiers()),
+            "DeadLetterQueueOptions must be final so the immutable value contract cannot be subverted");
     }
 
     @Test
-    public void shouldAllowNullTopic() {
-        final DeadLetterQueueOptions a = DeadLetterQueueOptions.with(null);
+    public void shouldRejectNullTopic() {
+        assertThrows(NullPointerException.class, () -> DeadLetterQueueOptions.with(null));
+    }
 
-        assertNull(a.dlqTopic());
-        assertEquals(DeadLetterQueueOptions.NO_MAX_RECORD_SIZE, a.maxRecordSize());
-        assertTrue(a.includeHeaders());
+    @Test
+    public void shouldRejectBlankTopic() {
+        assertThrows(IllegalArgumentException.class, () -> DeadLetterQueueOptions.with(""));
+        assertThrows(IllegalArgumentException.class, () -> DeadLetterQueueOptions.with("   "));
+    }
 
-        // Two null-topic instances with otherwise-default settings must be equal and share a hash code.
-        final DeadLetterQueueOptions b = DeadLetterQueueOptions.with(null);
-        assertEquals(a, b);
-        assertEquals(a.hashCode(), b.hashCode());
+    @Test
+    public void shouldRejectInvalidTopicName() {
+        // The canonical Kafka topic validator rejects illegal characters; DeadLetterQueueOptions.with must apply
+        // it so an invalid DLQ topic fails fast at configuration time rather than at produce time.
+        assertThrows(InvalidTopicException.class, () -> DeadLetterQueueOptions.with("has spaces"));
+        assertThrows(InvalidTopicException.class, () -> DeadLetterQueueOptions.with("bad/topic"));
+    }
+
+    @Test
+    public void shouldRejectNonPositiveMaxRecordSize() {
+        final DeadLetterQueueOptions options = DeadLetterQueueOptions.with(DLQ_TOPIC);
+        assertThrows(IllegalArgumentException.class, () -> options.withMaxRecordSize(0));
+        assertThrows(IllegalArgumentException.class, () -> options.withMaxRecordSize(-1));
+    }
+
+    @Test
+    public void shouldAcceptNoMaxRecordSizeSentinelAndPositiveValues() {
+        assertEquals(DeadLetterQueueOptions.NO_MAX_RECORD_SIZE,
+            DeadLetterQueueOptions.with(DLQ_TOPIC).withMaxRecordSize(DeadLetterQueueOptions.NO_MAX_RECORD_SIZE).maxRecordSize());
+        assertEquals(1, DeadLetterQueueOptions.with(DLQ_TOPIC).withMaxRecordSize(1).maxRecordSize());
     }
 
     @Test
@@ -168,26 +184,5 @@ public class DeadLetterQueueOptionsTest {
 
         assertNotEquals(options, DLQ_TOPIC);
         assertNotEquals(options, new Object());
-    }
-
-    @Test
-    public void shouldNotBeEqualToSubclassInstanceEvenWhenFieldsMatch() {
-        final DeadLetterQueueOptions base = DeadLetterQueueOptions.with(DLQ_TOPIC);
-        final DeadLetterQueueOptions subclass = new SubclassedDeadLetterQueueOptions(base);
-
-        // equals is class-exact (getClass() comparison): a base instance never equals a subclass instance and
-        // vice versa, even though all three fields are identical.
-        assertNotEquals(base, subclass);
-        assertNotEquals(subclass, base);
-    }
-
-    /**
-     * Package-local subclass used solely to exercise the {@code protected} copy-constructor and the class-exact
-     * {@code equals} contract of {@link DeadLetterQueueOptions}.
-     */
-    private static class SubclassedDeadLetterQueueOptions extends DeadLetterQueueOptions {
-        SubclassedDeadLetterQueueOptions(final DeadLetterQueueOptions options) {
-            super(options);
-        }
     }
 }

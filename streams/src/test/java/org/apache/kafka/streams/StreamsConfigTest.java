@@ -1709,6 +1709,71 @@ public class StreamsConfigTest {
         assertNull(configured.getString(StreamsConfig.ERRORS_DEAD_LETTER_QUEUE_TOPIC_NAME_CONFIG));
     }
 
+    @Test
+    public void shouldFailFastWhenGlobalDeadLetterQueueEnabledButTopicMissing() {
+        // MA-02: global DLQ enabled without a topic is an incomplete configuration and must be rejected at
+        // StreamsConfig construction (fail-fast) rather than silently routing nothing at runtime.
+        final Properties p = new Properties();
+        p.putAll(props);
+        p.put(StreamsConfig.DEFAULT_DEAD_LETTER_QUEUE_ENABLED_CONFIG, true);
+        final ConfigException error = assertThrows(ConfigException.class, () -> new StreamsConfig(p));
+        assertTrue(error.getMessage().contains(StreamsConfig.DEFAULT_DEAD_LETTER_QUEUE_TOPIC_CONFIG));
+    }
+
+    @Test
+    public void shouldFailFastWhenGlobalDeadLetterQueueEnabledButTopicBlank() {
+        // MA-02: a blank topic is equivalent to no topic and is rejected when the global DLQ is enabled.
+        final Properties p = new Properties();
+        p.putAll(props);
+        p.put(StreamsConfig.DEFAULT_DEAD_LETTER_QUEUE_ENABLED_CONFIG, true);
+        p.put(StreamsConfig.DEFAULT_DEAD_LETTER_QUEUE_TOPIC_CONFIG, "   ");
+        final ConfigException error = assertThrows(ConfigException.class, () -> new StreamsConfig(p));
+        assertTrue(error.getMessage().contains(StreamsConfig.DEFAULT_DEAD_LETTER_QUEUE_TOPIC_CONFIG));
+    }
+
+    @Test
+    public void shouldFailFastWhenGlobalDeadLetterQueueTopicIsInvalid() {
+        // MA-02: a resolved DLQ topic name must pass the canonical Kafka topic-name validation
+        // (Topic#validate); an invalid name is rejected at construction with a ConfigException.
+        final Properties p = new Properties();
+        p.putAll(props);
+        p.put(StreamsConfig.DEFAULT_DEAD_LETTER_QUEUE_ENABLED_CONFIG, true);
+        p.put(StreamsConfig.DEFAULT_DEAD_LETTER_QUEUE_TOPIC_CONFIG, "invalid topic name!");
+        final ConfigException error = assertThrows(ConfigException.class, () -> new StreamsConfig(p));
+        assertTrue(error.getMessage().contains(StreamsConfig.DEFAULT_DEAD_LETTER_QUEUE_TOPIC_CONFIG));
+    }
+
+    @Test
+    public void shouldRejectInvalidGlobalDeadLetterQueueTopicEvenWhenDisabled() {
+        // A set-but-invalid topic is rejected regardless of the enabled flag, so a later enable can never
+        // activate an invalid topic name.
+        final Properties p = new Properties();
+        p.putAll(props);
+        p.put(StreamsConfig.DEFAULT_DEAD_LETTER_QUEUE_ENABLED_CONFIG, false);
+        p.put(StreamsConfig.DEFAULT_DEAD_LETTER_QUEUE_TOPIC_CONFIG, "invalid topic name!");
+        assertThrows(ConfigException.class, () -> new StreamsConfig(p));
+    }
+
+    @Test
+    public void shouldAcceptValidGlobalDeadLetterQueueConfiguration() {
+        // enabled + valid topic is accepted; enabled=false with a valid topic is also accepted (no exception).
+        final Properties enabled = new Properties();
+        enabled.putAll(props);
+        enabled.put(StreamsConfig.DEFAULT_DEAD_LETTER_QUEUE_ENABLED_CONFIG, true);
+        enabled.put(StreamsConfig.DEFAULT_DEAD_LETTER_QUEUE_TOPIC_CONFIG, "valid-dlq-topic");
+        final StreamsConfig enabledConfig = new StreamsConfig(enabled);
+        assertEquals("valid-dlq-topic", enabledConfig.getString(StreamsConfig.DEFAULT_DEAD_LETTER_QUEUE_TOPIC_CONFIG));
+        assertTrue(enabledConfig.getBoolean(StreamsConfig.DEFAULT_DEAD_LETTER_QUEUE_ENABLED_CONFIG));
+
+        final Properties disabledWithTopic = new Properties();
+        disabledWithTopic.putAll(props);
+        disabledWithTopic.put(StreamsConfig.DEFAULT_DEAD_LETTER_QUEUE_ENABLED_CONFIG, false);
+        disabledWithTopic.put(StreamsConfig.DEFAULT_DEAD_LETTER_QUEUE_TOPIC_CONFIG, "valid-dlq-topic");
+        final StreamsConfig disabledConfig = new StreamsConfig(disabledWithTopic);
+        assertFalse(disabledConfig.getBoolean(StreamsConfig.DEFAULT_DEAD_LETTER_QUEUE_ENABLED_CONFIG));
+        assertEquals("valid-dlq-topic", disabledConfig.getString(StreamsConfig.DEFAULT_DEAD_LETTER_QUEUE_TOPIC_CONFIG));
+    }
+
     static class MisconfiguredSerde implements Serde<Object> {
         @Override
         public void configure(final Map<String, ?>  configs, final boolean isKey) {

@@ -40,6 +40,7 @@ import org.apache.kafka.streams.errors.TopologyException;
 import org.apache.kafka.streams.errors.internals.DefaultErrorHandlerContext;
 import org.apache.kafka.streams.errors.internals.FailedProcessingException;
 import org.apache.kafka.streams.kstream.DeadLetterQueueOptions;
+import org.apache.kafka.streams.kstream.internals.DeadLetterQueueExceptionHandlerDecorator;
 import org.apache.kafka.streams.processor.Cancellable;
 import org.apache.kafka.streams.processor.PunctuationType;
 import org.apache.kafka.streams.processor.Punctuator;
@@ -229,7 +230,16 @@ public class StreamTask extends AbstractTask implements ProcessorNodePunctuator,
             highWatermark.put(topicPartition, -1L);
         }
         timeCurrentIdlingStarted = Optional.empty();
-        processingExceptionHandler = config.processingExceptionHandler;
+        // Install the opt-in, DSL-level DLQ layer onto the subtopology-wide processing exception handler when this
+        // subtopology opted in (via any source's withDeadLetterQueue call or the global default). The handler is
+        // shared by every ProcessorNode in the subtopology (propagated via node.init below), so wrapping it once here
+        // covers both the normal-record processing site (ProcessorNode) and the punctuation site (StreamTask). When
+        // the subtopology did not opt in, the configured handler is returned unchanged (byte-for-byte behaviour).
+        processingExceptionHandler = DeadLetterQueueInstaller.maybeWrapProcessingHandler(
+            config.processingExceptionHandler,
+            topology,
+            DeadLetterQueueInstaller.globalOptions(processorContext.appConfigs())
+        );
     }
 
     // create queues for each assigned partition and associate them
@@ -961,13 +971,37 @@ public class StreamTask extends AbstractTask implements ProcessorNodePunctuator,
             final List<ProducerRecord<byte[], byte[]>> deadLetterQueueRecords = processingExceptionResponse.deadLetterQueueRecords();
             if (!deadLetterQueueRecords.isEmpty()) {
                 final RecordCollector collector = ((RecordCollector.Supplier) processorContext).recordCollector();
+                // Opt-in, DSL-level DLQ path: route through the recursion-guarded DLQ send (MA-05) and count each
+                // record on the dlq-records-sent sensor (MA-08). Punctuation carries no source record, so the opt-in
+                // decorator excludes it (empty list) — this branch therefore fires only for a custom handler that
+                // returns DLQ records, whose behaviour is preserved. The pre-existing path is left unchanged.
+                final boolean optInDeadLetterQueue =
+                    processingExceptionHandler instanceof DeadLetterQueueExceptionHandlerDecorator.ProcessingDecorator;
+                final Sensor dlqRecordsSentSensor = optInDeadLetterQueue
+                    ? TaskMetrics.dlqRecordsSentSensor(Thread.currentThread().getName(), id().toString(), streamsMetrics)
+                    : null;
                 for (final ProducerRecord<byte[], byte[]> deadLetterQueueRecord : deadLetterQueueRecords) {
-                    collector.send(
-                            deadLetterQueueRecord.key(),
-                            deadLetterQueueRecord.value(),
-                            node.name(),
-                            processorContext,
-                            deadLetterQueueRecord);
+                    if (optInDeadLetterQueue) {
+                        collector.sendDeadLetterQueueRecord(deadLetterQueueRecord, node.name(), processorContext);
+                        DeadLetterQueueObserver.recordSent(dlqRecordsSentSensor);
+                    } else {
+                        collector.send(
+                                deadLetterQueueRecord.key(),
+                                deadLetterQueueRecord.value(),
+                                node.name(),
+                                processorContext,
+                                deadLetterQueueRecord);
+                    }
+                }
+                // Opt-in path only: a single targeted WARN per failure event, WITHOUT the throwable (MA-09).
+                if (optInDeadLetterQueue) {
+                    DeadLetterQueueObserver.warn(
+                        log,
+                        processingException.getClass().getName(),
+                        errorHandlerContext.topic(),
+                        errorHandlerContext.partition(),
+                        errorHandlerContext.offset()
+                    );
                 }
             }
 
@@ -1451,7 +1485,10 @@ public class StreamTask extends AbstractTask implements ProcessorNodePunctuator,
                 final DeadLetterQueueOptions dslOptions = source.deadLetterQueueOptions() != null
                     ? source.deadLetterQueueOptions()
                     : DeadLetterQueueOptions.with(dslDlqTopic);
-                return new DeadLetterQueueDeserializationExceptionHandler(
+                // Wrap in the delegating DLQ-aware decorator: it invokes the configured handler (preserving its
+                // decisions and side effects) and only routes DLQ-eligible failures. The delegate is already
+                // configured, so the decorator is NOT re-configured here.
+                return new DeadLetterQueueExceptionHandlerDecorator.DeserializationDecorator(
                     defaultDeserializationExceptionHandler,
                     dslDlqTopic,
                     dslOptions
@@ -1468,7 +1505,7 @@ public class StreamTask extends AbstractTask implements ProcessorNodePunctuator,
                 final Object topicValue = appConfigs.get(DEFAULT_DEAD_LETTER_QUEUE_TOPIC_CONFIG);
                 final String globalTopic = topicValue == null ? null : String.valueOf(topicValue);
                 if (globalTopic != null && !globalTopic.trim().isEmpty()) {
-                    return new DeadLetterQueueDeserializationExceptionHandler(
+                    return new DeadLetterQueueExceptionHandlerDecorator.DeserializationDecorator(
                         defaultDeserializationExceptionHandler,
                         globalTopic,
                         DeadLetterQueueOptions.with(globalTopic)

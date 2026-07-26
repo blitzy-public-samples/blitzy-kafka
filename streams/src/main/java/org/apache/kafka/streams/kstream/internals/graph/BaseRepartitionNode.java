@@ -79,6 +79,15 @@ public abstract class BaseRepartitionNode<K, V> extends GraphNode {
         return processorParameters;
     }
 
+    /**
+     * @return the name of the source node that reads back from this repartition topic. This is the sub-topology
+     *         boundary downstream of the repartition: operators applied after a repartition read from this
+     *         internal source rather than from the original upstream (external) source.
+     */
+    public String sourceName() {
+        return sourceName;
+    }
+
     @Override
     public String toString() {
         return "BaseRepartitionNode{" +

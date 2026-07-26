@@ -46,11 +46,15 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *
  * <p>These tests lock the authoritative DLQ <em>wire contract</em> for the {@code dlq.*} scheme:
  * <ul>
- *     <li>the original key/value bytes are preserved <em>verbatim</em> (never truncated, padded, or copied),
- *         regardless of {@link DeadLetterQueueOptions#maxRecordSize()};</li>
+ *     <li>at {@link DeadLetterQueueOptions#NO_MAX_RECORD_SIZE} (the default) the original key/value bytes are
+ *         preserved <em>verbatim</em> (passed through by reference, never truncated, padded, or copied); when a
+ *         positive {@link DeadLetterQueueOptions#maxRecordSize()} is set, an over-limit value is truncated to
+ *         that many bytes (the record is still produced, never dropped) while the key is always verbatim;</li>
  *     <li>exactly the six {@code dlq.*} headers are emitted when header inclusion is enabled — no seventh
  *         header (no {@code dlq.value.truncated}) and no stack-trace header — and zero headers when it is
  *         disabled;</li>
+ *     <li>the {@code dlq.exception.message} header is bounded to
+ *         {@link DlqRecordBuilder#MAX_EXCEPTION_MESSAGE_LENGTH} characters;</li>
  *     <li>the producer-record timestamp is the source event time, or {@code null} when the source timestamp is
  *         unavailable ({@code ConsumerRecord.NO_TIMESTAMP}), so building never throws;</li>
  *     <li>the {@code dlq.failure.timestamp} header is the wall-clock dead-letter time.</li>
@@ -222,11 +226,27 @@ public class DlqRecordBuilderTest {
     }
 
     @Test
-    public void shouldPreserveOriginalValueBytesWhenLargerThanMaxRecordSize() {
-        // Authoritative contract: original bytes are preserved verbatim and exactly six headers are emitted, even
-        // when the value exceeds the configured maxRecordSize. The builder never truncates and never adds a
-        // seventh dlq.value.truncated header. (Replaces the previous truncate-and-annotate test, which codified
-        // the two CRITICAL production defects.)
+    public void shouldPassValueThroughVerbatimByReferenceWhenNoMaxRecordSize() {
+        // Default contract (NO_MAX_RECORD_SIZE): the original value bytes are carried through verbatim, by
+        // reference (no copy, no memory amplification), satisfying the "original key/value bytes" success
+        // criterion. Exactly six headers, no seventh truncation marker.
+        final byte[] key = "k".getBytes(StandardCharsets.UTF_8);
+        final byte[] value = "0123456789".getBytes(StandardCharsets.UTF_8); // 10 bytes
+
+        final ProducerRecord<byte[], byte[]> record = DlqRecordBuilder.buildDeadLetterQueueRecord(
+            DLQ_TOPIC, key, value, context(), new RuntimeException("x"),
+            DeadLetterQueueOptions.with(DLQ_TOPIC)); // NO_MAX_RECORD_SIZE default
+
+        assertSame(value, record.value(), "value must be passed through by reference at NO_MAX_RECORD_SIZE");
+        assertSame(key, record.key(), "key must always be passed through by reference");
+        assertExactlySixHeaders(record.headers());
+        assertNull(record.headers().lastHeader(WIRE_VALUE_TRUNCATED));
+    }
+
+    @Test
+    public void shouldTruncateValueToMaxRecordSizeWhenLarger() {
+        // Functional maxRecordSize (CR-04): an over-limit value is truncated to its first maxRecordSize bytes.
+        // The record is still produced (never dropped) with exactly six headers and NO seventh marker header.
         final byte[] key = "k".getBytes(StandardCharsets.UTF_8);
         final byte[] value = "0123456789".getBytes(StandardCharsets.UTF_8); // 10 bytes
         final int maxRecordSize = 4;
@@ -235,81 +255,71 @@ public class DlqRecordBuilderTest {
             DLQ_TOPIC, key, value, context(), new RuntimeException("x"),
             DeadLetterQueueOptions.with(DLQ_TOPIC).withMaxRecordSize(maxRecordSize));
 
-        // full original value preserved (not truncated to maxRecordSize), by reference
-        assertArrayEquals(value, record.value());
-        assertEquals(value.length, record.value().length);
-        assertSame(value, record.value());
-        assertArrayEquals(key, record.key());
-        // exactly six headers; NO truncation marker
+        assertEquals(maxRecordSize, record.value().length, "value must be truncated to maxRecordSize bytes");
+        assertArrayEquals("0123".getBytes(StandardCharsets.UTF_8), record.value(),
+            "truncated value must be the original value's first maxRecordSize bytes");
+        assertArrayEquals(key, record.key(), "key must never be truncated");
+        assertSame(key, record.key());
         assertExactlySixHeaders(record.headers());
-        assertNull(record.headers().lastHeader(WIRE_VALUE_TRUNCATED));
+        assertNull(record.headers().lastHeader(WIRE_VALUE_TRUNCATED), "no seventh truncation marker header");
     }
 
     @Test
-    public void shouldPreserveOriginalBytesWhenMaxRecordSizeIsZero() {
-        // A zero max-record-size must NOT empty or drop the value: original bytes are still preserved verbatim.
-        final byte[] value = "0123456789".getBytes(StandardCharsets.UTF_8);
-
-        final ProducerRecord<byte[], byte[]> record = DlqRecordBuilder.buildDeadLetterQueueRecord(
-            DLQ_TOPIC, "k".getBytes(StandardCharsets.UTF_8), value, context(), new RuntimeException("x"),
-            DeadLetterQueueOptions.with(DLQ_TOPIC).withMaxRecordSize(0));
-
-        assertArrayEquals(value, record.value());
-        assertSame(value, record.value());
-        assertNull(record.headers().lastHeader(WIRE_VALUE_TRUNCATED));
-        assertExactlySixHeaders(record.headers());
-    }
-
-    @Test
-    public void shouldPreserveValueWhenLengthEqualsMaxRecordSize() {
-        // Exact boundary: value length == maxRecordSize is preserved unchanged with no marker.
+    public void shouldPreserveValueVerbatimWhenLengthEqualsMaxRecordSize() {
+        // Exact boundary: value length == maxRecordSize is within the limit, so it is preserved verbatim by
+        // reference (only a strictly-larger value is truncated).
         final byte[] value = "0123".getBytes(StandardCharsets.UTF_8); // 4 bytes
 
         final ProducerRecord<byte[], byte[]> record = DlqRecordBuilder.buildDeadLetterQueueRecord(
             DLQ_TOPIC, "k".getBytes(StandardCharsets.UTF_8), value, context(), new RuntimeException("x"),
             DeadLetterQueueOptions.with(DLQ_TOPIC).withMaxRecordSize(4));
 
-        assertArrayEquals(value, record.value());
+        assertSame(value, record.value(), "value at the exact limit must not be copied or truncated");
         assertNull(record.headers().lastHeader(WIRE_VALUE_TRUNCATED));
     }
 
     @Test
-    public void shouldPreserveOversizeValueAndEmitNoHeadersWhenHeaderInclusionDisabled() {
-        // Previously the value was silently truncated even when headers were disabled (so no marker could warn).
-        // Now: the full value is preserved verbatim AND zero headers are emitted.
+    public void shouldTruncateOversizeValueAndEmitNoHeadersWhenHeaderInclusionDisabled() {
+        // maxRecordSize applies regardless of the header toggle: an over-limit value is truncated AND zero
+        // headers are emitted when header inclusion is disabled.
         final byte[] value = "0123456789".getBytes(StandardCharsets.UTF_8); // 10 bytes
 
         final ProducerRecord<byte[], byte[]> record = DlqRecordBuilder.buildDeadLetterQueueRecord(
             DLQ_TOPIC, "k".getBytes(StandardCharsets.UTF_8), value, context(), new RuntimeException("x"),
             DeadLetterQueueOptions.with(DLQ_TOPIC).withMaxRecordSize(4).withIncludeHeaders(false));
 
-        assertArrayEquals(value, record.value());
-        assertSame(value, record.value());
+        assertEquals(4, record.value().length, "value must still be truncated when headers are disabled");
+        assertArrayEquals("0123".getBytes(StandardCharsets.UTF_8), record.value());
         assertEquals(0, headerKeys(record.headers()).size());
     }
 
     @Test
-    public void shouldNotAllocateOrTruncateForLargeKeyAndValue() {
-        // Huge-allocation / aliasing safety: with a small maxRecordSize and multi-MiB payloads, the builder must
-        // pass the SAME byte arrays through (no truncated copy) so the failure path adds no memory amplification.
-        final byte[] largeKey = new byte[1024 * 1024];      // 1 MiB
+    public void shouldNotAllocateForLargeValueAtNoMaxRecordSizeButBoundItWhenLimited() {
+        // Aliasing/allocation safety at the default: a multi-MiB value is passed through by reference (no copy)
+        // when NO_MAX_RECORD_SIZE. When a small limit is set, the value is bounded to that limit while the (small)
+        // key is still passed through verbatim.
+        final byte[] largeKey = new byte[16];
         final byte[] largeValue = new byte[2 * 1024 * 1024]; // 2 MiB
 
-        final ProducerRecord<byte[], byte[]> record = DlqRecordBuilder.buildDeadLetterQueueRecord(
+        final ProducerRecord<byte[], byte[]> verbatim = DlqRecordBuilder.buildDeadLetterQueueRecord(
+            DLQ_TOPIC, largeKey, largeValue, context(), new RuntimeException("big"),
+            DeadLetterQueueOptions.with(DLQ_TOPIC)); // NO_MAX_RECORD_SIZE
+        assertSame(largeValue, verbatim.value(), "value must be passed through without copying at NO_MAX_RECORD_SIZE");
+
+        final ProducerRecord<byte[], byte[]> bounded = DlqRecordBuilder.buildDeadLetterQueueRecord(
             DLQ_TOPIC, largeKey, largeValue, context(), new RuntimeException("big"),
             DeadLetterQueueOptions.with(DLQ_TOPIC).withMaxRecordSize(1024));
-
-        assertSame(largeKey, record.key(), "key must be passed through without copying");
-        assertSame(largeValue, record.value(), "value must be passed through without truncation or copying");
-        assertExactlySixHeaders(record.headers());
-        assertNull(record.headers().lastHeader(WIRE_VALUE_TRUNCATED));
+        assertSame(largeKey, bounded.key(), "key must be passed through without copying");
+        assertEquals(1024, bounded.value().length, "value must be bounded to maxRecordSize");
+        assertExactlySixHeaders(bounded.headers());
+        assertNull(bounded.headers().lastHeader(WIRE_VALUE_TRUNCATED));
     }
 
     @Test
-    public void shouldCarryExceptionMessageVerbatimAndOmitItWhenHeadersDisabled() {
-        // Data-classification / privacy: a large (and potentially sensitive) exception message is carried verbatim
-        // in the dlq.exception.message header when headers are enabled, and fully omitted when they are disabled —
-        // the documented escape hatch for operators who must not expose such data on the DLQ topic.
+    public void shouldBoundExceptionMessageAndOmitItWhenHeadersDisabled() {
+        // Security / data-classification (MA-06): a large (potentially sensitive) exception message is bounded to
+        // MAX_EXCEPTION_MESSAGE_LENGTH characters in the dlq.exception.message header, and fully omitted when
+        // headers are disabled.
         final StringBuilder builder = new StringBuilder();
         for (int i = 0; i < 5_000; i++) {
             builder.append('x');
@@ -321,8 +331,11 @@ public class DlqRecordBuilderTest {
 
         final ProducerRecord<byte[], byte[]> withHeaders = DlqRecordBuilder.buildDeadLetterQueueRecord(
             DLQ_TOPIC, key, value, context(), exception, DeadLetterQueueOptions.with(DLQ_TOPIC));
-        assertEquals(longMessage, header(withHeaders.headers(), WIRE_EXCEPTION_MESSAGE),
-            "the exception message must be carried verbatim (never truncated) when headers are enabled");
+        final String recorded = header(withHeaders.headers(), WIRE_EXCEPTION_MESSAGE);
+        assertEquals(DlqRecordBuilder.MAX_EXCEPTION_MESSAGE_LENGTH, recorded.length(),
+            "the exception message must be bounded to MAX_EXCEPTION_MESSAGE_LENGTH characters");
+        assertEquals(longMessage.substring(0, DlqRecordBuilder.MAX_EXCEPTION_MESSAGE_LENGTH), recorded,
+            "the bounded message must be the original message's first MAX_EXCEPTION_MESSAGE_LENGTH characters");
 
         final ProducerRecord<byte[], byte[]> withoutHeaders = DlqRecordBuilder.buildDeadLetterQueueRecord(
             DLQ_TOPIC, key, value, context(), exception,
@@ -333,17 +346,29 @@ public class DlqRecordBuilderTest {
     }
 
     @Test
-    public void shouldUseProvidedDlqTopicVerbatim() {
-        // The builder places the RESOLVED topic on the record verbatim; it does NOT validate topic names —
-        // authoritative Kafka topic-name validation is the responsibility of the configuration/options resolution
-        // layer, not this payload builder. Even a string that is not a valid Kafka topic name is passed through.
-        final String unvalidatedTopic = "dlq topic!";
+    public void shouldCarryShortExceptionMessageVerbatim() {
+        // A message within the bound is carried unchanged.
+        final RuntimeException exception = new RuntimeException("short message");
+        final ProducerRecord<byte[], byte[]> record = DlqRecordBuilder.buildDeadLetterQueueRecord(
+            DLQ_TOPIC, "k".getBytes(StandardCharsets.UTF_8), "v".getBytes(StandardCharsets.UTF_8),
+            context(), exception, DeadLetterQueueOptions.with(DLQ_TOPIC));
+        assertEquals("short message", header(record.headers(), WIRE_EXCEPTION_MESSAGE));
+    }
+
+    @Test
+    public void shouldUseProvidedResolvedTopicVerbatim() {
+        // The builder places the RESOLVED topic argument on the record verbatim; it is a payload builder and does
+        // NOT re-validate topic names — authoritative Kafka topic-name validation is the responsibility of the
+        // upstream configuration/options/DSL resolution layer (DeadLetterQueueOptions.with, KStreamImpl,
+        // StreamsConfig). Here a distinct resolved-topic string is passed to show it is used as-is; the options
+        // object independently carries a (validated) topic.
+        final String resolvedTopic = "resolved.dlq.topic";
 
         final ProducerRecord<byte[], byte[]> record = DlqRecordBuilder.buildDeadLetterQueueRecord(
-            unvalidatedTopic, "k".getBytes(StandardCharsets.UTF_8), "v".getBytes(StandardCharsets.UTF_8),
-            context(), new RuntimeException("x"), DeadLetterQueueOptions.with(unvalidatedTopic));
+            resolvedTopic, "k".getBytes(StandardCharsets.UTF_8), "v".getBytes(StandardCharsets.UTF_8),
+            context(), new RuntimeException("x"), DeadLetterQueueOptions.with(DLQ_TOPIC));
 
-        assertEquals(unvalidatedTopic, record.topic());
+        assertEquals(resolvedTopic, record.topic());
     }
 
     @Test

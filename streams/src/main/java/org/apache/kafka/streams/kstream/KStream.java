@@ -63,18 +63,25 @@ public interface KStream<K, V> {
     /**
      * Opt this stream in to the DSL-level Dead Letter Queue (DLQ) capability.
      *
-     * <p>When enabled, records that fail <em>deserialization</em> at this stream's originating source topic(s) are
-     * captured — as their original key/value bytes plus {@code dlq.*} diagnostic headers — and routed to the
-     * supplied {@code dlqTopic}, instead of either terminating the {@code StreamThread} (fail-fast) or being silently
-     * skipped (log-and-continue). Processing then resumes with the next record. The DLQ topic is assumed to already
-     * exist; Kafka Streams does not create it.
+     * <p>When enabled, records that fail at this stream's originating source topic(s) are captured — as their
+     * original key/value bytes plus {@code dlq.*} diagnostic headers — and routed to the supplied {@code dlqTopic},
+     * instead of either terminating the {@code StreamThread} (fail-fast) or being silently skipped
+     * (log-and-continue). Processing then resumes with the next record. Both records that fail
+     * <em>deserialization</em> at the source and records originating from the source that later fail
+     * <em>processing</em> (an eligible user-code {@code RuntimeException}) or <em>serialization/production</em> when
+     * writing downstream are routed; retriable broker/producer failures are not dead-lettered and continue to use the
+     * producer's existing retry configuration. The DLQ topic is assumed to already exist; Kafka Streams does not
+     * create it.
      *
      * <p>This is an <em>opt-in</em> capability layered on top of the existing exception-handling machinery: it is
      * scoped to the topology that calls this method and takes precedence over the global
      * {@code default.deadletterqueue.*} configuration. Topologies that never call {@code withDeadLetterQueue}
      * exhibit byte-for-byte identical error-handling behaviour. DLQ writes reuse the same Streams producer (and
-     * therefore the same security and authentication configuration) and are a best-effort side output that is not
-     * part of the exactly-once processing transaction.
+     * therefore the same security and authentication configuration); under exactly-once they are produced
+     * <em>within</em> the task's transaction and are committed or aborted atomically with it. They are
+     * "best-effort" only in the sense that a DLQ write which itself fails to be produced is not retried indefinitely:
+     * the failure is escalated once and the task fails (surfacing through the uncaught-exception handler) rather than
+     * attempting to dead-letter the DLQ record.
      *
      * <p>This method does not add a processing step to the topology; it returns the same-typed {@code KStream}
      * unchanged so it can be chained fluently, for example:

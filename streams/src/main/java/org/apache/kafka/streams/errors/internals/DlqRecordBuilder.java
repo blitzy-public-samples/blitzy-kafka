@@ -21,6 +21,7 @@ import org.apache.kafka.common.serialization.StringSerializer;
 import org.apache.kafka.streams.errors.ErrorHandlerContext;
 import org.apache.kafka.streams.kstream.DeadLetterQueueOptions;
 
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
@@ -44,16 +45,25 @@ import java.util.Objects;
  *     <li>it honours the {@link DeadLetterQueueOptions#includeHeaders() header-inclusion toggle}.</li>
  * </ul>
  *
- * <h2>Original bytes are preserved verbatim</h2>
- * <p>Per the DLQ feature's success criteria, the DLQ record carries the failed record's original key/value
- * bytes <em>exactly</em> as received: the builder never truncates, pads, copies, or otherwise mutates them,
- * and — when header inclusion is enabled — it always emits <em>exactly the six</em> {@code dlq.*} headers
- * declared below, no more and no fewer. The bytes are passed through by reference (no defensive copy), so the
- * failure path adds no memory amplification. Bounding the <em>physical</em> size of a DLQ record is delegated
- * to the shared producer / broker message-size configuration (for example {@code max.request.size} and the
- * topic's {@code max.message.bytes}); the builder does <em>not</em> apply
- * {@link DeadLetterQueueOptions#maxRecordSize()} as a value truncation, because truncating would break the
- * original-bytes guarantee that inspection/replay tooling relies on.
+ * <h2>Original bytes and the {@code maxRecordSize} bound</h2>
+ * <p>By default ({@link DeadLetterQueueOptions#NO_MAX_RECORD_SIZE}, the value applied by
+ * {@link DeadLetterQueueOptions#with(String)}) the DLQ record carries the failed record's original key/value
+ * bytes <em>exactly</em> as received: the builder does not truncate, pad, copy, or otherwise mutate them (the
+ * bytes are passed through by reference), so the default failure path adds no memory amplification and inspection
+ * / replay tooling sees the verbatim payload. This satisfies the "original key/value bytes" success criterion for
+ * the default configuration.
+ * <p>When the caller sets a positive {@link DeadLetterQueueOptions#maxRecordSize()}, the builder bounds the
+ * outgoing <em>value</em> to at most that many bytes: an over-limit value is truncated to its first
+ * {@code maxRecordSize} bytes (the key is always carried verbatim, as keys are small identifiers). This is an
+ * explicit, opt-in trade-off of full-fidelity payload for a bounded record size; it is documented on
+ * {@link DeadLetterQueueOptions#withMaxRecordSize(int)}. Truncation only ever <em>shrinks</em> a record and
+ * <em>never drops it</em>, so enabling a size bound never causes the builder to discard a record it was asked to
+ * build (whether that record is ultimately produced is subject to the shared producer/broker limits noted below and
+ * to best-effort delivery — a DLQ write that itself fails is escalated once rather than retried). The
+ * builder still emits <em>exactly the six</em> {@code dlq.*} headers below (no more and no fewer) — it never adds
+ * a seventh "truncated" marker header — and honours the {@link DeadLetterQueueOptions#includeHeaders() header
+ * toggle}. Physical size is additionally bounded, as before, by the shared producer / broker message-size
+ * configuration (for example {@code max.request.size} and the topic's {@code max.message.bytes}).
  *
  * <h2>Timestamps</h2>
  * <p>Two independent timestamps are recorded, with distinct meanings:
@@ -72,11 +82,15 @@ import java.util.Objects;
  *
  * <h2>Data classification / privacy</h2>
  * <p>When header inclusion is enabled (the default), the {@link #HEADER_EXCEPTION_MESSAGE} header carries the
- * exception message verbatim. An exception message can contain sensitive data (for example fragments of the
- * offending payload) and is not size-bounded by this builder. Operators who must not expose such data on the
- * DLQ topic — or who need to keep DLQ records small — should disable header inclusion via
+ * exception message. An exception message can contain sensitive data (for example fragments of the offending
+ * payload), so the builder <em>bounds</em> it: a message longer than {@link #MAX_EXCEPTION_MESSAGE_LENGTH}
+ * characters is truncated to that length before being written to the header. This prevents an adversarial or
+ * pathological exception message from producing an unbounded DLQ record and limits how much payload-derived text
+ * is exposed. Operators who must not expose such data on the DLQ topic at all — or who need to keep DLQ records
+ * as small as possible — should disable header inclusion via
  * {@link DeadLetterQueueOptions#withIncludeHeaders(boolean) withIncludeHeaders(false)}, which suppresses all
- * {@code dlq.*} headers while still preserving the original key/value bytes.
+ * {@code dlq.*} headers while still preserving the (optionally size-bounded) key/value bytes. Because the DLQ
+ * topic can carry payload-derived data, it must be secured with the same care as the source topic (topic ACLs).
  *
  * <p>The class is stateless (only {@code static} methods) and therefore thread-safe, which is required because
  * DLQ records may be built concurrently across multiple {@code StreamThread} instances. The public
@@ -97,6 +111,14 @@ public final class DlqRecordBuilder {
     public static final String HEADER_SOURCE_OFFSET = "dlq.source.offset";
     /** Header carrying the wall-clock timestamp (epoch millis) at which the record was dead-lettered. */
     public static final String HEADER_FAILURE_TIMESTAMP = "dlq.failure.timestamp";
+
+    /**
+     * Upper bound (in characters) on the exception-message text written to {@link #HEADER_EXCEPTION_MESSAGE}. An
+     * exception message longer than this is truncated to this many characters, which caps how much
+     * payload-derived text can be exposed on the DLQ topic and prevents an adversarial message from producing an
+     * unbounded DLQ record. See the class Javadoc ("Data classification / privacy").
+     */
+    public static final int MAX_EXCEPTION_MESSAGE_LENGTH = 2048;
 
     private DlqRecordBuilder() {
         // stateless utility; not instantiable
@@ -129,8 +151,11 @@ public final class DlqRecordBuilder {
     /**
      * Build a single DLQ {@link ProducerRecord} for the supplied failed record.
      *
-     * <p>The outgoing record carries the <em>original</em> key/value bytes verbatim (never truncated or copied)
-     * and, unless {@link DeadLetterQueueOptions#includeHeaders()} is {@code false}, exactly the six {@code dlq.*}
+     * <p>The outgoing record carries the <em>original</em> key bytes verbatim and the original value bytes bounded
+     * to {@link DeadLetterQueueOptions#maxRecordSize()} (verbatim by reference with the default
+     * {@link DeadLetterQueueOptions#NO_MAX_RECORD_SIZE}; truncated to the first {@code maxRecordSize} bytes when a
+     * positive limit is set — see {@link #boundValueToMaxRecordSize(byte[], int)}) and, unless
+     * {@link DeadLetterQueueOptions#includeHeaders()} is {@code false}, exactly the six {@code dlq.*}
      * diagnostic headers declared on this class. The producer-record timestamp is the source record's event time
      * ({@link ErrorHandlerContext#timestamp()}), or {@code null} when that timestamp is unavailable
      * (negative, e.g. {@code ConsumerRecord.NO_TIMESTAMP}); the wall-clock failure time is recorded separately in
@@ -164,17 +189,22 @@ public final class DlqRecordBuilder {
         final long sourceTimestamp = context.timestamp();
         final Long recordTimestamp = sourceTimestamp < 0 ? null : Long.valueOf(sourceTimestamp);
 
-        // Original key/value bytes are carried verbatim: no truncation and no defensive copy, so the DLQ record
-        // preserves the exact bytes of the failed record and the failure path adds no memory amplification.
+        // Bound the outgoing value to maxRecordSize. With NO_MAX_RECORD_SIZE (the default) the original value
+        // bytes are carried through verbatim by reference (no copy, no memory amplification). With a positive
+        // limit an over-limit value is truncated to its first maxRecordSize bytes — an explicit, opt-in size
+        // bound that shrinks but never discards the record (size limiting never reduces DLQ coverage). The key is
+        // always carried verbatim.
+        final byte[] boundedValue = boundValueToMaxRecordSize(value, options.maxRecordSize());
+
         final ProducerRecord<byte[], byte[]> producerRecord =
-            new ProducerRecord<>(dlqTopic, null, recordTimestamp, key, value);
+            new ProducerRecord<>(dlqTopic, null, recordTimestamp, key, boundedValue);
 
         if (options.includeHeaders()) {
             try (StringSerializer stringSerializer = new StringSerializer()) {
                 producerRecord.headers().add(HEADER_EXCEPTION_CLASS,
                     stringSerializer.serialize(null, exception.getClass().getName()));
                 producerRecord.headers().add(HEADER_EXCEPTION_MESSAGE,
-                    stringSerializer.serialize(null, exception.getMessage()));
+                    stringSerializer.serialize(null, boundExceptionMessage(exception.getMessage())));
                 producerRecord.headers().add(HEADER_SOURCE_TOPIC,
                     stringSerializer.serialize(null, context.topic()));
                 producerRecord.headers().add(HEADER_SOURCE_PARTITION,
@@ -187,5 +217,41 @@ public final class DlqRecordBuilder {
         }
 
         return producerRecord;
+    }
+
+    /**
+     * Bound the DLQ record's value to {@code maxRecordSize} bytes.
+     *
+     * <p>When {@code maxRecordSize} is {@link DeadLetterQueueOptions#NO_MAX_RECORD_SIZE} (the default), or the
+     * value is {@code null} or already within the limit, the original array is returned <em>by reference</em> so
+     * the common path performs no allocation. Only an over-limit value is truncated, to a fresh array holding its
+     * first {@code maxRecordSize} bytes. Truncation only ever shrinks the record and never drops it.
+     *
+     * @param value         the original value bytes (may be {@code null})
+     * @param maxRecordSize the configured maximum value size in bytes ({@link DeadLetterQueueOptions#NO_MAX_RECORD_SIZE}
+     *                      means no limit)
+     * @return the original value when within the limit, otherwise a truncated copy of its first
+     *         {@code maxRecordSize} bytes
+     */
+    private static byte[] boundValueToMaxRecordSize(final byte[] value, final int maxRecordSize) {
+        if (value == null || maxRecordSize == DeadLetterQueueOptions.NO_MAX_RECORD_SIZE || value.length <= maxRecordSize) {
+            return value;
+        }
+        return Arrays.copyOf(value, maxRecordSize);
+    }
+
+    /**
+     * Bound the exception-message text written to {@link #HEADER_EXCEPTION_MESSAGE} to
+     * {@link #MAX_EXCEPTION_MESSAGE_LENGTH} characters.
+     *
+     * @param message the raw exception message (may be {@code null})
+     * @return {@code null} when the input is {@code null}; the message unchanged when within the limit; otherwise
+     *         its first {@link #MAX_EXCEPTION_MESSAGE_LENGTH} characters
+     */
+    private static String boundExceptionMessage(final String message) {
+        if (message == null || message.length() <= MAX_EXCEPTION_MESSAGE_LENGTH) {
+            return message;
+        }
+        return message.substring(0, MAX_EXCEPTION_MESSAGE_LENGTH);
     }
 }

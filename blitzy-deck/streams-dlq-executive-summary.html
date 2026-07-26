@@ -3,6 +3,17 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <!-- Content Security Policy: restrict every fetch to self + the pinned CDNs and
+       Google Fonts only. Inline <style> and the inline ES-module below require
+       'unsafe-inline' (the deck is a single self-contained file with no build step,
+       so a nonce/hash pipeline is not available); all remote code is still confined
+       to cdn.jsdelivr.net and is additionally locked by Subresource Integrity on the
+       classic assets and by an exact version pin on the Mermaid ES module (whose
+       `import` cannot carry an integrity attribute). base-uri/object-src are denied. -->
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; font-src https://fonts.gstatic.com data:; img-src 'self' data:; connect-src https://cdn.jsdelivr.net; base-uri 'none'; object-src 'none'">
+
   <title>Opt-In Dead Letter Queue for Kafka Streams &mdash; Executive Summary</title>
 
   <!-- Blitzy brand typography: Inter (body), Space Grotesk (display), Fira Code (mono/eyebrow) -->
@@ -10,9 +21,12 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500&amp;family=Inter:wght@400;500;600;700&amp;family=Space+Grotesk:wght@500;600;700&amp;display=swap" rel="stylesheet">
 
-  <!-- reveal.js core (pinned 5.1.0). No reveal theme CSS is loaded: the inline Blitzy theme below must win. -->
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reset.css">
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.css">
+  <!-- reveal.js core (pinned 5.1.0). No reveal theme CSS is loaded: the inline Blitzy theme below must win.
+       Subresource Integrity (sha384) + crossorigin pin these assets to exact bytes. -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reset.css"
+        integrity="sha384-AJKv9Ui5SfA0VsFksFI9GuA1ztX9Ca3CLP6HGfX4YY/tYSVodC+PUszaQZFIlkuy" crossorigin="anonymous">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.css"
+        integrity="sha384-YgvgKeZJykuztG+iQPoZHNZENTFZvOcOJ/uRzmJTje6GHYN9zAw+y5rx/L8MQKA/" crossorigin="anonymous">
 
   <!-- ============================================================= -->
   <!-- Inline Blitzy reveal.js theme (canonical theme file is absent  -->
@@ -25,6 +39,7 @@
       --blitzy-dark: #2D1C77;      /* dark purple */
       --blitzy-teal: #94FAD5;      /* teal accent */
       --blitzy-navy: #1A105F;      /* navy */
+      --blitzy-navy-deep: #120A45; /* deepest navy (divider gradient tail) */
       --blitzy-grad-start: #7A6DEC;
       --blitzy-grad-mid: #5B39F3;
       --blitzy-grad-end: #4101DB;
@@ -32,6 +47,7 @@
       /* Neutrals */
       --blitzy-ink: #333333;       /* primary text */
       --blitzy-bg: #FFFFFF;
+      --blitzy-on-dark: #FFFFFF;   /* text/icons on gradient & dark slides */
       --blitzy-muted: #6B7280;
       --blitzy-surface: #F2F0FE;
       --blitzy-surface-2: #F4EFF6;
@@ -251,7 +267,7 @@
     .reveal .mermaid .cluster > rect,
     .reveal .mermaid .cluster rect {
       fill: transparent !important;
-      stroke: #5B39F3 !important;
+      stroke: var(--blitzy-primary) !important;
       stroke-width: 1.5px !important;
     }
     .legend {
@@ -342,8 +358,8 @@
        Slide type: DIVIDER (dark navy)
        ============================================================= */
     .reveal .slides > section.slide-divider {
-      background: radial-gradient(120% 120% at 12% 12%, #2D1C77 0%, #1A105F 60%, #120A45 100%);
-      color: #FFFFFF;
+      background: radial-gradient(120% 120% at 12% 12%, var(--blitzy-dark) 0%, var(--blitzy-navy) 60%, var(--blitzy-navy-deep) 100%);
+      color: var(--blitzy-on-dark);
       justify-content: center;
     }
     .reveal section.slide-divider .section-num {
@@ -402,6 +418,95 @@
     .kicker-icons { display: flex; gap: 16px; margin-top: 8px; }
     .kicker-icons .kbtn { width: 56px; height: 56px; border-radius: 14px; background: var(--blitzy-surface); display: inline-flex; align-items: center; justify-content: center; }
     .kicker-icons .kbtn svg { width: 30px; height: 30px; color: var(--blitzy-primary); stroke-width: 2.25; }
+
+    /* =============================================================
+       Robustness for Reveal's scroll view (mobile / narrow widths)
+       -------------------------------------------------------------
+       When the scroll view activates (default <=435px) Reveal wraps
+       every <section> in .scroll-page containers, so the earlier
+       `.reveal .slides > section.slide-*` DIRECT-CHILD background rules
+       stop matching and the title/divider/closing slides would render
+       white text on a white canvas (illegible; also a colour-contrast
+       failure). These descendant-combinator rules restate the typed
+       backgrounds, text colour and base column layout so every slide
+       stays legible in scroll view. They carry the same specificity and
+       identical values as the `>` rules, so the normal (horizontal)
+       view is visually unchanged.
+       ============================================================= */
+    .reveal .slides section {
+      box-sizing: border-box;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      padding: 90px 110px;
+    }
+    .reveal .slides section.slide-title,
+    .reveal .slides section.slide-closing {
+      background: var(--blitzy-hero);
+      color: var(--blitzy-on-dark);
+    }
+    .reveal .slides section.slide-closing { align-items: center; text-align: center; }
+    .reveal .slides section.slide-divider {
+      background: radial-gradient(120% 120% at 12% 12%, var(--blitzy-dark) 0%, var(--blitzy-navy) 60%, var(--blitzy-navy-deep) 100%);
+      color: var(--blitzy-on-dark);
+    }
+
+    /* ---------- Keyboard focus visibility (WCAG 2.4.7 / 2.4.11) ----------
+       A two-part ring stays visible on BOTH light content slides (the
+       purple outline is 6.3:1 on white) and the gradient/navy slides
+       (the white halo is high-contrast on dark), so keyboard focus is
+       never lost against the background. */
+    .reveal :focus-visible,
+    .reveal .controls button:focus-visible,
+    .reveal .slide-number a:focus-visible {
+      outline: 3px solid var(--blitzy-primary);
+      outline-offset: 3px;
+      box-shadow: 0 0 0 6px rgba(255, 255, 255, 0.92);
+      border-radius: 6px;
+    }
+    /* On the dark/gradient slides invert the ring: white outline + navy
+       halo keeps >=3:1 contrast where a purple outline would blend in. */
+    .reveal section.slide-title :focus-visible,
+    .reveal section.slide-divider :focus-visible,
+    .reveal section.slide-closing :focus-visible,
+    .reveal section.slide-title.present ~ .controls button:focus-visible {
+      outline-color: var(--blitzy-on-dark);
+      box-shadow: 0 0 0 6px rgba(26, 16, 95, 0.85);
+    }
+
+    /* ---------- Reduced-motion (WCAG 2.3.3 / respect OS setting) ----------
+       The reveal.js JS transition stays 'slide' (mandated verbatim); this
+       neutralises the resulting motion for users who ask for less of it. */
+    @media (prefers-reduced-motion: reduce) {
+      .reveal .slides section,
+      .reveal.slide .slides > section,
+      .reveal.slide .slides > section > section,
+      .reveal .progress,
+      .reveal .controls,
+      .reveal .slide-background {
+        transition: none !important;
+      }
+      .reveal * {
+        animation-duration: 0.001ms !important;
+        animation-iteration-count: 1 !important;
+        scroll-behavior: auto !important;
+      }
+    }
+
+    /* ---------- Responsive Mermaid readability (narrow viewports) ----------
+       Reveal scales the fixed 1920x1080 canvas down on phones, shrinking
+       diagram labels. Nudge label/title text up and let a diagram overflow
+       its panel horizontally (scrollable) rather than shrink further. */
+    @media (max-width: 768px) {
+      .diagram-panel { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+      .reveal .mermaid svg { max-height: none; }
+      .reveal .mermaid .nodeLabel,
+      .reveal .mermaid .edgeLabel,
+      .reveal .mermaid .cluster-label,
+      .reveal .mermaid .cluster-label .nodeLabel {
+        font-size: 1.15em !important;
+      }
+    }
   </style>
 </head>
 <body>
@@ -463,10 +568,19 @@
         </ul>
       </div>
       <div class="col-visual">
-        <div class="stat-row" style="grid-template-columns: 1fr; gap: 22px; margin-top: 0;">
-          <div class="stat-card"><span class="num">0</span><span class="label">Uncaught terminations when enabled</span></div>
-          <div class="stat-card"><span class="num">100%</span><span class="label">Eligible failures captured</span></div>
-          <div class="stat-card"><span class="num">&le;5ms</span><span class="label">p99 added to the failure path only</span></div>
+        <div style="display:flex; flex-direction:column; gap:22px;">
+          <div class="card">
+            <div class="card-head"><i data-lucide="activity"></i><h3>Threads keep running</h3></div>
+            <p>DLQ-eligible failures are captured and processing resumes &mdash; no fail-fast stop.</p>
+          </div>
+          <div class="card">
+            <div class="card-head"><i data-lucide="eye"></i><h3>No silent loss</h3></div>
+            <p>Eligible failures are routed to the DLQ topic instead of being skipped.</p>
+          </div>
+          <div class="card">
+            <div class="card-head"><i data-lucide="gauge"></i><h3>Failure-path only</h3></div>
+            <p>DLQ logic runs on the exception branch; the healthy record path is untouched.</p>
+          </div>
         </div>
       </div>
     </div>
@@ -487,6 +601,8 @@
     <div class="diagram-panel">
 <pre class="mermaid">
 graph TD
+    accTitle: DLQ Component Interaction Diagram
+    accDescr: The new feature components (the withDeadLetterQueue DSL method, DeadLetterQueueOptions, the DLQ-aware handler decorator, DlqRecordBuilder, the two StreamsConfig keys and the dlq-records-sent-total metric) wrap the existing Streams runtime (KStreamImpl graph wiring, the exception handlers, RecordCollectorImpl, the shared producer and the metrics registry) to route failed records to the configured DLQ topic.
     subgraph New["New Components (this feature)"]
         DSL["KStream.withDeadLetterQueue()<br/>default method"]
         OPTS["DeadLetterQueueOptions<br/>(immutable options)"]
@@ -532,6 +648,8 @@ graph TD
     <div class="diagram-panel">
 <pre class="mermaid">
 flowchart TD
+    accTitle: Error-Handling Data Flow — Before (current state)
+    accDescr: In the current global-config-only path, a record that fails to deserialize or process is dispatched to the configured exception handler. A DLQ record is built and sent only when the global errors.dead.letter.queue.topic.name is set; the handler result then either fails the thread or skips the record.
     REC["Incoming record"] --> DESER{"Deserialize /<br/>process OK?"}
     DESER -- Yes --> CONT["Continue topology"]
     DESER -- No --> HANDLER["Configured ExceptionHandler<br/>handleError(...)"]
@@ -557,13 +675,15 @@ flowchart TD
     <div class="diagram-panel">
 <pre class="mermaid">
 flowchart TD
+    accTitle: Error-Handling Data Flow — After (opt-in DLQ layer)
+    accDescr: When a stream has the DLQ active — either through the withDeadLetterQueue DSL call or the global default.deadletterqueue.enabled switch — a failed record is passed to the DLQ-aware decorator, which delegates to the configured handler and routes only DLQ-eligible failures. It resolves the effective topic, builds the dlq.* record, sends it through the shared producer, increments the metric and logs a WARN, then resumes. Topologies without the DLQ active follow the unchanged legacy path.
     REC["Incoming record"] --> DESER{"Deserialize /<br/>process OK?"}
     DESER -- Yes --> CONT["Continue topology"]
-    DESER -- No --> OPTIN{"Topology opted in via<br/>withDeadLetterQueue?"}
-    OPTIN -- No --> LEGACY["Existing unchanged path<br/>(see Before diagram)"]
-    OPTIN -- Yes --> DEC["DLQ-Aware Handler Decorator<br/>(delegates to configured handler)"]
+    DESER -- No --> ACTIVE{"DLQ active?<br/>(DSL opt-in OR<br/>global default enabled)"}
+    ACTIVE -- No --> LEGACY["Existing unchanged path<br/>(see Before diagram)"]
+    ACTIVE -- Yes --> DEC["DLQ-Aware Handler Decorator<br/>(delegates to configured handler,<br/>routes only eligible failures)"]
     DEC --> RESOLVE["Resolve effective DLQ topic<br/>(DSL overrides global default)"]
-    RESOLVE --> NEWBUILD["DlqRecordBuilder builds record<br/>(dlq.* headers, raw bytes,<br/>header toggle + max size)"]
+    RESOLVE --> NEWBUILD["DlqRecordBuilder builds record<br/>(dlq.* headers, raw bytes,<br/>header toggle + max-size truncation)"]
     NEWBUILD --> SEND["RecordCollector.send to DLQ topic<br/>(shared producer, same security/auth)"]
     SEND --> OBS["Increment dlq-records-sent-total<br/>+ WARN (exception class, source offset)"]
     OBS --> RESUME["Response.resume -> topology continues"]
@@ -571,7 +691,7 @@ flowchart TD
     </div>
     <div class="legend">
       <i data-lucide="info"></i>
-      <span><span class="lg-title">Error-Handling Data Flow &mdash; After.</span> The highlighted path is the new opt-in DSL layer; non-opted-in topologies follow the unchanged legacy path (byte-for-byte identical).</span>
+      <span><span class="lg-title">Error-Handling Data Flow &mdash; After.</span> The highlighted path is the new opt-in DLQ layer &mdash; activated per stream via <span class="mono">withDeadLetterQueue</span> or globally via <span class="mono">default.deadletterqueue.enabled</span>; topologies without the DLQ active follow the unchanged legacy path (byte-for-byte identical).</span>
     </div>
   </section>
 
@@ -601,19 +721,13 @@ flowchart TD
       <div class="rung">
         <span class="rank">Most specific</span>
         <span class="name"><span class="mono">withDeadLetterQueue(...)</span></span>
-        <span class="desc">Per-stream DSL call wins</span>
-      </div>
-      <div class="arrow"><i data-lucide="arrow-right"></i></div>
-      <div class="rung">
-        <span class="rank">Then</span>
-        <span class="name">Per-topology setting</span>
-        <span class="desc">Applies to the topology</span>
+        <span class="desc">Per-stream DSL call &mdash; wins whenever present</span>
       </div>
       <div class="arrow"><i data-lucide="arrow-right"></i></div>
       <div class="rung">
         <span class="rank">Fallback</span>
         <span class="name">Global defaults</span>
-        <span class="desc">Applied when nothing else is set</span>
+        <span class="desc"><span class="mono">default.deadletterqueue.*</span> &mdash; applied when no DSL call is made</span>
       </div>
     </div>
     <div class="kicker-icons" style="margin-top: 30px; gap: 20px; flex-wrap: wrap;">
@@ -658,8 +772,8 @@ flowchart TD
     <h2>Known trade-offs, handled</h2>
     <div class="card-row">
       <div class="card">
-        <div class="card-head"><i data-lucide="shuffle"></i><h3>Best-effort side output</h3></div>
-        <p>Not exactly-once &mdash; monitor the metric and alert on growth.</p>
+        <div class="card-head"><i data-lucide="shuffle"></i><h3>Best-effort delivery</h3></div>
+        <p>Same producer; under exactly-once, written inside the task transaction. A failed DLQ write escalates once &mdash; monitor the metric.</p>
       </div>
       <div class="card">
         <div class="card-head"><i data-lucide="database"></i><h3>DLQ topic must pre-exist</h3></div>
@@ -727,8 +841,8 @@ flowchart TD
     <div class="close-icon"><i data-lucide="check-circle"></i></div>
     <h2>Failed records now have a safe destination &mdash; and full visibility.</h2>
     <div class="close-chips">
-      <span class="chip"><i data-lucide="shield-check"></i> Zero uncaught terminations when enabled</span>
-      <span class="chip"><i data-lucide="target"></i> 100% of eligible failures captured within one poll cycle</span>
+      <span class="chip"><i data-lucide="shield-check"></i> No fail-fast stop for captured failures</span>
+      <span class="chip"><i data-lucide="target"></i> Eligible failures routed to the DLQ, not dropped</span>
       <span class="chip"><i data-lucide="equal"></i> Unchanged behavior for non-adopters</span>
     </div>
     <div class="brand-row">BLITZY &middot; Apache Kafka Streams</div>
@@ -742,21 +856,34 @@ flowchart TD
 <!-- ============================================================= -->
 
 <!-- reveal.js 5.1.0 (UMD -> window.Reveal) -->
-<script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.js"
+        integrity="sha384-M/JtqCVlLcK9lwVnBnMXP0V577CBULkjodKsR/PITOe4MSKNbbwqCemEyluOw0+5" crossorigin="anonymous"></script>
 <!-- Lucide 0.460.0 (UMD -> window.lucide) -->
-<script src="https://cdn.jsdelivr.net/npm/lucide@0.460.0/dist/umd/lucide.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/lucide@0.460.0/dist/umd/lucide.min.js"
+        integrity="sha384-ieG+IKD0d/ZPXyCBTMVAbqsQdns8QGJR/e26WMw7M4fkaI/rHcS/YIoi+ah9WGge" crossorigin="anonymous"></script>
 
-<!-- Mermaid 11.4.0 (ESM) + reveal.js / Lucide init. This module is
+<!-- Mermaid 11.15.0 (ESM) + reveal.js / Lucide init. This module is
      deferred by default, so window.Reveal and window.lucide (loaded
-     by the classic scripts above) are already available. -->
+     by the classic scripts above) are already available.
+     Version pinned to 11.15.0: it is the first release that patches the
+     Gantt-parser infinite-loop DoS (GHSA-6m6c-36f7-fhxh / CVE-2026-41150,
+     affecting <= 11.14.0). ESM `import` cannot carry an SRI integrity
+     attribute, so integrity is enforced via the exact version pin plus the
+     Content-Security-Policy script-src allowlist declared in <head>. -->
 <script type="module">
-  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11.4.0/dist/mermaid.esm.min.mjs';
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.esm.min.mjs';
 
   // Do NOT auto-run; reveal controls when diagrams render.
   mermaid.initialize({
     startOnLoad: false,
     theme: 'base',
-    securityLevel: 'loose',
+    // 'antiscript' sanitizes the rendered SVG by stripping <script> elements
+    // (removing the XSS surface that 'loose' leaves open) while still allowing
+    // benign inline HTML such as the <br/> line breaks these node labels rely
+    // on. 'strict' is deliberately NOT used: it HTML-encodes <br/> into literal
+    // "<br/>" text, collapsing every multi-line label onto one line. All
+    // diagram sources here are static and author-controlled (no user input).
+    securityLevel: 'antiscript',
     // Measure and render node labels with the same webfont the deck uses,
     // so Mermaid's label width matches the rendered Inter text (prevents
     // the last character clipping at a node's right edge).
@@ -775,11 +902,20 @@ flowchart TD
     flowchart: { htmlLabels: true, useMaxWidth: true, wrappingWidth: 640 }
   });
 
-  // (Re)create all Lucide SVG icons. Safe to call repeatedly.
+  // (Re)create all Lucide SVG icons, then mark every generated SVG as
+  // decorative. In this deck the icons only accompany text that already
+  // conveys the meaning, so they must be hidden from the accessibility tree
+  // and removed from the tab order. Safe to call repeatedly (idempotent:
+  // re-setting the same attributes on already-rendered SVGs is a no-op).
   function renderIcons() {
     if (window.lucide && typeof window.lucide.createIcons === 'function') {
       window.lucide.createIcons();
     }
+    // createIcons() replaces each <i data-lucide> with <svg class="lucide ...">.
+    document.querySelectorAll('svg.lucide').forEach((svg) => {
+      svg.setAttribute('aria-hidden', 'true');
+      svg.setAttribute('focusable', 'false');
+    });
   }
 
   // Render only the diagram on the currently-presented slide, so Mermaid

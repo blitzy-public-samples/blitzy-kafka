@@ -267,6 +267,25 @@ public class TaskMetrics {
         );
     }
 
+    /**
+     * Task-scoped sensor for the opt-in, DSL-level Dead Letter Queue layer, exposing the {@code dlq-records-sent-rate}
+     * and {@code dlq-records-sent-total} metrics. The metric is registered in the task-level {@code stream-task-metrics}
+     * group and is tagged by {@code thread-id} and {@code task-id}; because a Kafka Streams {@code task-id} has the form
+     * {@code <subtopologyId>_<partition>}, the {@code task-id} tag inherently identifies the topology/subtopology the
+     * DLQ writes originated from (there is no separate non-standard "topology" tag). The sensor is created lazily and
+     * idempotently — repeated calls for the same {@code threadId}/{@code taskId} return the same underlying sensor —
+     * and its lifecycle (creation/removal) follows the standard task-metrics machinery, so it is cleaned up with the
+     * task like every other task sensor.
+     *
+     * <p>It is incremented exactly once per DLQ <em>record</em> actually routed to a DLQ topic (via
+     * {@code DeadLetterQueueObserver.recordSent}), from every eligible opt-in path — deserialization, processing,
+     * serialization and production — so the total counts dead-lettered records rather than failure events.
+     *
+     * @param threadId       the stream thread id (thread-id tag)
+     * @param taskId         the task id (task-id tag; encodes the subtopology)
+     * @param streamsMetrics the streams metrics registry
+     * @return the {@code dlq-records-sent} sensor
+     */
     public static Sensor dlqRecordsSentSensor(final String threadId,
                                               final String taskId,
                                               final StreamsMetricsImpl streamsMetrics) {
