@@ -625,6 +625,15 @@
       }
       .ladder { display: flex !important; flex-direction: column !important; gap: 14px !important; align-items: stretch !important; }
       .ladder .arrow { transform: rotate(90deg); align-self: center; }
+      /* P10-FINDING-01: inline code chips must wrap in the reflowed single-column
+         mobile layout so long signatures (e.g. KStream.withDeadLetterQueue(...) on
+         "The Capability" and the "most-specific" rung of the precedence ladder)
+         never clip at the right edge on narrow viewports (observed at 390px). The
+         base .mono rule sets white-space:nowrap for single-line desktop chips; here
+         we relax every .mono chip to normal wrapping, with break-anywhere as the
+         last-resort fallback for a token longer than the available width. Scoped to
+         the <=768px breakpoint only, so the 1920px design canvas is unaffected. */
+      .reveal .mono { white-space: normal; overflow-wrap: anywhere; }
       /* Diagrams render at full panel width; still scroll if wider (P10-02). */
       .diagram-panel { overflow-x: auto; -webkit-overflow-scrolling: touch; }
       .reveal .mermaid svg { max-height: none !important; }
@@ -1040,12 +1049,28 @@ flowchart TD
      The UMD build is one self-contained file with no dynamic sub-module imports, so a
      single Subresource Integrity (sha384) hash + crossorigin verifies the ENTIRE
      library, closing the "entry + 23 sub-modules unverified" gap of the ESM build.
-     Advisories against mermaid <= 11.14.0 (e.g. the Gantt-parser DoS CVE-2026-41150)
-     are NOT reachable here: the deck renders only static, author-controlled
-     graph/flowchart sources (no Gantt, no user input), and securityLevel 'antiscript'
-     strips any embedded scripts from the rendered SVG. If the CDN is unavailable or the
-     integrity check fails, window.mermaid is simply never defined and the init below
-     paints a readable text fallback in each diagram panel (the deck never goes blank). -->
+     Known advisories affecting this pinned version are ACCEPTED RISK, mandated by the
+     frozen AAP (spec 0.3 dependency inventory and Rule 2 in spec 0.7.3 both pin EXACTLY
+     11.4.0); bumping the pin would violate that spec, so 11.4.0 is intentionally retained.
+     The relevant advisories are:
+       * CVE-2025-54881 / CVE-2025-54880 (reflected XSS via sequence-diagram labels or
+         architecture-diagram icons; fixed 11.10.0)
+       * CVE-2026-41149 (HTML injection via classDef in state diagrams; CVSS 5.3; fixed 11.15.0)
+       * CVE-2026-41150 (Gantt-parser DoS)
+     Runtime exploitability here is NIL: three independent compensating controls each
+     neutralize every published proof-of-concept.
+       (i)   STATIC INPUT ONLY. Every diagram source is author-authored and inline; the
+             deck uses only graph/flowchart diagrams (NO sequence, architecture, state or
+             Gantt diagrams, i.e. none of the vulnerable parsers) and there is no
+             URL/hash to diagram sink an attacker could use to inject a source.
+       (ii)  securityLevel 'antiscript' (see mermaid.initialize below) strips script
+             elements and inline event handlers from the rendered SVG.
+       (iii) The Content-Security-Policy script-src carries NO 'unsafe-inline' (only
+             same-origin, the single hashed inline script and jsdelivr are allowed),
+             blocking the onerror= / onclick= inline-handler sink every PoC relies on.
+     If the CDN is unavailable or the integrity check fails, window.mermaid is simply
+     never defined and the init below paints a readable text fallback in each diagram
+     panel (the deck never goes blank). -->
 <script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.0/dist/mermaid.min.js"
         integrity="sha384-Wm9qzEgq4j1jEnuFK2FxKTlwuhbV2QqtGhcchvjDoKxeJ7WWAW7fysBq+1s6myfX"
         crossorigin="anonymous"></script>
