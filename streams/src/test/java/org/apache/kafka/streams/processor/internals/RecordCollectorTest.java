@@ -1932,7 +1932,7 @@ public class RecordCollectorTest {
             // ...and the targeted opt-in DLQ WARN is never emitted for the non-opt-in path.
             final List<String> messages = logCaptureAppender.getMessages();
             final boolean warnPresent = messages.stream().anyMatch(message ->
-                message.contains("Sent a failed record to the dead letter queue."));
+                message.contains("Routing a failed record to the dead letter queue."));
             assertFalse(warnPresent, "Opt-in DLQ WARN must not fire for the non-opt-in path. Captured: " + messages);
         }
     }
@@ -1984,7 +1984,7 @@ public class RecordCollectorTest {
             // ...and the targeted opt-in DLQ WARN is never emitted for the non-opt-in path.
             final List<String> messages = logCaptureAppender.getMessages();
             final boolean warnPresent = messages.stream().anyMatch(message ->
-                message.contains("Sent a failed record to the dead letter queue."));
+                message.contains("Routing a failed record to the dead letter queue."));
             assertFalse(warnPresent, "Opt-in DLQ WARN must not fire for the non-opt-in path. Captured: " + messages);
         }
     }
@@ -2083,6 +2083,81 @@ public class RecordCollectorTest {
         collector.sendDeadLetterQueueRecord(secondDlqRecord, sinkNodeName, context);
         assertSame(firstLatched, sendException.get(),
             "The first escalated exception must be preserved (escalate once, first error wins)");
+    }
+
+    @Test
+    public void shouldIncrementDlqRecordsSentTotalOnlyOnBrokerAckForOptInDlqSend() {
+        // P5-05 (ack-based counting): the dlq-records-sent-total metric must be incremented ONLY once the broker
+        // ACKNOWLEDGES the DLQ record — i.e. from the producer send callback's success branch (exception == null) —
+        // so it reflects confirmed DLQ persistence rather than a send attempt. Here the producer completes the DLQ
+        // send successfully, so the metric reads exactly 1.
+        final StreamsProducer streamsProducer = mock(StreamsProducer.class);
+        when(streamsProducer.sendException()).thenReturn(new AtomicReference<>(null));
+        final RecordMetadata ackMetadata = new RecordMetadata(new TopicPartition("dlqTopic", 0), 0L, 0, 0L, 1, 1);
+        when(streamsProducer.send(any(), any())).thenAnswer(invocation -> {
+            // Simulate a successful broker acknowledgement (exception == null).
+            ((Callback) invocation.getArgument(1)).onCompletion(ackMetadata, null);
+            return null;
+        });
+        final ProcessorTopology topology = mock(ProcessorTopology.class);
+        final RecordCollectorImpl collector = new RecordCollectorImpl(
+            logContext, taskId, streamsProducer, productionExceptionHandler, streamsMetrics, topology);
+
+        final ProducerRecord<byte[], byte[]> dlqRecord =
+            new ProducerRecord<>("dlqTopic", null, 0L, "k".getBytes(), "v".getBytes());
+        collector.sendDeadLetterQueueRecord(dlqRecord, sinkNodeName, context);
+
+        // The acknowledged DLQ record is counted exactly once.
+        assertEquals(1.0, streamsMetrics.metrics().get(new MetricName(
+            "dlq-records-sent-total",
+            "stream-task-metrics",
+            "The total number of records sent to the dead letter queue",
+            mkMap(
+                mkEntry("thread-id", Thread.currentThread().getName()),
+                mkEntry("task-id", taskId.toString())
+            ))).metricValue());
+    }
+
+    @Test
+    public void shouldNotIncrementDlqRecordsSentTotalWhenDlqSendFailsAsynchronously() {
+        // P5-05 (no false success): when a DLQ record's own produce fails asynchronously (exception != null in the
+        // callback), the dlq-records-sent-total metric must NOT be incremented. The sensor is registered when the
+        // send is attempted (on the calling thread, so it carries the correct thread-id tag), so the metric exists
+        // but reads 0.0 — a truthful "0 sent" rather than the previous false "1 sent" — and the failure is escalated
+        // exactly once via the recursion guard.
+        final StreamsProducer streamsProducer = mock(StreamsProducer.class);
+        final AtomicReference<KafkaException> sendException = new AtomicReference<>(null);
+        when(streamsProducer.sendException()).thenReturn(sendException);
+        when(streamsProducer.send(any(), any())).thenAnswer(invocation -> {
+            // Simulate an asynchronous DLQ produce failure (exception != null).
+            ((Callback) invocation.getArgument(1)).onCompletion(null, new KafkaException("DLQ produce boom"));
+            return null;
+        });
+        final ProcessorTopology topology = mock(ProcessorTopology.class);
+        final RecordCollectorImpl collector = new RecordCollectorImpl(
+            logContext, taskId, streamsProducer, productionExceptionHandler, streamsMetrics, topology);
+
+        final ProducerRecord<byte[], byte[]> dlqRecord =
+            new ProducerRecord<>("dlqTopic", null, 0L, "k".getBytes(), "v".getBytes());
+        // Best-effort side output: a failed DLQ send must not throw synchronously to the caller.
+        assertDoesNotThrow(() -> collector.sendDeadLetterQueueRecord(dlqRecord, sinkNodeName, context));
+
+        // The failed DLQ send is escalated exactly once (DLQ-specific StreamsException naming the DLQ topic).
+        final KafkaException latched = sendException.get();
+        assertNotNull(latched, "A failed DLQ send must latch an exception for escalation");
+        assertInstanceOf(StreamsException.class, latched);
+        assertTrue(latched.getMessage().contains("dlqTopic"),
+            "Escalated exception should identify the DLQ topic. Was: " + latched.getMessage());
+
+        // ...and it must NOT be counted as sent: the metric reads 0.0 (no false "sent" signal on failure).
+        assertEquals(0.0, streamsMetrics.metrics().get(new MetricName(
+            "dlq-records-sent-total",
+            "stream-task-metrics",
+            "The total number of records sent to the dead letter queue",
+            mkMap(
+                mkEntry("thread-id", Thread.currentThread().getName()),
+                mkEntry("task-id", taskId.toString())
+            ))).metricValue());
     }
 
     @Test

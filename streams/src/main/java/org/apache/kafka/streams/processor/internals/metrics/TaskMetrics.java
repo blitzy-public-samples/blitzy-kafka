@@ -277,9 +277,11 @@ public class TaskMetrics {
      * and its lifecycle (creation/removal) follows the standard task-metrics machinery, so it is cleaned up with the
      * task like every other task sensor.
      *
-     * <p>It is incremented exactly once per DLQ <em>record</em> actually routed to a DLQ topic (via
-     * {@code DeadLetterQueueObserver.recordSent}), from every eligible opt-in path — deserialization, processing,
-     * serialization and production — so the total counts dead-lettered records rather than failure events.
+     * <p>It is incremented exactly once per DLQ <em>record</em> whose production the broker has acknowledged (via
+     * {@code DeadLetterQueueObserver.recordSent}, called from the record collector's producer send callback), for
+     * every eligible opt-in path — deserialization, processing, serialization and production. Counting on
+     * acknowledgement rather than at the send attempt means the total reflects DLQ records that were confirmed
+     * persisted, not attempts or failure events: a DLQ send that fails is escalated once and is not counted (P5-05).
      *
      * @param threadId       the stream thread id (thread-id tag)
      * @param taskId         the task id (task-id tag; encodes the subtopology)

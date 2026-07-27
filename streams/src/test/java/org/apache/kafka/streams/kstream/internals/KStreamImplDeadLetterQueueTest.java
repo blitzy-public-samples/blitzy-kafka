@@ -34,6 +34,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Properties;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -43,6 +44,10 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doCallRealMethod;
+import static org.mockito.Mockito.mock;
 
 /**
  * Verifies the DSL wiring, graph-node liveness, and per-sub-graph scope semantics of
@@ -241,5 +246,79 @@ public class KStreamImplDeadLetterQueueTest {
         final KStream<String, String> result =
             stream.withDeadLetterQueue("dlq", DeadLetterQueueOptions.with("dlq"));
         assertSame(stream, result);
+    }
+
+    // ------------------------------------------------------------------------------------------------------------
+    // P16-03: reject a DLQ topic that is itself an originating source (recursive-amplification guard)
+    // ------------------------------------------------------------------------------------------------------------
+
+    @Test
+    public void shouldRejectDlqTopicEqualToConcreteSourceTopic() {
+        final KStream<String, String> stream = new StreamsBuilder().stream("input", consumed).mapValues(v -> v);
+        final TopologyException exception = assertThrows(TopologyException.class,
+            () -> stream.withDeadLetterQueue("input", DeadLetterQueueOptions.with("input")));
+        assertTrue(exception.getMessage().contains("must not be an originating source"),
+            "message should explain the source/DLQ collision: " + exception.getMessage());
+        assertTrue(exception.getMessage().contains("source topic 'input'"),
+            "message should name the colliding source topic: " + exception.getMessage());
+    }
+
+    @Test
+    public void shouldRejectDlqTopicEqualToConcreteSourceTopicWhenCalledDirectlyOnSource() {
+        final KStream<String, String> stream = new StreamsBuilder().stream("input", consumed);
+        assertThrows(TopologyException.class,
+            () -> stream.withDeadLetterQueue("input", DeadLetterQueueOptions.with("input")));
+    }
+
+    @Test
+    public void shouldRejectDlqTopicEqualToOneOfMergedSources() {
+        final StreamsBuilder builder = new StreamsBuilder();
+        final KStream<String, String> a = builder.stream("inputA", consumed);
+        final KStream<String, String> b = builder.stream("inputB", consumed);
+        final KStream<String, String> merged = a.merge(b);
+        final TopologyException exception = assertThrows(TopologyException.class,
+            () -> merged.withDeadLetterQueue("inputB", DeadLetterQueueOptions.with("inputB")));
+        assertTrue(exception.getMessage().contains("source topic 'inputB'"), exception.getMessage());
+    }
+
+    @Test
+    public void shouldRejectDlqTopicMatchingSourceTopicPattern() {
+        final KStream<String, String> stream =
+            new StreamsBuilder().stream(Pattern.compile("input-.*"), consumed);
+        // "input-dlq" is matched by the source pattern "input-.*", so it would feed the DLQ back into the source.
+        final TopologyException exception = assertThrows(TopologyException.class,
+            () -> stream.withDeadLetterQueue("input-dlq", DeadLetterQueueOptions.with("input-dlq")));
+        assertTrue(exception.getMessage().contains("source topic pattern"),
+            "message should name the colliding source pattern: " + exception.getMessage());
+    }
+
+    @Test
+    public void shouldAllowDlqTopicThatDoesNotMatchSourcePattern() {
+        // A DLQ topic that the source pattern does NOT match is safe and must be accepted.
+        final KStream<String, String> stream =
+            new StreamsBuilder().stream(Pattern.compile("input-.*"), consumed);
+        final KStream<String, String> result =
+            stream.withDeadLetterQueue("dead-letters", DeadLetterQueueOptions.with("dead-letters"));
+        assertSame(stream, result);
+    }
+
+    // ------------------------------------------------------------------------------------------------------------
+    // P4-02: the KStream interface default method fails loudly for custom (non-KStreamImpl) implementations
+    // ------------------------------------------------------------------------------------------------------------
+
+    @Test
+    public void shouldThrowUnsupportedOperationExceptionFromInterfaceDefaultMethod() {
+        // A pre-feature custom KStream implementation inherits the interface default method (it does not override
+        // it). Invoking withDeadLetterQueue on such an implementation must fail explicitly rather than silently
+        // installing nothing. A Mockito mock of the KStream interface (which is NOT KStreamImpl) routed to the
+        // real default method faithfully reproduces that inherited-default scenario.
+        @SuppressWarnings("unchecked")
+        final KStream<String, String> customStream = mock(KStream.class);
+        doCallRealMethod().when(customStream).withDeadLetterQueue(anyString(), any(DeadLetterQueueOptions.class));
+
+        final UnsupportedOperationException exception = assertThrows(UnsupportedOperationException.class,
+            () -> customStream.withDeadLetterQueue("dlq", DeadLetterQueueOptions.with("dlq")));
+        assertTrue(exception.getMessage().contains("not supported by this KStream implementation"),
+            "message should explain the capability is unsupported: " + exception.getMessage());
     }
 }

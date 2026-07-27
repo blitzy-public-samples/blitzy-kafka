@@ -83,8 +83,8 @@ public interface KStream<K, V> {
      * the failure is escalated once and the task fails (surfacing through the uncaught-exception handler) rather than
      * attempting to dead-letter the DLQ record.
      *
-     * <p>This method does not add a processing step to the topology; it returns the same-typed {@code KStream}
-     * unchanged so it can be chained fluently, for example:
+     * <p>This method does not add a processing step to the topology; the built-in implementation returns the
+     * same-typed {@code KStream} unchanged so it can be chained fluently, for example:
      *
      * <pre>{@code
      * builder.stream("input-topic")
@@ -93,18 +93,39 @@ public interface KStream<K, V> {
      *        .to("output-topic");
      * }</pre>
      *
+     * @apiNote This method was added to the {@code KStream} interface as a {@code default} method purely to
+     * preserve source and binary compatibility for existing custom {@code KStream} implementations (adding a
+     * method never breaks an implementor at compile or link time). The {@code default} implementation does
+     * <em>not</em> silently no-op: because a custom implementation cannot wire DLQ routing into the internal
+     * topology, invoking it on anything other than the built-in {@code KStreamImpl} throws
+     * {@link UnsupportedOperationException} so that an unsupported opt-in fails loudly rather than appearing to
+     * succeed while installing nothing. The built-in {@code KStreamImpl} returned by {@link StreamsBuilder}
+     * overrides this method to install DLQ routing and return this stream.
+     *
+     * @implSpec The {@code default} implementation always throws {@link UnsupportedOperationException}; the
+     * built-in {@code KStreamImpl} overrides it with the working implementation.
+     *
      * @param dlqTopic
      *        the name of the (pre-existing) Dead Letter Queue topic that failed records are routed to; must not be null
      * @param options
      *        the {@link DeadLetterQueueOptions} controlling DLQ behaviour (max record size and header inclusion);
      *        must not be null
      *
-     * @return this {@code KStream}, unchanged, for fluent chaining
+     * @return the same-typed {@code KStream} (the built-in {@code KStreamImpl} returns this stream unchanged, for
+     *         fluent chaining)
+     *
+     * @throws UnsupportedOperationException if invoked on a {@code KStream} implementation that does not support
+     *         the Dead Letter Queue capability (the {@code default} method always throws; the built-in
+     *         {@code KStreamImpl} overrides it)
      *
      * @see DeadLetterQueueOptions
      */
     default KStream<K, V> withDeadLetterQueue(final String dlqTopic, final DeadLetterQueueOptions options) {
-        return this;
+        throw new UnsupportedOperationException(
+            "withDeadLetterQueue(String, DeadLetterQueueOptions) is not supported by this KStream implementation. "
+                + "The opt-in Dead Letter Queue capability is provided by the built-in KStream implementation "
+                + "(KStreamImpl) returned by StreamsBuilder; a custom KStream implementation must override this "
+                + "method to support it.");
     }
 
     /**

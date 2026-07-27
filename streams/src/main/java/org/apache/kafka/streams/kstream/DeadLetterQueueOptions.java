@@ -28,7 +28,8 @@ import java.util.Objects;
  * deserialization or processing are routed to a configured DLQ topic:
  * <ul>
  *     <li>the DLQ topic name (see {@link #dlqTopic()});</li>
- *     <li>the maximum DLQ record value size in bytes, with {@link #NO_MAX_RECORD_SIZE} meaning "no limit"
+ *     <li>the maximum DLQ record size in bytes — bounding the <em>combined</em> key + value byte length by
+ *         truncating the value only — with {@link #NO_MAX_RECORD_SIZE} meaning "no limit"
  *         (see {@link #maxRecordSize()});</li>
  *     <li>whether the {@code dlq.*} diagnostic headers are attached to DLQ records, enabled by default
  *         (see {@link #includeHeaders()}).</li>
@@ -100,14 +101,18 @@ public final class DeadLetterQueueOptions {
     }
 
     /**
-     * Return a new instance configured with the provided maximum DLQ record (value) size in bytes. Use
-     * {@link #NO_MAX_RECORD_SIZE} to indicate no limit. When a positive limit is set and a failed record's value
-     * exceeds it, {@link org.apache.kafka.streams.errors.internals.DlqRecordBuilder} truncates the value to fit
-     * (the record is still routed to the DLQ, never dropped); with {@link #NO_MAX_RECORD_SIZE} the original value
-     * bytes are carried through verbatim. This method never mutates the receiver; it returns a new
-     * {@code DeadLetterQueueOptions} that copies the existing topic and header-inclusion settings.
+     * Return a new instance configured with the provided maximum DLQ record size in bytes. The bound applies to
+     * the <em>combined key + value</em> byte length of the DLQ record: when a positive limit is set and a failed
+     * record's {@code key.length + value.length} exceeds it,
+     * {@link org.apache.kafka.streams.errors.internals.DlqRecordBuilder} truncates the <em>value</em> to fit
+     * (truncating the value to at most {@code maxRecordSize - key.length} bytes, reduced to empty when the key
+     * alone already meets or exceeds the bound) and annotates the DLQ record with a
+     * {@code dlq.value.truncated} header; the key is always carried verbatim and the record is still routed to the
+     * DLQ, never dropped. With {@link #NO_MAX_RECORD_SIZE} the original key and value bytes are carried through
+     * verbatim. Use {@link #NO_MAX_RECORD_SIZE} to indicate no limit. This method never mutates the receiver; it
+     * returns a new {@code DeadLetterQueueOptions} that copies the existing topic and header-inclusion settings.
      *
-     * @param maxRecordSize the maximum record value size in bytes; must be strictly positive
+     * @param maxRecordSize the maximum combined key+value size in bytes; must be strictly positive
      *                      (use {@link #NO_MAX_RECORD_SIZE} for no limit)
      * @return a new {@code DeadLetterQueueOptions} instance
      * @throws IllegalArgumentException if {@code maxRecordSize} is not strictly positive

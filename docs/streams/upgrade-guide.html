@@ -120,7 +120,9 @@
         <code>dlq.*</code> headers &mdash; to a configured DLQ topic. Retriable broker/producer failures are not
         dead-lettered and continue to use the producer's existing retry configuration. The method returns the same-typed
         <code>KStream&lt;K, V&gt;</code> so it can be used in a fluent chain. The <code>DeadLetterQueueOptions</code> object
-        controls the DLQ topic name, an optional maximum record size (over-sized values are truncated to fit rather than
+        controls the DLQ topic name, an optional maximum record size (which bounds the combined key and value length; an
+        over-sized value is truncated to fit &mdash; the key preserved and the truncation annotated with
+        <code>dlq.value.truncated</code> / <code>dlq.value.original.size</code> headers &mdash; rather than the record being
         dropped), and whether the diagnostic headers are attached (enabled by default).
     </p>
 

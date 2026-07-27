@@ -231,10 +231,12 @@ public class StreamTask extends AbstractTask implements ProcessorNodePunctuator,
         }
         timeCurrentIdlingStarted = Optional.empty();
         // Install the opt-in, DSL-level DLQ layer onto the subtopology-wide processing exception handler when this
-        // subtopology opted in (via any source's withDeadLetterQueue call or the global default). The handler is
+        // subtopology opted in (via any node's withDeadLetterQueue sub-graph or the global default). The handler is
         // shared by every ProcessorNode in the subtopology (propagated via node.init below), so wrapping it once here
-        // covers both the normal-record processing site (ProcessorNode) and the punctuation site (StreamTask). When
-        // the subtopology did not opt in, the configured handler is returned unchanged (byte-for-byte behaviour).
+        // covers both the normal-record processing site (ProcessorNode) and the punctuation site (StreamTask); the
+        // decorator resolves the effective per-node DLQ policy from the failing node's ErrorHandlerContext
+        // #processorNodeId() at runtime. When the subtopology did not opt in, the configured handler is returned
+        // unchanged (byte-for-byte behaviour).
         processingExceptionHandler = DeadLetterQueueInstaller.maybeWrapProcessingHandler(
             config.processingExceptionHandler,
             topology,
@@ -977,13 +979,13 @@ public class StreamTask extends AbstractTask implements ProcessorNodePunctuator,
                 // returns DLQ records, whose behaviour is preserved. The pre-existing path is left unchanged.
                 final boolean optInDeadLetterQueue =
                     processingExceptionHandler instanceof DeadLetterQueueExceptionHandlerDecorator.ProcessingDecorator;
-                final Sensor dlqRecordsSentSensor = optInDeadLetterQueue
-                    ? TaskMetrics.dlqRecordsSentSensor(Thread.currentThread().getName(), id().toString(), streamsMetrics)
-                    : null;
                 for (final ProducerRecord<byte[], byte[]> deadLetterQueueRecord : deadLetterQueueRecords) {
                     if (optInDeadLetterQueue) {
+                        // Recursion-guarded DLQ send (MA-05). The dlq-records-sent-total metric is incremented inside
+                        // the record collector's producer callback only once the broker acknowledges the DLQ record
+                        // (MA-08 / P5-05, ack-based counting) — not here at the send attempt — so a failed DLQ send
+                        // is never counted as sent.
                         collector.sendDeadLetterQueueRecord(deadLetterQueueRecord, node.name(), processorContext);
-                        DeadLetterQueueObserver.recordSent(dlqRecordsSentSensor);
                     } else {
                         collector.send(
                                 deadLetterQueueRecord.key(),

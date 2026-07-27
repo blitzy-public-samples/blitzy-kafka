@@ -34,13 +34,18 @@ import java.util.Map;
  *
  * <p>Unlike the deserialization handler, which is resolved <em>per source node</em> (each {@link RecordQueue}
  * carries its own source and therefore its own DLQ policy), a subtopology has a <em>single</em> processing handler
- * and a <em>single</em> production handler shared across all of its sources. A subtopology may nevertheless contain
- * several sources that opted in to <em>different</em> DLQ topics (for example a {@code merge} of two streams each
- * configured via {@link org.apache.kafka.streams.kstream.KStream#withDeadLetterQueue(String, DeadLetterQueueOptions)}).
- * This installer therefore builds an immutable {@code Map<sourceTopic, DeadLetterQueueOptions>} from the subtopology's
- * source nodes and hands it to the decorator, which routes each failed record to the DLQ policy of its
- * <em>originating source topic</em> (falling back to the global default), preserving independent per-source policies
- * and the DSL-per-source &rarr; global precedence.
+ * and a <em>single</em> production handler shared across all of its nodes. A subtopology may nevertheless contain
+ * several opted-in sub-graphs that route to <em>different</em> DLQ topics (for example two branches of a
+ * {@code split()} each configured via
+ * {@link org.apache.kafka.streams.kstream.KStream#withDeadLetterQueue(String, DeadLetterQueueOptions)}, or a
+ * {@code merge}). This installer therefore builds an immutable {@code Map<nodeName, DeadLetterQueueOptions>} from the
+ * subtopology's processor and sink nodes (each marked by {@link InternalTopologyBuilder#markProcessorNodeForDeadLetterQueue})
+ * and hands it to the decorator, which routes each failed record to the DLQ policy of the <em>node in which the
+ * failure occurred</em> ({@link org.apache.kafka.streams.errors.ErrorHandlerContext#processorNodeId()}, falling back
+ * to the global default). Keying by node rather than by source topic keeps an opt-in on one branch from leaking into
+ * an unopted sibling branch (P4-01) and routes a failure from a dynamically-matched {@code Pattern} topic by stable
+ * node identity rather than a build-time topic name (P16-01 / P16-02), while preserving independent per-sub-graph
+ * policies and the DSL &rarr; global precedence.
  *
  * <p>When neither any source opts in nor the global {@code default.deadletterqueue.*} default is enabled, the
  * configured handler is returned <strong>unchanged</strong>, so topologies that do not opt in retain byte-for-byte
@@ -56,32 +61,39 @@ final class DeadLetterQueueInstaller {
     }
 
     /**
-     * Build the immutable per-source-origin DLQ policy map for a subtopology: for every source topic whose source
-     * node was marked by a DSL {@code withDeadLetterQueue} opt-in, map the source topic to its resolved
-     * {@link DeadLetterQueueOptions}. Returns an empty map when no source opted in.
+     * Build the immutable per-node DLQ policy map for a subtopology: for every processor or sink node that a DSL
+     * {@code withDeadLetterQueue} opt-in marked (see
+     * {@link InternalTopologyBuilder#markProcessorNodeForDeadLetterQueue}), map the node's name to its resolved
+     * {@link DeadLetterQueueOptions}. Returns an empty map when no node opted in.
      *
-     * @param topology the subtopology whose sources are inspected
-     * @return an immutable {@code sourceTopic -> options} map (possibly empty)
+     * <p>Processing and production failures are keyed by the <em>node</em> in which they occur — resolved at runtime
+     * by {@link org.apache.kafka.streams.errors.ErrorHandlerContext#processorNodeId()} — rather than by source topic.
+     * Node-scoping is what keeps an opt-in on one branch from leaking into an unopted sibling branch (P4-01) and what
+     * routes a failure from a dynamically-matched {@code Pattern} topic by stable node identity rather than a
+     * build-time topic name (P16-01 / P16-02). The map covers processor nodes (processing exceptions) and sink nodes
+     * (produce/serialization exceptions); the runtime passes the sink node's name as the {@code processorNodeId} for
+     * production failures, so both tiers resolve against the same map.
+     *
+     * @param topology the subtopology whose nodes are inspected
+     * @return an immutable {@code nodeName -> options} map (possibly empty)
      */
-    static Map<String, DeadLetterQueueOptions> dlqOptionsBySourceTopic(final ProcessorTopology topology) {
-        Map<String, DeadLetterQueueOptions> bySourceTopic = null;
-        for (final String sourceTopic : topology.sourceTopics()) {
-            final SourceNode<?, ?> source = topology.source(sourceTopic);
-            if (source == null) {
-                continue;
-            }
-            final String dlqTopic = source.deadLetterQueueTopic();
+    static Map<String, DeadLetterQueueOptions> dlqOptionsByProcessorNode(final ProcessorTopology topology) {
+        Map<String, DeadLetterQueueOptions> byNode = null;
+        for (final ProcessorNode<?, ?, ?, ?> node : topology.processors()) {
+            final String dlqTopic = node.dlqRoutingTopic();
             if (dlqTopic != null) {
-                final DeadLetterQueueOptions options = source.deadLetterQueueOptions() != null
-                    ? source.deadLetterQueueOptions()
+                final DeadLetterQueueOptions options = node.dlqRoutingOptions() != null
+                    ? node.dlqRoutingOptions()
                     : DeadLetterQueueOptions.with(dlqTopic);
-                if (bySourceTopic == null) {
-                    bySourceTopic = new HashMap<>();
+                if (byNode == null) {
+                    byNode = new HashMap<>();
                 }
-                bySourceTopic.put(sourceTopic, options);
+                byNode.put(node.name(), options);
             }
         }
-        return bySourceTopic == null ? Collections.emptyMap() : bySourceTopic;
+        // Return an unmodifiable snapshot so the documented immutability contract holds even before the decorator
+        // constructors defensively copy it (P4-03). Collections.emptyMap() is already immutable.
+        return byNode == null ? Collections.emptyMap() : Map.copyOf(byNode);
     }
 
     /**
@@ -133,11 +145,11 @@ final class DeadLetterQueueInstaller {
     static ProcessingExceptionHandler maybeWrapProcessingHandler(final ProcessingExceptionHandler delegate,
                                                                  final ProcessorTopology topology,
                                                                  final DeadLetterQueueOptions globalOptions) {
-        final Map<String, DeadLetterQueueOptions> bySourceTopic = dlqOptionsBySourceTopic(topology);
-        if (bySourceTopic.isEmpty() && globalOptions == null) {
+        final Map<String, DeadLetterQueueOptions> byNode = dlqOptionsByProcessorNode(topology);
+        if (byNode.isEmpty() && globalOptions == null) {
             return delegate;
         }
-        return new DeadLetterQueueExceptionHandlerDecorator.ProcessingDecorator(delegate, bySourceTopic, globalOptions);
+        return new DeadLetterQueueExceptionHandlerDecorator.ProcessingDecorator(delegate, byNode, globalOptions);
     }
 
     /**
@@ -152,10 +164,10 @@ final class DeadLetterQueueInstaller {
     static ProductionExceptionHandler maybeWrapProductionHandler(final ProductionExceptionHandler delegate,
                                                                  final ProcessorTopology topology,
                                                                  final DeadLetterQueueOptions globalOptions) {
-        final Map<String, DeadLetterQueueOptions> bySourceTopic = dlqOptionsBySourceTopic(topology);
-        if (bySourceTopic.isEmpty() && globalOptions == null) {
+        final Map<String, DeadLetterQueueOptions> byNode = dlqOptionsByProcessorNode(topology);
+        if (byNode.isEmpty() && globalOptions == null) {
             return delegate;
         }
-        return new DeadLetterQueueExceptionHandlerDecorator.ProductionDecorator(delegate, bySourceTopic, globalOptions);
+        return new DeadLetterQueueExceptionHandlerDecorator.ProductionDecorator(delegate, byNode, globalOptions);
     }
 }

@@ -26,7 +26,6 @@ import org.apache.kafka.streams.errors.StreamsException;
 import org.apache.kafka.streams.errors.internals.DefaultErrorHandlerContext;
 import org.apache.kafka.streams.kstream.internals.DeadLetterQueueExceptionHandlerDecorator;
 import org.apache.kafka.streams.processor.api.ProcessorContext;
-import org.apache.kafka.streams.processor.internals.metrics.TaskMetrics;
 
 import org.slf4j.Logger;
 
@@ -131,21 +130,17 @@ public class RecordDeserializer {
         final boolean deadLetterQueueRecordSent = optInDeadLetterQueue && !deadLetterQueueRecords.isEmpty();
         if (!deadLetterQueueRecords.isEmpty()) {
             final RecordCollector collector = ((RecordCollector.Supplier) processorContext).recordCollector();
-            final Sensor dlqRecordsSentSensor = optInDeadLetterQueue
-                ? TaskMetrics.dlqRecordsSentSensor(
-                    Thread.currentThread().getName(),
-                    processorContext.taskId().toString(),
-                    ((InternalProcessorContext<?, ?>) processorContext).metrics())
-                : null;
             for (final ProducerRecord<byte[], byte[]> deadLetterQueueRecord : deadLetterQueueRecords) {
                 if (optInDeadLetterQueue) {
-                    // Recursion-guarded DLQ send + per-record count (MA-05 / MA-08).
+                    // Recursion-guarded DLQ send (MA-05). The dlq-records-sent-total metric is incremented inside the
+                    // record collector's producer callback only once the broker acknowledges the DLQ record (MA-08 /
+                    // P5-05, ack-based counting) — not here at the send attempt — so a failed DLQ send is never
+                    // counted as sent.
                     collector.sendDeadLetterQueueRecord(
                         deadLetterQueueRecord,
                         sourceNodeName,
                         (InternalProcessorContext<?, ?>) processorContext
                     );
-                    DeadLetterQueueObserver.recordSent(dlqRecordsSentSensor);
                 } else {
                     // Pre-existing KIP-1034 / custom-handler path: unchanged behaviour.
                     collector.send(

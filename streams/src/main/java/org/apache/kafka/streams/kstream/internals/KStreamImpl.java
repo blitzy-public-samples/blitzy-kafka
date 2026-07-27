@@ -20,6 +20,7 @@ import org.apache.kafka.common.internals.Topic;
 import org.apache.kafka.common.serialization.Serde;
 import org.apache.kafka.common.utils.Bytes;
 import org.apache.kafka.streams.KeyValue;
+import org.apache.kafka.streams.errors.TopologyException;
 import org.apache.kafka.streams.internals.ApiUtils;
 import org.apache.kafka.streams.kstream.BranchedKStream;
 import org.apache.kafka.streams.kstream.DeadLetterQueueOptions;
@@ -173,6 +174,20 @@ public class KStreamImpl<K, V> extends AbstractStream<K, V> implements KStream<K
             throw new IllegalStateException(
                 "withDeadLetterQueue could not locate an originating source node for this stream; "
                     + "the dead letter queue can only be enabled on streams derived from a source topic");
+        }
+
+        // Reject a DLQ topic that is itself an originating source of this stream — either by exact name or via a
+        // source topic pattern that matches it. Routing failures back into a source topic re-consumes, re-fails,
+        // and re-dead-letters the same record, amplifying one bad record into many (P16-03). Guard this at
+        // topology-build time so the unsafe configuration is rejected before the topology starts.
+        final Optional<String> sourceCollision =
+            DeadLetterQueueGraphNode.findSourceTopicCollision(graphNode, dlqTopic);
+        if (sourceCollision.isPresent()) {
+            throw new TopologyException(
+                "dead letter queue topic '" + dlqTopic + "' must not be an originating source of the same stream "
+                    + "(it collides with " + sourceCollision.get() + "); routing failed records back into a source "
+                    + "topic can recursively amplify a single failing record. Use a dedicated DLQ topic that is not "
+                    + "consumed by this topology.");
         }
 
         // Carry the immutable DLQ policy on a dedicated metadata node in this sub-graph rather than mutating shared

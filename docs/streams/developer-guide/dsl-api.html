@@ -4181,21 +4181,29 @@ stream.to(&quot;my-stream-output-topic&quot;, Produced.with(Serdes.String(), Ser
                or <b>serialization/production</b> when writing downstream are captured. Retriable broker/producer failures (for
                example, produce timeouts) are <b>not</b> dead-lettered and continue to use the producer's existing retry
                configuration. The call returns the same-typed <code>KStream&lt;K, V&gt;</code>, so it can be chained fluently.</p>
-            <p>Each DLQ record preserves the <b>original key and value bytes</b> of the failed record and attaches six diagnostic
-               headers: <code>dlq.exception.class</code>, <code>dlq.exception.message</code>, <code>dlq.source.topic</code>,
-               <code>dlq.source.partition</code>, <code>dlq.source.offset</code>, and <code>dlq.failure.timestamp</code>.</p>
+            <p>Each DLQ record preserves the <b>original key and value bytes</b> of the failed record. When header inclusion is
+               enabled (the default), it attaches six diagnostic headers: <code>dlq.exception.class</code>,
+               <code>dlq.exception.message</code>, <code>dlq.source.topic</code>, <code>dlq.source.partition</code>,
+               <code>dlq.source.offset</code>, and <code>dlq.failure.timestamp</code>; if the header-inclusion toggle is
+               disabled, no headers are attached. In addition, when a value is truncated to satisfy a configured maximum record
+               size, two annotation headers &mdash; <code>dlq.value.truncated</code> and <code>dlq.value.original.size</code>
+               &mdash; are attached so that the truncation is never silent.</p>
             <p><code>DeadLetterQueueOptions</code> configures (1) the DLQ topic name, (2) an optional maximum record size, and
                (3) whether the diagnostic headers are included (a header-inclusion toggle that defaults to <code>true</code>).
-               When a maximum record size is set and a failed record's value exceeds it, the value bytes are <b>truncated</b> to
-               fit &mdash; the record is never dropped &mdash; so every eligible failed record still reaches the DLQ. By default
-               no maximum is applied and the original value bytes are preserved verbatim.</p>
+               The maximum record size bounds the <b>combined</b> key and value length: when a failed record would exceed it, the
+               value bytes are <b>truncated</b> (the key is preserved verbatim) so the record still fits, and the truncation is
+               <b>annotated</b> with the <code>dlq.value.truncated</code> / <code>dlq.value.original.size</code> headers &mdash;
+               the record is never dropped on account of its size. By default no maximum is applied and the original key and value
+               bytes are preserved verbatim.</p>
             <p>DLQ records are produced through the <b>same Streams producer</b> used for normal output, and therefore reuse the
                application's existing security and authentication configuration &mdash; no new credential surface is introduced.
                Under exactly-once processing, a DLQ record is produced <b>within</b> the task's transaction and is committed or
                aborted atomically with it. DLQ delivery is <em>best-effort</em> in the following precise sense: if the DLQ write
                itself fails to be produced, the failure is escalated once (surfacing through the uncaught-exception handler)
-               rather than being retried indefinitely or re-routed. The DLQ metric and WARN log reflect the send <em>attempt</em>,
-               not a broker acknowledgement.</p>
+               rather than being retried indefinitely or re-routed. A single WARN log is emitted when a record is
+               <em>routed</em> to the DLQ (the routing attempt), while the <code>dlq-records-sent-total</code> metric is
+               incremented only once the broker <b>acknowledges</b> the DLQ record &mdash; so the metric counts records confirmed
+               persisted, and a DLQ write that fails is never counted as sent.</p>
             <p>The DLQ topic is assumed to <b>already exist</b>; Kafka Streams does not create it automatically. A
                <code>withDeadLetterQueue(...)</code> call takes precedence over the global
                <code>default.deadletterqueue.topic</code> / <code>default.deadletterqueue.enabled</code> configuration defaults,

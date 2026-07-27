@@ -85,10 +85,15 @@ public class DlqRecordBuilderTest {
     private static final String WIRE_SOURCE_PARTITION = "dlq.source.partition";
     private static final String WIRE_SOURCE_OFFSET = "dlq.source.offset";
     private static final String WIRE_FAILURE_TIMESTAMP = "dlq.failure.timestamp";
-    /** A seventh header that MUST NOT appear: the removed, non-contractual truncation marker. */
+    /**
+     * Truncation annotation headers (AAP §0.5.2: truncate AND annotate). These appear <em>only</em> when the
+     * value was truncated to satisfy {@code maxRecordSize} and header inclusion is enabled; they are absent on
+     * the common, non-truncated path.
+     */
     private static final String WIRE_VALUE_TRUNCATED = "dlq.value.truncated";
+    private static final String WIRE_VALUE_ORIGINAL_SIZE = "dlq.value.original.size";
 
-    /** The exact, complete set of headers the builder must emit when header inclusion is enabled. */
+    /** The exact set of core headers the builder must emit when header inclusion is enabled (no truncation). */
     private static final List<String> EXPECTED_HEADER_KEYS = List.of(
         WIRE_EXCEPTION_CLASS,
         WIRE_EXCEPTION_MESSAGE,
@@ -131,14 +136,38 @@ public class DlqRecordBuilderTest {
     }
 
     /**
-     * Assert the record carries EXACTLY the six {@code dlq.*} headers — no seventh marker and no stack-trace
-     * header — pinning the exact-header-count contract.
+     * Assert the record carries EXACTLY the six core {@code dlq.*} headers — no truncation annotation and no
+     * stack-trace header — pinning the non-truncated header contract.
      */
     private static void assertExactlySixHeaders(final Headers headers) {
         final List<String> keys = headerKeys(headers);
-        assertEquals(6, keys.size(), "expected exactly the six dlq.* headers but found: " + keys);
-        assertTrue(keys.containsAll(EXPECTED_HEADER_KEYS), "missing one of the six dlq.* headers: " + keys);
-        assertFalse(keys.contains(WIRE_VALUE_TRUNCATED), "the removed dlq.value.truncated header must not appear");
+        assertEquals(6, keys.size(), "expected exactly the six core dlq.* headers but found: " + keys);
+        assertTrue(keys.containsAll(EXPECTED_HEADER_KEYS), "missing one of the six core dlq.* headers: " + keys);
+        assertFalse(keys.contains(WIRE_VALUE_TRUNCATED),
+            "the dlq.value.truncated annotation must be absent on the non-truncated path");
+        assertFalse(keys.contains(WIRE_VALUE_ORIGINAL_SIZE),
+            "the dlq.value.original.size annotation must be absent on the non-truncated path");
+        assertNoDisallowedHeaders(keys);
+    }
+
+    /**
+     * Assert the record carries the six core {@code dlq.*} headers PLUS the two truncation annotation headers
+     * ({@code dlq.value.truncated="true"} and {@code dlq.value.original.size=<originalValueLength>}) — the
+     * truncate-AND-annotate contract of AAP §0.5.2 — and nothing else.
+     */
+    private static void assertSixHeadersPlusTruncationAnnotation(final Headers headers, final int originalValueLength) {
+        final List<String> keys = headerKeys(headers);
+        assertEquals(8, keys.size(),
+            "expected the six core dlq.* headers plus the two truncation annotation headers but found: " + keys);
+        assertTrue(keys.containsAll(EXPECTED_HEADER_KEYS), "missing one of the six core dlq.* headers: " + keys);
+        assertEquals("true", header(headers, WIRE_VALUE_TRUNCATED),
+            "a truncated value must carry dlq.value.truncated=true");
+        assertEquals(String.valueOf(originalValueLength), header(headers, WIRE_VALUE_ORIGINAL_SIZE),
+            "dlq.value.original.size must record the original (pre-truncation) value byte length");
+        assertNoDisallowedHeaders(keys);
+    }
+
+    private static void assertNoDisallowedHeaders(final List<String> keys) {
         for (final String key : keys) {
             assertFalse(key.contains("stacktrace"), "no stack-trace header must be emitted: " + key);
             assertFalse(key.startsWith("__streams.errors"), "KIP-1034 headers must not leak into the dlq.* scheme: " + key);
@@ -244,10 +273,12 @@ public class DlqRecordBuilderTest {
     }
 
     @Test
-    public void shouldTruncateValueToMaxRecordSizeWhenLarger() {
-        // Functional maxRecordSize (CR-04): an over-limit value is truncated to its first maxRecordSize bytes.
-        // The record is still produced (never dropped) with exactly six headers and NO seventh marker header.
-        final byte[] key = "k".getBytes(StandardCharsets.UTF_8);
+    public void shouldTruncateValueToFitCombinedKeyValueBoundWhenLargerAndAnnotate() {
+        // Functional maxRecordSize (CR-04 / P16-04): the bound is on the COMBINED key + value byte length. With a
+        // 1-byte key and maxRecordSize=4 the value budget is 3 bytes, so a 10-byte value is truncated to its first
+        // 3 bytes and key.length + value.length == maxRecordSize. The record is still produced (never dropped) and
+        // the truncation is ANNOTATED (AAP §0.5.2) with dlq.value.truncated=true + dlq.value.original.size=10.
+        final byte[] key = "k".getBytes(StandardCharsets.UTF_8); // 1 byte
         final byte[] value = "0123456789".getBytes(StandardCharsets.UTF_8); // 10 bytes
         final int maxRecordSize = 4;
 
@@ -255,49 +286,54 @@ public class DlqRecordBuilderTest {
             DLQ_TOPIC, key, value, context(), new RuntimeException("x"),
             DeadLetterQueueOptions.with(DLQ_TOPIC).withMaxRecordSize(maxRecordSize));
 
-        assertEquals(maxRecordSize, record.value().length, "value must be truncated to maxRecordSize bytes");
-        assertArrayEquals("0123".getBytes(StandardCharsets.UTF_8), record.value(),
-            "truncated value must be the original value's first maxRecordSize bytes");
+        assertEquals(3, record.value().length, "value must be truncated to maxRecordSize - key.length bytes");
+        assertArrayEquals("012".getBytes(StandardCharsets.UTF_8), record.value(),
+            "truncated value must be the original value's leading bytes that fit the combined bound");
+        assertTrue(record.key().length + record.value().length <= maxRecordSize,
+            "combined key + value length must not exceed maxRecordSize");
         assertArrayEquals(key, record.key(), "key must never be truncated");
         assertSame(key, record.key());
-        assertExactlySixHeaders(record.headers());
-        assertNull(record.headers().lastHeader(WIRE_VALUE_TRUNCATED), "no seventh truncation marker header");
+        assertSixHeadersPlusTruncationAnnotation(record.headers(), value.length);
     }
 
     @Test
-    public void shouldPreserveValueVerbatimWhenLengthEqualsMaxRecordSize() {
-        // Exact boundary: value length == maxRecordSize is within the limit, so it is preserved verbatim by
-        // reference (only a strictly-larger value is truncated).
-        final byte[] value = "0123".getBytes(StandardCharsets.UTF_8); // 4 bytes
+    public void shouldPreserveValueVerbatimWhenCombinedLengthEqualsMaxRecordSize() {
+        // Exact boundary: key.length + value.length == maxRecordSize is within the (combined) limit, so the value
+        // is preserved verbatim by reference (only a strictly-larger combined size is truncated) and no annotation
+        // is added.
+        final byte[] key = "k".getBytes(StandardCharsets.UTF_8);   // 1 byte
+        final byte[] value = "0123".getBytes(StandardCharsets.UTF_8); // 4 bytes -> combined 5
 
         final ProducerRecord<byte[], byte[]> record = DlqRecordBuilder.buildDeadLetterQueueRecord(
-            DLQ_TOPIC, "k".getBytes(StandardCharsets.UTF_8), value, context(), new RuntimeException("x"),
-            DeadLetterQueueOptions.with(DLQ_TOPIC).withMaxRecordSize(4));
+            DLQ_TOPIC, key, value, context(), new RuntimeException("x"),
+            DeadLetterQueueOptions.with(DLQ_TOPIC).withMaxRecordSize(5));
 
-        assertSame(value, record.value(), "value at the exact limit must not be copied or truncated");
-        assertNull(record.headers().lastHeader(WIRE_VALUE_TRUNCATED));
+        assertSame(value, record.value(), "value at the exact combined limit must not be copied or truncated");
+        assertExactlySixHeaders(record.headers());
     }
 
     @Test
     public void shouldTruncateOversizeValueAndEmitNoHeadersWhenHeaderInclusionDisabled() {
-        // maxRecordSize applies regardless of the header toggle: an over-limit value is truncated AND zero
-        // headers are emitted when header inclusion is disabled.
+        // maxRecordSize applies regardless of the header toggle: an over-limit value is truncated (to the combined
+        // budget) AND zero headers are emitted when header inclusion is disabled — so no annotation header either.
+        final byte[] key = "k".getBytes(StandardCharsets.UTF_8);   // 1 byte
         final byte[] value = "0123456789".getBytes(StandardCharsets.UTF_8); // 10 bytes
 
         final ProducerRecord<byte[], byte[]> record = DlqRecordBuilder.buildDeadLetterQueueRecord(
-            DLQ_TOPIC, "k".getBytes(StandardCharsets.UTF_8), value, context(), new RuntimeException("x"),
+            DLQ_TOPIC, key, value, context(), new RuntimeException("x"),
             DeadLetterQueueOptions.with(DLQ_TOPIC).withMaxRecordSize(4).withIncludeHeaders(false));
 
-        assertEquals(4, record.value().length, "value must still be truncated when headers are disabled");
-        assertArrayEquals("0123".getBytes(StandardCharsets.UTF_8), record.value());
-        assertEquals(0, headerKeys(record.headers()).size());
+        assertEquals(3, record.value().length, "value must still be truncated to the combined budget when headers are disabled");
+        assertArrayEquals("012".getBytes(StandardCharsets.UTF_8), record.value());
+        assertEquals(0, headerKeys(record.headers()).size(),
+            "no dlq.* header — core or annotation — may be emitted when header inclusion is disabled");
     }
 
     @Test
     public void shouldNotAllocateForLargeValueAtNoMaxRecordSizeButBoundItWhenLimited() {
         // Aliasing/allocation safety at the default: a multi-MiB value is passed through by reference (no copy)
-        // when NO_MAX_RECORD_SIZE. When a small limit is set, the value is bounded to that limit while the (small)
-        // key is still passed through verbatim.
+        // when NO_MAX_RECORD_SIZE. When a small limit is set, the value is bounded to (maxRecordSize - key.length)
+        // while the (small) key is still passed through verbatim, and the truncation is annotated.
         final byte[] largeKey = new byte[16];
         final byte[] largeValue = new byte[2 * 1024 * 1024]; // 2 MiB
 
@@ -306,13 +342,16 @@ public class DlqRecordBuilderTest {
             DeadLetterQueueOptions.with(DLQ_TOPIC)); // NO_MAX_RECORD_SIZE
         assertSame(largeValue, verbatim.value(), "value must be passed through without copying at NO_MAX_RECORD_SIZE");
 
+        final int maxRecordSize = 1024;
         final ProducerRecord<byte[], byte[]> bounded = DlqRecordBuilder.buildDeadLetterQueueRecord(
             DLQ_TOPIC, largeKey, largeValue, context(), new RuntimeException("big"),
-            DeadLetterQueueOptions.with(DLQ_TOPIC).withMaxRecordSize(1024));
+            DeadLetterQueueOptions.with(DLQ_TOPIC).withMaxRecordSize(maxRecordSize));
         assertSame(largeKey, bounded.key(), "key must be passed through without copying");
-        assertEquals(1024, bounded.value().length, "value must be bounded to maxRecordSize");
-        assertExactlySixHeaders(bounded.headers());
-        assertNull(bounded.headers().lastHeader(WIRE_VALUE_TRUNCATED));
+        assertEquals(maxRecordSize - largeKey.length, bounded.value().length,
+            "value must be bounded to maxRecordSize - key.length");
+        assertTrue(bounded.key().length + bounded.value().length <= maxRecordSize,
+            "combined key + value length must not exceed maxRecordSize");
+        assertSixHeadersPlusTruncationAnnotation(bounded.headers(), largeValue.length);
     }
 
     @Test
@@ -387,14 +426,76 @@ public class DlqRecordBuilderTest {
 
     @Test
     public void shouldExposePublicHeaderConstantsMatchingWireNames() {
-        // Pin the public constants to the exact on-the-wire names so any accidental drift is caught, and confirm
-        // the removed truncation-marker constant no longer exists as one of the emitted headers.
+        // Pin the public constants to the exact on-the-wire names so any accidental drift is caught, including the
+        // two truncation annotation headers.
         assertEquals(WIRE_EXCEPTION_CLASS, DlqRecordBuilder.HEADER_EXCEPTION_CLASS);
         assertEquals(WIRE_EXCEPTION_MESSAGE, DlqRecordBuilder.HEADER_EXCEPTION_MESSAGE);
         assertEquals(WIRE_SOURCE_TOPIC, DlqRecordBuilder.HEADER_SOURCE_TOPIC);
         assertEquals(WIRE_SOURCE_PARTITION, DlqRecordBuilder.HEADER_SOURCE_PARTITION);
         assertEquals(WIRE_SOURCE_OFFSET, DlqRecordBuilder.HEADER_SOURCE_OFFSET);
         assertEquals(WIRE_FAILURE_TIMESTAMP, DlqRecordBuilder.HEADER_FAILURE_TIMESTAMP);
+        assertEquals(WIRE_VALUE_TRUNCATED, DlqRecordBuilder.HEADER_VALUE_TRUNCATED);
+        assertEquals(WIRE_VALUE_ORIGINAL_SIZE, DlqRecordBuilder.HEADER_VALUE_ORIGINAL_SIZE);
+    }
+
+    @Test
+    public void shouldTruncateExceptionMessageOnCodePointBoundaryWhenSurrogatePairStraddlesLimit() {
+        // P16-05: the exception-message bound must cut on a Unicode code-point boundary, never splitting a
+        // surrogate pair. Build a message of (MAX_EXCEPTION_MESSAGE_LENGTH - 1) BMP filler chars followed by a
+        // supplementary code point (an emoji encoded as a high+low surrogate pair). The pair therefore straddles
+        // the MAX_EXCEPTION_MESSAGE_LENGTH boundary: its high surrogate is the last char that would be kept and
+        // its low surrogate is the first that would be dropped. A naive substring(0, MAX) would keep a dangling
+        // high surrogate; the code-point-safe bound must instead drop the whole pair, yielding MAX-1 chars.
+        final int max = DlqRecordBuilder.MAX_EXCEPTION_MESSAGE_LENGTH;
+        final String filler = "a".repeat(max - 1);
+        final String emoji = new String(Character.toChars(0x1F600)); // 😀 -> one high + one low surrogate
+        assertEquals(2, emoji.length(), "sanity: the emoji is a two-char surrogate pair");
+        final String message = filler + emoji + "trailing";
+        assertTrue(message.length() > max, "sanity: the message exceeds the bound so truncation occurs");
+
+        final ProducerRecord<byte[], byte[]> record = DlqRecordBuilder.buildDeadLetterQueueRecord(
+            DLQ_TOPIC, "k".getBytes(StandardCharsets.UTF_8), "v".getBytes(StandardCharsets.UTF_8),
+            context(), new RuntimeException(message), DeadLetterQueueOptions.with(DLQ_TOPIC));
+
+        final String recorded = header(record.headers(), WIRE_EXCEPTION_MESSAGE);
+        assertEquals(max - 1, recorded.length(),
+            "the surrogate pair straddling the boundary must be dropped as a unit, yielding MAX-1 chars");
+        assertEquals(filler, recorded, "the bounded message must be exactly the BMP filler prefix");
+        assertFalse(Character.isHighSurrogate(recorded.charAt(recorded.length() - 1)),
+            "the bounded message must not end with a dangling (unpaired) high surrogate");
+    }
+
+    @Test
+    public void shouldTruncateExceptionMessageInclusivelyWhenBoundaryDoesNotSplitAPair() {
+        // Complementary to the surrogate test: when the cut lands cleanly between BMP chars, the bound keeps
+        // exactly MAX_EXCEPTION_MESSAGE_LENGTH chars.
+        final int max = DlqRecordBuilder.MAX_EXCEPTION_MESSAGE_LENGTH;
+        final String message = "b".repeat(max + 500);
+
+        final ProducerRecord<byte[], byte[]> record = DlqRecordBuilder.buildDeadLetterQueueRecord(
+            DLQ_TOPIC, "k".getBytes(StandardCharsets.UTF_8), "v".getBytes(StandardCharsets.UTF_8),
+            context(), new RuntimeException(message), DeadLetterQueueOptions.with(DLQ_TOPIC));
+
+        final String recorded = header(record.headers(), WIRE_EXCEPTION_MESSAGE);
+        assertEquals(max, recorded.length(), "a clean (non-surrogate) boundary keeps exactly MAX chars");
+        assertEquals(message.substring(0, max), recorded);
+    }
+
+    @Test
+    public void shouldReduceValueToEmptyAndAnnotateWhenKeyAloneMeetsTheBound() {
+        // Edge of the combined-bound contract (P16-04): when the key alone already meets/exceeds maxRecordSize the
+        // value budget is zero, so the value is reduced to empty (never dropped) and the truncation is annotated.
+        final byte[] key = "keykey".getBytes(StandardCharsets.UTF_8); // 6 bytes
+        final byte[] value = "0123456789".getBytes(StandardCharsets.UTF_8); // 10 bytes
+
+        final ProducerRecord<byte[], byte[]> record = DlqRecordBuilder.buildDeadLetterQueueRecord(
+            DLQ_TOPIC, key, value, context(), new RuntimeException("x"),
+            DeadLetterQueueOptions.with(DLQ_TOPIC).withMaxRecordSize(4)); // < key.length
+
+        assertNotNull(record.value(), "value must never be dropped, only reduced");
+        assertEquals(0, record.value().length, "value budget is zero, so the value is reduced to empty");
+        assertArrayEquals(key, record.key(), "the key is always carried verbatim");
+        assertSixHeadersPlusTruncationAnnotation(record.headers(), value.length);
     }
 
     @Test

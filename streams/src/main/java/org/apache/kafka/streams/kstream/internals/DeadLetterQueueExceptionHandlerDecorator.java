@@ -85,12 +85,16 @@ import java.util.Map;
  * <p>Each decorator supports two immutable configuration forms. The <em>single-config</em> form (a DSL topic /
  * options, with the global default filled in by {@link #configure(Map) configure}) routes every eligible failure it
  * sees to one effective topic and is used for the per-source deserialization wiring and by unit tests. The
- * <em>per-source-origin</em> form ({@link ProcessingDecorator} / {@link ProductionDecorator} only) carries an
- * immutable {@code Map<sourceTopic, DeadLetterQueueOptions>} plus a resolved global fallback and is used by the
- * task-scoped runtime install: because a processing/production exception handler is shared across an entire
- * subtopology (which may contain several sources that opted in to <em>different</em> DLQ topics — e.g. a merge),
- * the effective config is resolved per failed record from its originating source ({@link ErrorHandlerContext#topic()}),
- * preserving independent per-source policies and the DSL-per-source &rarr; global precedence.
+ * <em>per-node</em> form ({@link ProcessingDecorator} / {@link ProductionDecorator} only) carries an immutable
+ * {@code Map<nodeName, DeadLetterQueueOptions>} plus a resolved global fallback and is used by the task-scoped
+ * runtime install: because a processing/production exception handler is shared across an entire subtopology (which
+ * may contain several opted-in sub-graphs routing to <em>different</em> DLQ topics — e.g. two branches of a
+ * {@code split}), the effective config is resolved per failed record from the node in which the failure occurred
+ * ({@link ErrorHandlerContext#processorNodeId()}). Keying by node rather than by source topic keeps an opt-in on one
+ * branch from leaking into an unopted sibling branch (P4-01) and routes a failure from a dynamically-matched
+ * {@code Pattern} topic by stable node identity (P16-01 / P16-02), while preserving independent per-sub-graph
+ * policies and the DSL &rarr; global precedence. Deserialization keeps its source-scoped single-config form because
+ * a record is deserialized before it is routed to any branch.
  *
  * <p>The authoritative {@code dlq-records-sent-total} metric and the per-write {@code WARN} log are emitted at the
  * runtime send sites in {@code org.apache.kafka.streams.processor.internals}, not here; this class only performs
@@ -105,6 +109,28 @@ public final class DeadLetterQueueExceptionHandlerDecorator {
 
     private DeadLetterQueueExceptionHandlerDecorator() {
         // non-instantiable holder for the three nested decorators
+    }
+
+    /**
+     * Validate that a wrapped delegate handler returned a non-null response before the decorator augments or replaces
+     * it. A custom exception handler must return a non-null response; silently substituting a DLQ {@code resume} for a
+     * {@code null} would both mask a broken handler and, for an opted-in node, turn a handler that never returned a
+     * decision into a spurious resume (P5-02). All three decorators apply this uniformly (the production path
+     * previously relied on an incidental {@code NullPointerException} from {@code response.result()}; this makes the
+     * rejection explicit and message-bearing). The {@code null}-delegate case never reaches here because each
+     * decorator synthesizes a non-null default response for a {@code null} delegate.
+     *
+     * @param delegateResponse   the response returned by the wrapped delegate
+     * @param handlerDescription a human-readable description of the delegate handler contract, for the message
+     * @throws NullPointerException if {@code delegateResponse} is {@code null}
+     */
+    private static void requireDelegateResponse(final Object delegateResponse, final String handlerDescription) {
+        if (delegateResponse == null) {
+            throw new NullPointerException(
+                "The wrapped " + handlerDescription + " returned a null response. A custom exception handler must "
+                    + "return a non-null response; the dead letter queue decorator will not substitute a response "
+                    + "for null.");
+        }
     }
 
     /**
@@ -267,6 +293,7 @@ public final class DeadLetterQueueExceptionHandlerDecorator {
             final Response delegateResponse = delegate == null
                 ? Response.resume()
                 : delegate.handleError(context, record, exception);
+            requireDelegateResponse(delegateResponse, "DeserializationExceptionHandler");
             final String topic = resolveTopic(dlqTopic, options, globalDefaultTopic);
             if (!isEnabled(dlqTopic, options, topic, globalDefaultEnabled)
                     || !DeadLetterQueueEligibility.isDeserializationEligible(exception)) {
@@ -311,12 +338,15 @@ public final class DeadLetterQueueExceptionHandlerDecorator {
         // in by configure(). Both null on the per-source-map form.
         private final String dlqTopic;
         private final DeadLetterQueueOptions options;
-        // Per-source-origin form (used by the task-scoped runtime install): an immutable topic -> options map keyed
-        // by SOURCE topic, consulted first via the record's ErrorHandlerContext#topic(), plus a resolved global
-        // fallback. Because a production exception handler is shared across a whole subtopology (which may contain
-        // several sources that opted in with DIFFERENT DLQ topics, e.g. a merge), the effective config is resolved
-        // per failed record from its originating source rather than from one collapsed subtopology-wide value.
-        private final Map<String, DeadLetterQueueOptions> perSourceConfig;
+        // Per-node form (used by the task-scoped runtime install): an immutable nodeName -> options map keyed by the
+        // PROCESSOR/SINK NODE in which the failure occurs, consulted first via the record's
+        // ErrorHandlerContext#processorNodeId(), plus a resolved global fallback. A production exception handler is
+        // shared across a whole subtopology, which may contain several opted-in sub-graphs routing to DIFFERENT DLQ
+        // topics (e.g. two branches of a split, or a merge); the effective config is therefore resolved per failed
+        // record from its failing node rather than from one collapsed subtopology-wide value. Keying by node (not
+        // source topic) prevents an opt-in on one branch from leaking into an unopted sibling (P4-01) and routes a
+        // dynamically-matched Pattern topic by stable node identity (P16-01/P16-02).
+        private final Map<String, DeadLetterQueueOptions> perNodeConfig;
         private final DeadLetterQueueOptions explicitGlobalOptions;
         private final boolean resolvedAtConstruction;
         private String globalDefaultTopic;
@@ -338,31 +368,32 @@ public final class DeadLetterQueueExceptionHandlerDecorator {
             this.delegate = delegate;
             this.dlqTopic = dlqTopic;
             this.options = options;
-            this.perSourceConfig = Collections.emptyMap();
+            this.perNodeConfig = Collections.emptyMap();
             this.explicitGlobalOptions = null;
             this.resolvedAtConstruction = false;
         }
 
         /**
-         * Create a per-source-origin decorator used by the task-scoped runtime install. Each failed record is
-         * routed using the DLQ options of its <em>originating source topic</em>
-         * ({@link ErrorHandlerContext#topic()}); a record whose source is not present in the map falls back to
-         * {@code globalOptions}. This preserves independent per-source policies within one subtopology (so a merge
-         * of two sources that opted in to different DLQ topics routes each source's failures to its own topic)
-         * while keeping the DSL-per-source &rarr; global precedence.
+         * Create a per-node decorator used by the task-scoped runtime install. Each failed record is routed using
+         * the DLQ options of the <em>node in which the failure occurred</em>
+         * ({@link ErrorHandlerContext#processorNodeId()}); a record whose node is not present in the map falls back
+         * to {@code globalOptions}. This preserves independent per-sub-graph policies within one subtopology (so two
+         * branches of a {@code split} that opted in to different DLQ topics each route their own failures) while
+         * keeping the DSL &rarr; global precedence, and keeps an opt-in on one branch from leaking into an unopted
+         * sibling (P4-01).
          *
-         * @param delegate         the wrapped handler (already configured); may be {@code null}
-         * @param perSourceConfig  immutable map of source topic &rarr; DLQ options for the opted-in sources
-         * @param globalOptions    the resolved global fallback options, or {@code null} when the global default is
-         *                         disabled/unset
+         * @param delegate       the wrapped handler (already configured); may be {@code null}
+         * @param perNodeConfig  immutable map of processor/sink node name &rarr; DLQ options for the opted-in nodes
+         * @param globalOptions  the resolved global fallback options, or {@code null} when the global default is
+         *                       disabled/unset
          */
         public ProductionDecorator(final ProductionExceptionHandler delegate,
-                final Map<String, DeadLetterQueueOptions> perSourceConfig,
+                final Map<String, DeadLetterQueueOptions> perNodeConfig,
                 final DeadLetterQueueOptions globalOptions) {
             this.delegate = delegate;
             this.dlqTopic = null;
             this.options = null;
-            this.perSourceConfig = Map.copyOf(perSourceConfig);
+            this.perNodeConfig = Map.copyOf(perNodeConfig);
             this.explicitGlobalOptions = globalOptions;
             this.resolvedAtConstruction = true;
         }
@@ -379,17 +410,19 @@ public final class DeadLetterQueueExceptionHandlerDecorator {
         }
 
         /**
-         * Resolve the effective DLQ options for a failed record: the per-source-origin map (keyed by
-         * {@link ErrorHandlerContext#topic()}) first, then the global fallback, then — on the single-config form —
-         * the DSL/global resolution captured at construction/configure. Returns {@code null} when DLQ routing is
-         * not enabled for the record.
+         * Resolve the effective DLQ options for a failed record: the per-node map (keyed by
+         * {@link ErrorHandlerContext#processorNodeId()}) first, then the global fallback, then — on the single-config
+         * form — the DSL/global resolution captured at construction/configure. Returns {@code null} when DLQ routing
+         * is not enabled for the record. For a produce/serialization failure the runtime passes the offending sink
+         * node's name as the {@code processorNodeId}, so a sink opted in by a downstream {@code withDeadLetterQueue}
+         * resolves correctly here.
          */
         private DeadLetterQueueOptions resolveConfig(final ErrorHandlerContext context) {
-            final String sourceTopic = context == null ? null : context.topic();
-            if (sourceTopic != null) {
-                final DeadLetterQueueOptions perSource = perSourceConfig.get(sourceTopic);
-                if (perSource != null) {
-                    return perSource;
+            final String nodeId = context == null ? null : context.processorNodeId();
+            if (nodeId != null) {
+                final DeadLetterQueueOptions perNode = perNodeConfig.get(nodeId);
+                if (perNode != null) {
+                    return perNode;
                 }
             }
             if (resolvedAtConstruction) {
@@ -409,6 +442,7 @@ public final class DeadLetterQueueExceptionHandlerDecorator {
             final Response delegateResponse = delegate == null
                 ? (exception instanceof RetriableException ? Response.retry() : Response.fail())
                 : delegate.handleError(context, record, exception);
+            requireDelegateResponse(delegateResponse, "ProductionExceptionHandler");
             final DeadLetterQueueOptions effective = resolveConfig(context);
             if (effective == null
                     || delegateResponse.result() == Result.RETRY
@@ -437,6 +471,7 @@ public final class DeadLetterQueueExceptionHandlerDecorator {
             final Response delegateResponse = delegate == null
                 ? Response.fail()
                 : delegate.handleSerializationError(context, record, exception, origin);
+            requireDelegateResponse(delegateResponse, "ProductionExceptionHandler");
             final DeadLetterQueueOptions effective = resolveConfig(context);
             if (effective == null
                     || delegateResponse.result() == Result.RETRY
@@ -454,30 +489,31 @@ public final class DeadLetterQueueExceptionHandlerDecorator {
         }
 
         /**
-         * @return the DSL-supplied DLQ topic for the single-config form, or {@code null} on the per-source-origin
-         *         form (query {@link #perSourceDlqOptions()} / {@link #globalDlqOptions()} instead)
+         * @return the DSL-supplied DLQ topic for the single-config form, or {@code null} on the per-node form
+         *         (query {@link #perNodeDlqOptions()} / {@link #globalDlqOptions()} instead)
          */
         public String deadLetterQueueTopic() {
             return dlqTopic;
         }
 
         /**
-         * @return the immutable DSL options for the single-config form, or {@code null} on the per-source-origin
-         *         form or the global-only path
+         * @return the immutable DSL options for the single-config form, or {@code null} on the per-node form or the
+         *         global-only path
          */
         public DeadLetterQueueOptions deadLetterQueueOptions() {
             return options;
         }
 
         /**
-         * @return the immutable per-source-origin topic &rarr; options map (empty on the single-config form)
+         * @return the immutable per-node (processor/sink node name) &rarr; options map (empty on the single-config
+         *         form)
          */
-        public Map<String, DeadLetterQueueOptions> perSourceDlqOptions() {
-            return perSourceConfig;
+        public Map<String, DeadLetterQueueOptions> perNodeDlqOptions() {
+            return perNodeConfig;
         }
 
         /**
-         * @return the resolved global fallback options on the per-source-origin form, or {@code null}
+         * @return the resolved global fallback options on the per-node form, or {@code null}
          */
         public DeadLetterQueueOptions globalDlqOptions() {
             return explicitGlobalOptions;
@@ -496,12 +532,15 @@ public final class DeadLetterQueueExceptionHandlerDecorator {
         // with the global default filled in by configure(). Both null on the per-source-map form.
         private final String dlqTopic;
         private final DeadLetterQueueOptions options;
-        // Per-source-origin form (used by the task-scoped runtime install): topic -> options keyed by SOURCE topic,
-        // consulted first via the record's ErrorHandlerContext#topic(), plus a resolved global fallback. A
-        // processing exception handler is shared across a whole subtopology (all of its nodes are initialized with
-        // the same handler), which may span several sources that opted in with DIFFERENT DLQ topics; the effective
-        // config is therefore resolved per failed record from its originating source.
-        private final Map<String, DeadLetterQueueOptions> perSourceConfig;
+        // Per-node form (used by the task-scoped runtime install): nodeName -> options keyed by the PROCESSOR NODE in
+        // which the failure occurs, consulted first via the record's ErrorHandlerContext#processorNodeId(), plus a
+        // resolved global fallback. A processing exception handler is shared across a whole subtopology (all of its
+        // nodes are initialized with the same handler), which may contain several opted-in sub-graphs routing to
+        // DIFFERENT DLQ topics (e.g. two branches of a split); the effective config is therefore resolved per failed
+        // record from its failing node. Keying by node (not source topic) prevents an opt-in on one branch from
+        // leaking into an unopted sibling (P4-01) and routes a dynamically-matched Pattern topic by stable node
+        // identity (P16-01/P16-02).
+        private final Map<String, DeadLetterQueueOptions> perNodeConfig;
         private final DeadLetterQueueOptions explicitGlobalOptions;
         private final boolean resolvedAtConstruction;
         private String globalDefaultTopic;
@@ -522,29 +561,29 @@ public final class DeadLetterQueueExceptionHandlerDecorator {
             this.delegate = delegate;
             this.dlqTopic = dlqTopic;
             this.options = options;
-            this.perSourceConfig = Collections.emptyMap();
+            this.perNodeConfig = Collections.emptyMap();
             this.explicitGlobalOptions = null;
             this.resolvedAtConstruction = false;
         }
 
         /**
-         * Create a per-source-origin decorator used by the task-scoped runtime install. Each failed record is
-         * routed using the DLQ options of its <em>originating source topic</em>
-         * ({@link ErrorHandlerContext#topic()}); a record whose source is not present in the map falls back to
-         * {@code globalOptions}. A punctuation-origin failure (no source record) is never dead-lettered, per
+         * Create a per-node decorator used by the task-scoped runtime install. Each failed record is routed using
+         * the DLQ options of the <em>node in which the failure occurred</em>
+         * ({@link ErrorHandlerContext#processorNodeId()}); a record whose node is not present in the map falls back
+         * to {@code globalOptions}. A punctuation-origin failure (no source record) is never dead-lettered, per
          * {@link DeadLetterQueueEligibility#isProcessingEligible}.
          *
-         * @param delegate         the wrapped handler (already configured); may be {@code null}
-         * @param perSourceConfig  immutable map of source topic &rarr; DLQ options for the opted-in sources
-         * @param globalOptions    the resolved global fallback options, or {@code null} when disabled/unset
+         * @param delegate       the wrapped handler (already configured); may be {@code null}
+         * @param perNodeConfig  immutable map of processor node name &rarr; DLQ options for the opted-in nodes
+         * @param globalOptions  the resolved global fallback options, or {@code null} when disabled/unset
          */
         public ProcessingDecorator(final ProcessingExceptionHandler delegate,
-                final Map<String, DeadLetterQueueOptions> perSourceConfig,
+                final Map<String, DeadLetterQueueOptions> perNodeConfig,
                 final DeadLetterQueueOptions globalOptions) {
             this.delegate = delegate;
             this.dlqTopic = null;
             this.options = null;
-            this.perSourceConfig = Map.copyOf(perSourceConfig);
+            this.perNodeConfig = Map.copyOf(perNodeConfig);
             this.explicitGlobalOptions = globalOptions;
             this.resolvedAtConstruction = true;
         }
@@ -561,17 +600,17 @@ public final class DeadLetterQueueExceptionHandlerDecorator {
         }
 
         /**
-         * Resolve the effective DLQ options for a failed record: the per-source-origin map (keyed by
-         * {@link ErrorHandlerContext#topic()}) first, then the global fallback, then — on the single-config form —
-         * the DSL/global resolution captured at construction/configure. Returns {@code null} when DLQ routing is
-         * not enabled for the record.
+         * Resolve the effective DLQ options for a failed record: the per-node map (keyed by
+         * {@link ErrorHandlerContext#processorNodeId()}) first, then the global fallback, then — on the single-config
+         * form — the DSL/global resolution captured at construction/configure. Returns {@code null} when DLQ routing
+         * is not enabled for the record.
          */
         private DeadLetterQueueOptions resolveConfig(final ErrorHandlerContext context) {
-            final String sourceTopic = context == null ? null : context.topic();
-            if (sourceTopic != null) {
-                final DeadLetterQueueOptions perSource = perSourceConfig.get(sourceTopic);
-                if (perSource != null) {
-                    return perSource;
+            final String nodeId = context == null ? null : context.processorNodeId();
+            if (nodeId != null) {
+                final DeadLetterQueueOptions perNode = perNodeConfig.get(nodeId);
+                if (perNode != null) {
+                    return perNode;
                 }
             }
             if (resolvedAtConstruction) {
@@ -591,6 +630,7 @@ public final class DeadLetterQueueExceptionHandlerDecorator {
             final Response delegateResponse = delegate == null
                 ? Response.resume()
                 : delegate.handleError(context, record, exception);
+            requireDelegateResponse(delegateResponse, "ProcessingExceptionHandler");
             final DeadLetterQueueOptions effective = resolveConfig(context);
             if (effective == null
                     || !DeadLetterQueueEligibility.isProcessingEligible(exception, context)) {
@@ -607,8 +647,8 @@ public final class DeadLetterQueueExceptionHandlerDecorator {
         }
 
         /**
-         * @return the DSL-supplied DLQ topic for the single-config form, or {@code null} on the per-source-origin
-         *         form (query {@link #perSourceDlqOptions()} / {@link #globalDlqOptions()} instead)
+         * @return the DSL-supplied DLQ topic for the single-config form, or {@code null} on the per-node form
+         *         (query {@link #perNodeDlqOptions()} / {@link #globalDlqOptions()} instead)
          */
         public String deadLetterQueueTopic() {
             return dlqTopic;
@@ -622,14 +662,14 @@ public final class DeadLetterQueueExceptionHandlerDecorator {
         }
 
         /**
-         * @return the immutable per-source-origin topic &rarr; options map (empty on the single-config form)
+         * @return the immutable per-node (processor node name) &rarr; options map (empty on the single-config form)
          */
-        public Map<String, DeadLetterQueueOptions> perSourceDlqOptions() {
-            return perSourceConfig;
+        public Map<String, DeadLetterQueueOptions> perNodeDlqOptions() {
+            return perNodeConfig;
         }
 
         /**
-         * @return the resolved global fallback options on the per-source-origin form, or {@code null}
+         * @return the resolved global fallback options on the per-node form, or {@code null}
          */
         public DeadLetterQueueOptions globalDlqOptions() {
             return explicitGlobalOptions;

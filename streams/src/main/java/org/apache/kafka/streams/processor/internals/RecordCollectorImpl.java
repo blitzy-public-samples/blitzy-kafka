@@ -309,7 +309,9 @@ public class RecordCollectorImpl implements RecordCollector {
      * {@link StreamsProducer#send(ProducerRecord, org.apache.kafka.clients.producer.Callback)} — is escalated exactly
      * once via {@link #sendException} so the {@code StreamThread} surfaces it through the uncaught-exception path,
      * instead of being routed back into the production error handler (which could otherwise return another DLQ record
-     * and recurse indefinitely). A successful DLQ send is bookkept exactly like any other produced record.
+     * and recurse indefinitely). A successful DLQ send is bookkept exactly like any other produced record and, on the
+     * opt-in DLQ path, additionally increments the {@code dlq-records-sent-total} metric — but only once the broker
+     * acknowledges the record (P5-05, ack-based counting), so a DLQ send that fails is never counted as sent.
      */
     private <K, V> void doSend(final K key,
                                final V value,
@@ -317,6 +319,18 @@ public class RecordCollectorImpl implements RecordCollector {
                                final InternalProcessorContext<?, ?> context,
                                final ProducerRecord<byte[], byte[]> serializedRecord,
                                final boolean isDeadLetterQueueRecord) {
+
+        // Ack-based DLQ counting (P5-05 / MA-08): resolve the dlq-records-sent sensor here, on the calling
+        // StreamThread, and capture it for the asynchronous callback. The producer completion callback runs on the
+        // producer's Sender thread, where {@code Thread.currentThread().getName()} would carry the wrong
+        // {@code thread-id} tag, so the sensor must NOT be resolved inside the callback. It is resolved lazily on the
+        // opt-in DLQ path only ({@code isDeadLetterQueueRecord}), so a topology that does not opt in never registers
+        // the sensor and keeps byte-for-byte identical non-opt-in behaviour. The sensor is used to increment
+        // {@code dlq-records-sent-total} only once the broker acknowledges the DLQ record (success branch below), so
+        // the metric counts confirmed DLQ persistence rather than send attempts.
+        final Sensor dlqRecordsSentSensor = isDeadLetterQueueRecord
+            ? TaskMetrics.dlqRecordsSentSensor(Thread.currentThread().getName(), taskId.toString(), streamsMetrics)
+            : null;
 
         try {
             streamsProducer.send(serializedRecord, (metadata, exception) -> {
@@ -352,6 +366,15 @@ public class RecordCollectorImpl implements RecordCollector {
                                 bytesProduced,
                                 context.currentSystemTimeMs()
                             );
+                        }
+
+                        if (isDeadLetterQueueRecord) {
+                            // Ack-based DLQ counting (P5-05): increment dlq-records-sent-total only now that the
+                            // broker has acknowledged the DLQ record, so the metric reflects confirmed DLQ
+                            // persistence. A DLQ send that fails is handled in the exception branch below (escalated
+                            // exactly once via the recursion guard) and is deliberately NOT counted here, so a failed
+                            // DLQ send never emits a false "sent" signal.
+                            DeadLetterQueueObserver.recordSent(dlqRecordsSentSensor);
                         }
                     } else if (isDeadLetterQueueRecord) {
                         // Recursion guard (MA-05): a DLQ record that itself failed to produce must NOT be routed back
@@ -415,8 +438,10 @@ public class RecordCollectorImpl implements RecordCollector {
      * <p>Only the opt-in, DSL-level DLQ path — identified by the production exception handler being the
      * {@link DeadLetterQueueExceptionHandlerDecorator.ProductionDecorator DLQ-aware production decorator} — is
      * recursion-guarded and observed: each record is produced through the guarded {@link #doSend} path (MA-05),
-     * counted once on the {@code dlq-records-sent} sensor (MA-08), and a single targeted WARN carrying only the
-     * exception class and source coordinates (never the throwable or payload) is emitted per failure event (MA-09).
+     * counted once on the {@code dlq-records-sent} sensor when the broker acknowledges it (MA-08 / P5-05, so the
+     * metric reflects confirmed DLQ persistence rather than send attempts), and a single targeted WARN carrying only
+     * the exception class and source coordinates (never the throwable or payload) is emitted per failure event when
+     * the record is routed to the DLQ (MA-09).
      * Records returned by the pre-existing KIP-1034 global-config path or a custom handler are produced through the
      * ordinary {@link #send} path exactly as before, so non-opt-in behaviour is byte-for-byte unchanged.
      *
@@ -434,11 +459,12 @@ public class RecordCollectorImpl implements RecordCollector {
         }
         final boolean optInDeadLetterQueue =
             productionExceptionHandler instanceof DeadLetterQueueExceptionHandlerDecorator.ProductionDecorator;
-        final Sensor dlqRecordsSentSensor = optInDeadLetterQueue
-            ? TaskMetrics.dlqRecordsSentSensor(Thread.currentThread().getName(), taskId.toString(), context.metrics())
-            : null;
         for (final ProducerRecord<byte[], byte[]> deadLetterQueueRecord : deadLetterQueueRecords) {
             if (optInDeadLetterQueue) {
+                // Recursion-guarded DLQ send (MA-05). The dlq-records-sent-total metric is NOT incremented here at
+                // the send attempt; it is incremented inside doSend's producer callback only once the broker
+                // acknowledges the DLQ record (P5-05, ack-based counting), so a failed DLQ send emits no false
+                // "sent" signal.
                 doSend(
                     deadLetterQueueRecord.key(),
                     deadLetterQueueRecord.value(),
@@ -447,7 +473,6 @@ public class RecordCollectorImpl implements RecordCollector {
                     deadLetterQueueRecord,
                     true
                 );
-                DeadLetterQueueObserver.recordSent(dlqRecordsSentSensor);
             } else {
                 send(
                     deadLetterQueueRecord.key(),
@@ -459,6 +484,8 @@ public class RecordCollectorImpl implements RecordCollector {
             }
         }
         if (optInDeadLetterQueue) {
+            // A single targeted WARN per failure event, emitted when the record is ROUTED to the DLQ (attempt
+            // semantics, before the asynchronous acknowledgement) — see DeadLetterQueueObserver.warn (P9-02).
             final ProcessorRecordContext recordContext = context.recordContext();
             DeadLetterQueueObserver.warn(
                 log,

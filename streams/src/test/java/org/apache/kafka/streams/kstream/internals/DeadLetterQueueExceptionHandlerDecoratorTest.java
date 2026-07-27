@@ -46,6 +46,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
@@ -146,6 +147,23 @@ public class DeadLetterQueueExceptionHandlerDecoratorTest {
 
     private static ProducerRecord<byte[], byte[]> producerRecord() {
         return new ProducerRecord<>("output-topic", RECORD_KEY, RECORD_VALUE);
+    }
+
+    // An error context carrying a specific processorNodeId (the node in which a processing/production failure
+    // occurred) plus a valid source record, so processing eligibility passes. Used by the node-scoped routing tests.
+    private static DefaultErrorHandlerContext contextForNode(final String processorNodeId) {
+        return new DefaultErrorHandlerContext(
+            null,
+            SOURCE_TOPIC,
+            SOURCE_PARTITION,
+            SOURCE_OFFSET,
+            null,
+            processorNodeId,
+            new TaskId(0, 0),
+            SOURCE_TIMESTAMP,
+            RAW_KEY,
+            RAW_VALUE
+        );
     }
 
     private static String header(final Headers headers, final String key) {
@@ -701,5 +719,173 @@ public class DeadLetterQueueExceptionHandlerDecoratorTest {
         decorator.configure(configs);
 
         verify(delegate).configure(configs);
+    }
+
+    // ------------------------------------------------------------------------------------------------------------
+    // P5-02: a non-null delegate that returns a null Response is a contract violation. The decorator must fail fast
+    // with a clear NullPointerException naming the offending handler, rather than NPE'ing opaquely later while
+    // inspecting response.result(). (The delegate==null case is a separate, supported default and is covered above.)
+    // ------------------------------------------------------------------------------------------------------------
+
+    @Test
+    public void shouldThrowWhenDeserializationDelegateReturnsNullResponse() {
+        final DeserializationExceptionHandler delegate = mock(DeserializationExceptionHandler.class);
+        when(delegate.handleError(any(), any(), any())).thenReturn(null);
+
+        final DeadLetterQueueExceptionHandlerDecorator.DeserializationDecorator decorator =
+            new DeadLetterQueueExceptionHandlerDecorator.DeserializationDecorator(delegate, DLQ_DSL_TOPIC, null);
+        decorator.configure(configs(null, false));
+
+        final NullPointerException e = assertThrows(NullPointerException.class,
+            () -> decorator.handleError(context(), consumerRecord(), new RuntimeException("boom")));
+        assertTrue(e.getMessage().contains("DeserializationExceptionHandler"),
+            "message should name the offending handler: " + e.getMessage());
+    }
+
+    @Test
+    public void shouldThrowWhenProductionDelegateReturnsNullResponse() {
+        final ProductionExceptionHandler delegate = mock(ProductionExceptionHandler.class);
+        when(delegate.handleError(any(), any(), any())).thenReturn(null);
+
+        final DeadLetterQueueExceptionHandlerDecorator.ProductionDecorator decorator =
+            new DeadLetterQueueExceptionHandlerDecorator.ProductionDecorator(delegate, DLQ_DSL_TOPIC, null);
+        decorator.configure(configs(null, false));
+
+        final NullPointerException e = assertThrows(NullPointerException.class,
+            () -> decorator.handleError(context(), producerRecord(), new RuntimeException("boom")));
+        assertTrue(e.getMessage().contains("ProductionExceptionHandler"),
+            "message should name the offending handler: " + e.getMessage());
+    }
+
+    @Test
+    public void shouldThrowWhenProductionDelegateReturnsNullResponseOnSerializationError() {
+        final ProductionExceptionHandler delegate = mock(ProductionExceptionHandler.class);
+        when(delegate.handleSerializationError(any(), any(), any(), any())).thenReturn(null);
+
+        final DeadLetterQueueExceptionHandlerDecorator.ProductionDecorator decorator =
+            new DeadLetterQueueExceptionHandlerDecorator.ProductionDecorator(delegate, DLQ_DSL_TOPIC, null);
+        decorator.configure(configs(null, false));
+
+        final NullPointerException e = assertThrows(NullPointerException.class,
+            () -> decorator.handleSerializationError(context(), producerRecord(),
+                new SerializationException("bad"), ProductionExceptionHandler.SerializationExceptionOrigin.VALUE));
+        assertTrue(e.getMessage().contains("ProductionExceptionHandler"),
+            "message should name the offending handler: " + e.getMessage());
+    }
+
+    @Test
+    public void shouldThrowWhenProcessingDelegateReturnsNullResponse() {
+        final ProcessingExceptionHandler delegate = mock(ProcessingExceptionHandler.class);
+        when(delegate.handleError(any(), any(), any())).thenReturn(null);
+
+        final DeadLetterQueueExceptionHandlerDecorator.ProcessingDecorator decorator =
+            new DeadLetterQueueExceptionHandlerDecorator.ProcessingDecorator(delegate, DLQ_DSL_TOPIC, null);
+        decorator.configure(configs(null, false));
+
+        final NullPointerException e = assertThrows(NullPointerException.class,
+            () -> decorator.handleError(context(), new Record<>("k", "v", SOURCE_TIMESTAMP),
+                new RuntimeException("boom")));
+        assertTrue(e.getMessage().contains("ProcessingExceptionHandler"),
+            "message should name the offending handler: " + e.getMessage());
+    }
+
+    // ------------------------------------------------------------------------------------------------------------
+    // P4-01: processing/production routing is keyed by the FAILING node (ErrorHandlerContext#processorNodeId()), not
+    // by source topic. An opt-in on one branch must therefore route only that branch's nodes and must NOT leak into
+    // an unopted sibling branch that shares the same source topic.
+    // ------------------------------------------------------------------------------------------------------------
+
+    @Test
+    public void shouldRouteProductionToPerNodeDlqTopicByFailingNodeId() {
+        final ProductionExceptionHandler delegate = mock(ProductionExceptionHandler.class);
+        when(delegate.handleError(any(), any(), any())).thenReturn(ProductionExceptionHandler.Response.fail());
+
+        final Map<String, DeadLetterQueueOptions> byNode = new HashMap<>();
+        byNode.put("sink-A", DeadLetterQueueOptions.with("dlq-A"));
+        byNode.put("sink-B", DeadLetterQueueOptions.with("dlq-B"));
+        final DeadLetterQueueExceptionHandlerDecorator.ProductionDecorator decorator =
+            new DeadLetterQueueExceptionHandlerDecorator.ProductionDecorator(delegate, byNode, null);
+        decorator.configure(configs(null, false));
+
+        // A produce failure at sink-A routes to dlq-A; the same failure at sink-B routes to dlq-B - each opted-in
+        // node keeps its own DLQ policy within the one shared production handler.
+        final ProductionExceptionHandler.Response a =
+            decorator.handleError(contextForNode("sink-A"), producerRecord(), new RuntimeException("boom"));
+        assertEquals(ProductionExceptionHandler.Result.RESUME, a.result());
+        assertEquals("dlq-A", a.deadLetterQueueRecords().get(0).topic());
+
+        final ProductionExceptionHandler.Response b =
+            decorator.handleError(contextForNode("sink-B"), producerRecord(), new RuntimeException("boom"));
+        assertEquals("dlq-B", b.deadLetterQueueRecords().get(0).topic());
+    }
+
+    @Test
+    public void shouldNotRouteProductionForUnoptedSiblingNode() {
+        final ProductionExceptionHandler delegate = mock(ProductionExceptionHandler.class);
+        final ProductionExceptionHandler.Response delegateResponse = ProductionExceptionHandler.Response.fail();
+        when(delegate.handleError(any(), any(), any())).thenReturn(delegateResponse);
+
+        final Map<String, DeadLetterQueueOptions> byNode = new HashMap<>();
+        byNode.put("sink-A", DeadLetterQueueOptions.with("dlq-A"));
+        final DeadLetterQueueExceptionHandlerDecorator.ProductionDecorator decorator =
+            new DeadLetterQueueExceptionHandlerDecorator.ProductionDecorator(delegate, byNode, null);
+        decorator.configure(configs(null, false));
+
+        // A failure at an unopted sibling (sink-B) with no global default must fall through to the delegate response
+        // VERBATIM - the opt-in on sink-A must not leak into sink-B (P4-01).
+        final ProductionExceptionHandler.Response passthrough =
+            decorator.handleError(contextForNode("sink-B"), producerRecord(), new RuntimeException("boom"));
+        assertSame(delegateResponse, passthrough);
+        assertTrue(passthrough.deadLetterQueueRecords().isEmpty());
+    }
+
+    @Test
+    public void shouldFallBackToGlobalForUnoptedNodeWhenGlobalEnabled() {
+        final ProductionExceptionHandler delegate = mock(ProductionExceptionHandler.class);
+        when(delegate.handleError(any(), any(), any())).thenReturn(ProductionExceptionHandler.Response.fail());
+
+        final Map<String, DeadLetterQueueOptions> byNode = new HashMap<>();
+        byNode.put("sink-A", DeadLetterQueueOptions.with("dlq-A"));
+        // Per-node opt-in for sink-A PLUS a global fallback: sink-A keeps its own topic; every other node uses the
+        // global default (DSL -> global precedence, resolved per failing node).
+        final DeadLetterQueueExceptionHandlerDecorator.ProductionDecorator decorator =
+            new DeadLetterQueueExceptionHandlerDecorator.ProductionDecorator(
+                delegate, byNode, DeadLetterQueueOptions.with(GLOBAL_TOPIC));
+        decorator.configure(configs(GLOBAL_TOPIC, true));
+
+        final ProductionExceptionHandler.Response a =
+            decorator.handleError(contextForNode("sink-A"), producerRecord(), new RuntimeException("boom"));
+        assertEquals("dlq-A", a.deadLetterQueueRecords().get(0).topic());
+
+        final ProductionExceptionHandler.Response b =
+            decorator.handleError(contextForNode("sink-B"), producerRecord(), new RuntimeException("boom"));
+        assertEquals(GLOBAL_TOPIC, b.deadLetterQueueRecords().get(0).topic());
+    }
+
+    @Test
+    public void shouldRouteProcessingToPerNodeDlqTopicByFailingNodeIdAndIsolateSibling() {
+        final ProcessingExceptionHandler delegate = mock(ProcessingExceptionHandler.class);
+        final ProcessingExceptionHandler.Response delegateResponse = ProcessingExceptionHandler.Response.fail();
+        when(delegate.handleError(any(), any(), any())).thenReturn(delegateResponse);
+
+        final Map<String, DeadLetterQueueOptions> byNode = new HashMap<>();
+        byNode.put("proc-A", DeadLetterQueueOptions.with("dlq-A"));
+        final DeadLetterQueueExceptionHandlerDecorator.ProcessingDecorator decorator =
+            new DeadLetterQueueExceptionHandlerDecorator.ProcessingDecorator(delegate, byNode, null);
+        decorator.configure(configs(null, false));
+
+        // Failure at the opted-in processor node routes to its DLQ topic.
+        final ProcessingExceptionHandler.Response routed =
+            decorator.handleError(contextForNode("proc-A"), new Record<>("k", "v", SOURCE_TIMESTAMP),
+                new RuntimeException("boom"));
+        assertEquals(ProcessingExceptionHandler.Result.RESUME, routed.result());
+        assertEquals("dlq-A", routed.deadLetterQueueRecords().get(0).topic());
+
+        // Failure at an unopted sibling processor node (no global) falls through to the delegate response verbatim.
+        final ProcessingExceptionHandler.Response passthrough =
+            decorator.handleError(contextForNode("proc-B"), new Record<>("k", "v", SOURCE_TIMESTAMP),
+                new RuntimeException("boom"));
+        assertSame(delegateResponse, passthrough);
+        assertTrue(passthrough.deadLetterQueueRecords().isEmpty());
     }
 }

@@ -272,7 +272,7 @@ public class ProcessorNodeTest {
             // ...and the targeted opt-in DLQ WARN is never emitted for the non-opt-in path.
             final List<String> messages = logCaptureAppender.getMessages();
             final boolean warnPresent = messages.stream().anyMatch(message ->
-                    message.contains("Sent a failed record to the dead letter queue."));
+                    message.contains("Routing a failed record to the dead letter queue."));
             assertFalse(warnPresent, "Opt-in DLQ WARN must not fire for the non-opt-in path. Captured: " + messages);
         }
     }

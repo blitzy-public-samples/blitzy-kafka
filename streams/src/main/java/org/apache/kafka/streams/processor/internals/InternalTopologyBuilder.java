@@ -105,6 +105,17 @@ public class InternalTopologyBuilder {
     // node factories in a topological order
     private final Map<String, NodeFactory<?, ?, ?, ?>> nodeFactories = new LinkedHashMap<>();
 
+    // Opt-in, DSL-level Dead Letter Queue (DLQ) routing for processing/production failures, keyed by the PROCESSOR
+    // or SINK node in which the failure occurs (resolved at runtime by ErrorHandlerContext#processorNodeId()). These
+    // are populated by markProcessorNodeForDeadLetterQueue while a DeadLetterQueueGraphNode writes itself, and applied
+    // to the built ProcessorNode/SinkNode in buildTopology(). Storing the association here (by node name, taken from
+    // the build graph) rather than on the node factory is deliberate: a DeadLetterQueueGraphNode has a lower
+    // buildPriority than its downstream siblings and therefore writes to the topology BEFORE their factories are
+    // created, so a name-keyed builder map is the only ordering-safe place to record the mark. Empty for every
+    // topology that does not opt in, so those topologies are completely unaffected.
+    private final Map<String, String> nodeToDeadLetterQueueTopic = new HashMap<>();
+    private final Map<String, DeadLetterQueueOptions> nodeToDeadLetterQueueOptions = new HashMap<>();
+
     private final Map<String, StoreFactory> stateFactories = new HashMap<>();
 
     private final Map<String, StoreFactory> globalStateBuilders = new LinkedHashMap<>();
@@ -551,6 +562,67 @@ public class InternalTopologyBuilder {
         if (nodeFactory instanceof SourceNodeFactory) {
             ((SourceNodeFactory<?, ?>) nodeFactory).setDeadLetterQueue(deadLetterQueueTopic, deadLetterQueueOptions);
         }
+    }
+
+    /**
+     * Mark a previously-added processor or sink node as opted in to the DSL-level Dead Letter Queue (DLQ), so that a
+     * processing exception at that processor node (or a produce/serialization exception at that sink node) is routed
+     * to {@code deadLetterQueueTopic} with the supplied options. Unlike the deserialization boundary
+     * (see {@link #markSourceNodeForDeadLetterQueue}), which is keyed by source topic because a source deserializes a
+     * record before it is routed to any branch, processing/production routing is keyed by the node in which the
+     * failure occurs and is resolved at runtime by
+     * {@link org.apache.kafka.streams.errors.ErrorHandlerContext#processorNodeId()}. Node-scoping is what keeps an
+     * opt-in on one branch from leaking into an unopted sibling branch (P4-01) and what routes a failure from a
+     * dynamically-matched {@code Pattern} topic by stable node identity rather than a build-time topic name
+     * (P16-01 / P16-02).
+     *
+     * <p>This is invoked while a {@code DeadLetterQueueGraphNode} writes itself to the topology, once for every node
+     * in the opted-in sub-graph downstream of a
+     * {@link org.apache.kafka.streams.kstream.KStream#withDeadLetterQueue(String, DeadLetterQueueOptions)} call. Names
+     * that do not resolve to a processor or sink node (a source node, or a metadata-only node) are ignored, so
+     * marking is additive and backward compatible.
+     *
+     * <p>Marking is conflict-aware: marking the same node with identical topic and options more than once is
+     * idempotent; marking it with a different topic or options raises a {@link TopologyException}.
+     *
+     * @param nodeName               the name of the processor or sink node to mark
+     * @param deadLetterQueueTopic   the resolved DLQ topic name (must not be null)
+     * @param deadLetterQueueOptions the resolved DLQ options (must not be null)
+     * @throws TopologyException if this node is already opted in with a conflicting topic or options
+     */
+    public final synchronized void markProcessorNodeForDeadLetterQueue(final String nodeName,
+                                                                       final String deadLetterQueueTopic,
+                                                                       final DeadLetterQueueOptions deadLetterQueueOptions) {
+        Objects.requireNonNull(nodeName, "nodeName cannot be null");
+        Objects.requireNonNull(deadLetterQueueTopic, "deadLetterQueueTopic cannot be null");
+        Objects.requireNonNull(deadLetterQueueOptions, "deadLetterQueueOptions cannot be null");
+        // Record the association by node name (rather than on the node factory) and DO NOT require the factory to
+        // exist yet: a DeadLetterQueueGraphNode has a lower buildPriority than the downstream siblings it routes, so
+        // it writes to the topology — invoking this method — BEFORE those siblings' node factories are created.
+        // The recorded name is resolved against the built ProcessorNode/SinkNode later, in build(), where any name
+        // that does not correspond to a processor or sink node is simply ignored (a safe no-op). Source names are
+        // never passed here: deserialization is routed separately and source-scoped (see
+        // markSourceNodeForDeadLetterQueue and DeadLetterQueueGraphNode#collectRoutingNodeNames, which skips sources).
+        final String existingTopic = nodeToDeadLetterQueueTopic.get(nodeName);
+        if (existingTopic != null) {
+            // The node was already marked (for example by two overlapping opted-in sub-graphs). Identical
+            // configuration is idempotent; conflicting configuration is a topology error, because a node routes its
+            // processing/production failures to a single dead letter queue.
+            final boolean sameConfig = existingTopic.equals(deadLetterQueueTopic)
+                && Objects.equals(nodeToDeadLetterQueueOptions.get(nodeName), deadLetterQueueOptions);
+            if (sameConfig) {
+                return;
+            }
+            throw new TopologyException(
+                "Conflicting dead letter queue configuration for node '" + nodeName + "': already configured with "
+                    + "topic '" + existingTopic + "' and options " + nodeToDeadLetterQueueOptions.get(nodeName)
+                    + ", cannot reconfigure with topic '" + deadLetterQueueTopic + "' and options "
+                    + deadLetterQueueOptions + ". A node routes its processing/production failures to a single dead "
+                    + "letter queue; use identical DeadLetterQueueOptions on every withDeadLetterQueue call whose "
+                    + "sub-graph includes this node.");
+        }
+        nodeToDeadLetterQueueTopic.put(nodeName, deadLetterQueueTopic);
+        nodeToDeadLetterQueueOptions.put(nodeName, deadLetterQueueOptions);
     }
 
     public final void addSource(final AutoOffsetResetInternal offsetReset,
@@ -1088,6 +1160,16 @@ public class InternalTopologyBuilder {
             if (nodeGroup == null || nodeGroup.contains(factory.name)) {
                 final ProcessorNode<?, ?, ?, ?> node = factory.build();
                 processorMap.put(node.name(), node);
+
+                // Apply opt-in, DSL-level dead letter queue routing for processing/production failures. The
+                // association was recorded by node name in markProcessorNodeForDeadLetterQueue while a
+                // DeadLetterQueueGraphNode wrote itself to the topology (which necessarily happened before this build
+                // pass), so every processor/sink node now exists and can be configured directly. Nodes that never
+                // opted in are absent from the map, so this is a no-op for them and leaves their behavior unchanged.
+                final String dlqRoutingTopic = nodeToDeadLetterQueueTopic.get(node.name());
+                if (dlqRoutingTopic != null) {
+                    node.setDeadLetterQueueRouting(dlqRoutingTopic, nodeToDeadLetterQueueOptions.get(node.name()));
+                }
 
                 if (factory instanceof ProcessorNodeFactory) {
                     buildProcessorNode(processorMap,
