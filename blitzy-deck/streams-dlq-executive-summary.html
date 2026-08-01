@@ -1,4 +1,26 @@
 <!DOCTYPE html>
+<!--
+ Licensed to the Apache Software Foundation (ASF) under one or more
+ contributor license agreements.  See the NOTICE file distributed with
+ this work for additional information regarding copyright ownership.
+ The ASF licenses this file to You under the Apache License, Version 2.0
+ (the "License"); you may not use this file except in compliance with
+ the License.  You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+
+ NOTE: this licence banner is deliberately placed AFTER the <!DOCTYPE html>
+ declaration (and not before it) so that the document is always parsed in
+ standards mode - a comment preceding the DOCTYPE can trip legacy quirks-mode
+ heuristics. The comment is inert markup and therefore does not affect the
+ Content Security Policy hash of the inline bootstrap script below.
+-->
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -254,9 +276,23 @@
       border-radius: 18px;
       padding: 24px 26px;
       box-shadow: 0 10px 30px rgba(45, 28, 119, 0.08);
+      /* Let the figure bleed 46px past the text column on both sides. The
+         diagrams are laid out left-to-right, so their rendered scale - and
+         therefore the on-screen size of every node label - is set purely by
+         the panel's inner width; the extra 92px buys ~5.6% larger diagram
+         text at no cost, and the panel still clears the 1920 canvas edge by
+         64px. The eyebrow, h2 and legend keep the section's text column. */
+      margin-left: -46px;
+      margin-right: -46px;
       /* Never clip a diagram: if the SVG is wider than the panel (small viewports
-         or high zoom, P10-02), the panel scrolls horizontally instead of hiding it. */
-      max-width: 100%;
+         or high zoom, P10-02), the panel scrolls horizontally instead of hiding it.
+         The cap has to allow for the 92px bleed above: this box is content-box
+         sized, so a plain `max-width: 100%` clamps the CONTENT box back to the
+         text-column width, which both cancels the width gain and over-constrains
+         the block - the left margin is honoured, the right margin yields, and the
+         panel ends up visibly off-centre. Allowing 100% + 92px keeps the bleed
+         symmetric while still stopping the panel from growing past its column. */
+      max-width: calc(100% + 92px);
       overflow-x: auto;
       overflow-y: hidden;
       -webkit-overflow-scrolling: touch;
@@ -267,7 +303,14 @@
        is resolved against the real window height, so at viewport heights > 1080px the
        svg grew past the fixed canvas and the bottom node was clipped. A constant px
        cap keeps the diagram a fixed fraction of the 1080 canvas at every viewport. */
-    .reveal .mermaid svg { max-width: 100%; max-height: 620px; height: auto; }
+    /* 640px (not 620px) because the diagrams are laid out left-to-right with labels
+       re-wrapped over more lines: that trades width - the axis that is actually
+       constrained by the panel - for height, which was previously 50-70% unused.
+       640px is the largest cap that still keeps the eyebrow, h2, panel and legend
+       stacked inside the 1080 canvas (panel top 231 + 640 + 50 panel padding/border
+       + 18 legend gap + 85 legend = 1024 < 1080), so the diagram can use the spare
+       height without ever pushing the legend off the slide. */
+    .reveal .mermaid svg { max-width: 100%; max-height: 640px; height: auto; }
     /* Safety net: keep node/edge labels on their intended lines (explicit
        <br/> still breaks) and let any width rounding overshoot show rather
        than clip the final glyph. overflow:visible is applied to EVERY
@@ -634,13 +677,52 @@
          last-resort fallback for a token longer than the available width. Scoped to
          the <=768px breakpoint only, so the 1920px design canvas is unaffected. */
       .reveal .mono { white-space: normal; overflow-wrap: anywhere; }
-      /* Diagrams render at full panel width; still scroll if wider (P10-02). */
-      .diagram-panel { overflow-x: auto; -webkit-overflow-scrolling: touch; }
-      .reveal .mermaid svg { max-height: none !important; }
-      .reveal .mermaid .nodeLabel,
-      .reveal .mermaid .edgeLabel,
-      .reveal .mermaid .cluster-label,
-      .reveal .mermaid .cluster-label .nodeLabel { font-size: 1.15em !important; }
+      /* Diagrams render at full panel width; still scroll if wider (P10-02).
+         The desktop figure bleed (-46px each side, to buy diagram width on the
+         1920px canvas) must be cancelled here: at 22px of section padding it
+         would push the panel past both viewport edges and introduce horizontal
+         page scrolling on narrow screens. */
+      .diagram-panel {
+        overflow-x: auto; -webkit-overflow-scrolling: touch;
+        margin-left: 0; margin-right: 0; max-width: 100%;
+      }
+      /* Render each diagram at (about) its natural 1:1 size here instead of
+         letting it shrink to the panel, and pan it inside the panel.
+         Mermaid emits every svg as width="100%" with the natural width carried
+         ONLY in an inline max-width (its useMaxWidth behaviour), so on a 292px
+         phone panel a ~2360px diagram was scaled to 0.12x and its 16px labels
+         came out ~2px tall - illegible, which is the very failure this whole
+         breakpoint exists to prevent. Two things have to be undone together:
+           - `width: auto` cannot recover the natural width, because an svg with
+             a viewBox has an intrinsic RATIO but no intrinsic WIDTH, so auto
+             resolves to the flex line (i.e. the panel) - hence an explicit
+             width. 2400px is just above the natural width of all three
+             diagrams (2360 / 2199 / 2401 user units), so each renders at
+             ~1.00-1.09x and labels land at their designed 16px; `height` stays
+             auto, so the aspect ratio is preserved by the viewBox ratio.
+           - `flex-shrink` must be neutralised (`flex: 0 0 auto`), otherwise the
+             svg is a shrinkable flex item of `.reveal .mermaid` and gets
+             squeezed straight back down to the panel width.
+         Once the svg is genuinely wider than the panel, the `overflow-x: auto`
+         the panel already declares finally engages, so the reader pans a
+         full-size, legible figure. The overflow stays inside that scroll
+         container, so the document itself never scrolls sideways.
+         Labels stay at the 16px Mermaid measured them at, so each one still
+         sits inside its node box - a font-size bump here (which used to
+         compensate for the downscale) would push nowrap labels past their box
+         edges, because the shapes were sized from the unscaled 16px metrics. */
+      .reveal .mermaid svg {
+        max-height: none !important;
+        width: 2400px !important;
+        max-width: none !important;
+        flex: 0 0 auto !important;
+      }
+      /* The base rule centres the diagram in its panel. Once the svg is wider
+         than the panel, centring splits the overflow across both sides and the
+         left half becomes unreachable (a scroll container cannot scroll to a
+         negative offset), so the first nodes of every flow would be lost.
+         Left-aligning keeps all the overflow on the scrollable side. */
+      .reveal .mermaid { justify-content: flex-start !important; }
       /* The floating chrome (arrows/progress/number) is meaningless in a vertical
          scroll and would overlap content — hide it on the reflowed layout. */
       .reveal .controls, .reveal .progress, .reveal .slide-number { display: none !important; }
@@ -773,39 +855,39 @@
     <h2>New components wrap the existing runtime</h2>
     <div class="diagram-panel">
 <pre class="mermaid">
-graph TD
+graph LR
     accTitle: DLQ Component Interaction Diagram
     accDescr: The new feature components (the withDeadLetterQueue DSL method, DeadLetterQueueOptions, the DLQ-aware handler decorator, DlqRecordBuilder, the two StreamsConfig keys and the dlq-records-sent-total metric) wrap the existing Streams runtime (KStreamImpl graph wiring, the exception handlers, RecordCollectorImpl, the shared producer and the metrics registry) to route failed records to the configured DLQ topic. The decorator logs a WARN at the routing attempt, and the dlq-records-sent-total counter is incremented inside RecordCollectorImpl only when the broker acknowledges the DLQ record; the sensor is registered through the metrics registry.
     subgraph New["New Components (this feature)"]
-        DSL["KStream.withDeadLetterQueue()<br/>default method"]
-        OPTS["DeadLetterQueueOptions<br/>(immutable options)"]
-        DEC["DLQ-Aware Handler Decorator<br/>(internal)"]
+        DSL["KStream.<br/>withDeadLetterQueue()<br/>default method"]
+        OPTS["DeadLetterQueue<br/>Options<br/>(immutable<br/>options)"]
+        DEC["DLQ-Aware<br/>Handler<br/>Decorator<br/>(internal)"]
         BUILDER["DlqRecordBuilder<br/>(dlq.* headers)"]
-        CFG["StreamsConfig keys<br/>default.deadletterqueue.*"]
-        MET["dlq-records-sent-total<br/>sensor + WARN log"]
+        CFG["StreamsConfig<br/>keys<br/>default.<br/>deadletterqueue.*"]
+        MET["dlq-records-<br/>sent-total<br/>sensor +<br/>WARN log"]
     end
 
     subgraph Existing["Existing Streams Runtime (wrapped, unmodified contracts)"]
-        IMPL["KStreamImpl<br/>graph node wiring"]
-        HANDLERS["Deserialization / Production /<br/>Processing ExceptionHandler"]
-        COLLECTOR["RecordCollectorImpl.send()"]
-        PRODUCER["Shared Streams Producer"]
+        IMPL["KStreamImpl<br/>graph node<br/>wiring"]
+        HANDLERS["Deserialization /<br/>Production /<br/>Processing<br/>ExceptionHandler"]
+        COLLECTOR["RecordCollectorImpl<br/>.send()"]
+        PRODUCER["Shared Streams<br/>Producer"]
         METRICS["StreamsMetricsImpl"]
     end
 
-    DLQTOPIC["Configured DLQ Topic<br/>(assumed to pre-exist)"]
+    DLQTOPIC["Configured<br/>DLQ Topic<br/>(assumed to<br/>pre-exist)"]
 
     DSL --> IMPL
     OPTS --> DSL
-    CFG -. global default .-> IMPL
+    CFG -.->|"global<br/>default"| IMPL
     IMPL --> DEC
     DEC --> HANDLERS
     DEC --> BUILDER
     BUILDER --> COLLECTOR
     COLLECTOR --> PRODUCER
     PRODUCER --> DLQTOPIC
-    DEC -. WARN on routing attempt .-> MET
-    COLLECTOR -. count on broker ack .-> MET
+    DEC -.->|"WARN on<br/>routing<br/>attempt"| MET
+    COLLECTOR -.->|"count on<br/>broker ack"| MET
     MET --> METRICS
 
     classDef newcomp fill:#DCFCEF,stroke:#4101DB,stroke-width:3px,color:#12102E;
@@ -824,19 +906,19 @@ graph TD
     <h2>Today: global-config-only path (KIP-1034)</h2>
     <div class="diagram-panel">
 <pre class="mermaid">
-flowchart TD
+flowchart LR
     accTitle: Error-Handling Data Flow — Before (current state)
     accDescr: In the current global-config-only path, a record that fails to deserialize or process is dispatched to the configured exception handler. A DLQ record is built and sent only when the global errors.dead.letter.queue.topic.name is set; the handler result then either fails the thread or skips the record.
     REC["Incoming record"] --> DESER{"Deserialize /<br/>process OK?"}
-    DESER -- Yes --> CONT["Continue topology"]
-    DESER -- No --> HANDLER["Configured ExceptionHandler<br/>handleError(...)"]
-    HANDLER --> GLOBAL{"Global topic<br/>errors.dead.letter.queue<br/>.topic.name set?"}
-    GLOBAL -- No --> RESP{"Handler Result"}
-    GLOBAL -- Yes --> BUILD["ExceptionHandlerUtils builds record<br/>(__streams.errors.* headers)"]
-    BUILD --> SEND["RecordCollector.send to DLQ topic"]
+    DESER -- Yes --> CONT["Continue<br/>topology"]
+    DESER -- No --> HANDLER["Configured<br/>ExceptionHandler<br/>handleError(...)"]
+    HANDLER --> GLOBAL{"Global topic<br/>errors.dead.<br/>letter.queue<br/>.topic.name<br/>set?"}
+    GLOBAL -- No --> RESP{"Handler<br/>Result"}
+    GLOBAL -- Yes --> BUILD["ExceptionHandlerUtils<br/>builds record<br/>(__streams.errors.*<br/>headers)"]
+    BUILD --> SEND["RecordCollector<br/>.send to<br/>DLQ topic"]
     SEND --> RESP
-    RESP -- FAIL --> STOP["Throw StreamsException<br/>(StreamThread stops)"]
-    RESP -- RESUME --> SKIP["Skip record<br/>(dropped-records sensor + generic WARN)"]
+    RESP -- FAIL --> STOP["Throw<br/>StreamsException<br/>(StreamThread<br/>stops)"]
+    RESP -- RESUME --> SKIP["Skip record<br/>(dropped-records<br/>sensor + generic<br/>WARN)"]
 </pre>
     </div>
     <div class="legend">
@@ -851,20 +933,20 @@ flowchart TD
     <h2>Opt-in layer routes failures to the DLQ</h2>
     <div class="diagram-panel">
 <pre class="mermaid">
-flowchart TD
+flowchart LR
     accTitle: Error-Handling Data Flow — After (opt-in DLQ layer)
     accDescr: When a stream has the DLQ active — either through the withDeadLetterQueue DSL call or the global default.deadletterqueue.enabled switch — a failed, DLQ-eligible record is passed to the DLQ-aware decorator, which delegates to the configured handler. A WARN is logged for the routing attempt (exception class and source offset), the effective topic is resolved (the DSL value overrides the global default), DlqRecordBuilder builds the dlq.* record (truncating and annotating an oversized value rather than dropping it), and RecordCollector sends it through the shared producer; processing then resumes immediately. The dlq-records-sent-total counter is incremented only once the broker acknowledges the DLQ record. Topologies without the DLQ active follow the unchanged legacy path.
     REC["Incoming record"] --> DESER{"Deserialize /<br/>process OK?"}
-    DESER -- Yes --> CONT["Continue topology"]
-    DESER -- No --> ACTIVE{"DLQ active?<br/>(DSL opt-in OR<br/>global default enabled)"}
-    ACTIVE -- No --> LEGACY["Existing unchanged path<br/>(see Before diagram)"]
-    ACTIVE -- Yes --> DEC["DLQ-Aware Handler Decorator<br/>(delegates to configured handler,<br/>routes only eligible failures)"]
-    DEC --> WARN["WARN: routing a failed record<br/>(exception class, source offset)"]
-    WARN --> RESOLVE["Resolve effective DLQ topic<br/>(DSL overrides global default)"]
-    RESOLVE --> NEWBUILD["DlqRecordBuilder builds record<br/>(dlq.* headers, raw bytes,<br/>header toggle + truncate + annotate)"]
-    NEWBUILD --> SEND["RecordCollector.send via shared producer<br/>(same security / auth)"]
-    SEND --> RESUME["Response.resume -> topology continues"]
-    SEND -. on broker ack .-> COUNT["Increment<br/>dlq-records-sent-total"]
+    DESER -- Yes --> CONT["Continue<br/>topology"]
+    DESER -- No --> ACTIVE{"DLQ active?<br/>(DSL opt-in OR<br/>global default<br/>enabled)"}
+    ACTIVE -- No --> LEGACY["Existing<br/>unchanged path<br/>(see Before<br/>diagram)"]
+    ACTIVE -- Yes --> DEC["DLQ-Aware<br/>Handler<br/>Decorator<br/>(delegates to<br/>configured<br/>handler, routes<br/>only eligible<br/>failures)"]
+    DEC --> WARN["WARN: routing<br/>a failed record<br/>(exception<br/>class, source<br/>offset)"]
+    WARN --> RESOLVE["Resolve<br/>effective<br/>DLQ topic<br/>(DSL overrides<br/>global default)"]
+    RESOLVE --> NEWBUILD["DlqRecordBuilder<br/>builds record<br/>(dlq.* headers,<br/>raw bytes,<br/>header toggle +<br/>truncate +<br/>annotate)"]
+    NEWBUILD --> SEND["RecordCollector<br/>.send via<br/>shared producer<br/>(same security /<br/>auth)"]
+    SEND --> RESUME["Response.resume<br/>-> topology<br/>continues"]
+    SEND -.->|"on broker<br/>ack"| COUNT["Increment<br/>dlq-records-<br/>sent-total"]
 
     classDef newcomp fill:#DCFCEF,stroke:#4101DB,stroke-width:3px,color:#12102E;
     class ACTIVE,DEC,WARN,RESOLVE,NEWBUILD,SEND,COUNT newcomp;
