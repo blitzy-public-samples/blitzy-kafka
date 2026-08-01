@@ -111,6 +111,11 @@ final class DeadLetterQueueEligibility {
      * Deserialization-path eligibility. Every exception surfaced to the deserialization handler denotes a record
      * that could not be deserialized (a poison record), so it is eligible unless it is {@linkplain #isFatal fatal}.
      *
+     * <p>Key and value deserialization failures are DLQ-eligible symmetrically: this check receives only the
+     * exception, so a failure raised while deserializing the key is classified exactly as one raised while
+     * deserializing the value. Both are captured at the source node and dead-lettered before any downstream
+     * processor node executes.
+     *
      * @param exception the deserialization failure
      * @return {@code true} if the failed record should be dead-lettered
      */
