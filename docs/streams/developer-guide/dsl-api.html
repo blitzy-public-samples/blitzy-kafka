@@ -4208,6 +4208,16 @@ stream.to(&quot;my-stream-output-topic&quot;, Produced.with(Serdes.String(), Ser
                <code>withDeadLetterQueue(...)</code> call takes precedence over the global
                <code>default.deadletterqueue.topic</code> / <code>default.deadletterqueue.enabled</code> configuration defaults,
                and topologies that never opt in retain byte-for-byte identical error-handling behavior.</p>
+            <p>The opt-in is validated when the topology is built, so a mistake fails fast rather than at first produce:
+               the topic name must be non-blank and valid, the <code>dlqTopic</code> argument must be <b>identical</b> to the
+               topic carried by the supplied <code>DeadLetterQueueOptions</code> (so there is a single unambiguous effective
+               topic), the stream must originate from a source topic, and the DLQ topic must <b>not</b> itself be a source
+               topic of the same stream &mdash; routing failed records back into a source would re-consume, re-fail and
+               re-dead-letter the same record, amplifying one bad record into many. Use a dedicated DLQ topic that the
+               topology does not consume. Calling <code>withDeadLetterQueue(...)</code> on a custom <code>KStream</code>
+               implementation (rather than the built-in one returned by <code>StreamsBuilder</code>) throws
+               <code>UnsupportedOperationException</code>, so an opt-in that cannot be honored fails loudly instead of
+               silently installing nothing.</p>
             <pre class="line-numbers"><code class="language-java">KStream&lt;String, String&gt; stream = builder.stream("input-topic");
 stream.withDeadLetterQueue("my-dlq-topic", DeadLetterQueueOptions.with("my-dlq-topic"));</code></pre>
         </div>
