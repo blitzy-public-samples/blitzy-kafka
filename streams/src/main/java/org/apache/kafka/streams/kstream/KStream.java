@@ -93,17 +93,18 @@ public interface KStream<K, V> {
      *        .to("output-topic");
      * }</pre>
      *
-     * @apiNote This method was added to the {@code KStream} interface as a {@code default} method purely to
-     * preserve source and binary compatibility for existing custom {@code KStream} implementations (adding a
-     * method never breaks an implementor at compile or link time). The {@code default} implementation does
-     * <em>not</em> silently no-op: because a custom implementation cannot wire DLQ routing into the internal
-     * topology, invoking it on anything other than the built-in {@code KStreamImpl} throws
+     * <p><b>Compatibility note.</b> This method was added to the {@code KStream} interface as a {@code default}
+     * method purely to preserve source and binary compatibility for existing custom {@code KStream}
+     * implementations (adding a method never breaks an implementor at compile or link time). The {@code default}
+     * implementation does <em>not</em> silently no-op: because a custom implementation cannot wire DLQ routing into
+     * the internal topology, invoking it on anything other than the built-in {@code KStreamImpl} throws
      * {@link UnsupportedOperationException} so that an unsupported opt-in fails loudly rather than appearing to
      * succeed while installing nothing. The built-in {@code KStreamImpl} returned by {@link StreamsBuilder}
      * overrides this method to install DLQ routing and return this stream.
      *
-     * @implSpec The {@code default} implementation always throws {@link UnsupportedOperationException}; the
-     * built-in {@code KStreamImpl} overrides it with the working implementation.
+     * <p><b>Implementation requirements.</b> The {@code default} implementation always throws
+     * {@link UnsupportedOperationException}; the built-in {@code KStreamImpl} overrides it with the working
+     * implementation.
      *
      * @param dlqTopic
      *        the name of the (pre-existing) Dead Letter Queue topic that failed records are routed to; must not be null
