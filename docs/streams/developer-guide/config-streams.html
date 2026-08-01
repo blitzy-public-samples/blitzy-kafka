@@ -72,6 +72,8 @@ settings.put(... , ...);</code></pre>
           <li><a class="reference internal" href="#optional-configuration-parameters" id="id6">Optional configuration parameters</a>
             <ul>
               <li><a class="reference internal" href="#acceptable-recovery-lag" id="id27">acceptable.recovery.lag</a></li>
+              <li><a class="reference internal" href="#default-deadletterqueue-enabled" id="id48">default.deadletterqueue.enabled</a></li>
+              <li><a class="reference internal" href="#default-deadletterqueue-topic" id="id49">default.deadletterqueue.topic</a></li>
               <li><a class="reference internal" href="#deserialization-exception-handler" id="id7">default.deserialization.exception.handler (deprecated)</a></li>
               <li><a class="reference internal" href="#default-key-serde" id="id8">default.key.serde</a></li>
               <li><a class="reference internal" href="#production-exception-handler" id="id24">default.production.exception.handler (deprecated)</a></li>
@@ -298,6 +300,16 @@ streamsSettings.put(StreamsConfig.NUM_STANDBY_REPLICAS_CONFIG, 1);</code></pre>
             <td>Low</td>
             <td colspan="2">The frequency in milliseconds with which to save the position (offsets in source topics) of tasks.</td>
             <td><code class="docutils literal"><span class="pre">30000</span></code> (30 seconds) (at-least-once) / <code class="docutils literal"><span class="pre">100</span></code> (exactly-once)</td>
+          </tr>
+          <tr class="row-odd"><td>default.deadletterqueue.enabled</td>
+            <td>Medium</td>
+            <td colspan="2">Enables the global default opt-in Dead Letter Queue (DLQ) behavior for the DSL. When <code class="docutils literal"><span class="pre">true</span></code>, <code class="docutils literal"><span class="pre">default.deadletterqueue.topic</span></code> must also be set (otherwise the application fails to start), and records that fail deserialization, processing, or serialization/production across the application's regular (<code class="docutils literal"><span class="pre">StreamThread</span></code>) source topics are routed to the DLQ topic &mdash; even without a per-<code class="docutils literal"><span class="pre">KStream</span></code> <code class="docutils literal"><span class="pre">withDeadLetterQueue(...)</span></code> call. Global state stores (for example, those created via <code class="docutils literal"><span class="pre">globalTable(...)</span></code> or <code class="docutils literal"><span class="pre">addGlobalStore(...)</span></code>) are loaded on a separate path and are not covered. Retriable broker/producer failures are not dead-lettered. A per-<code class="docutils literal"><span class="pre">KStream</span></code> <code class="docutils literal"><span class="pre">withDeadLetterQueue(...)</span></code> DSL call takes precedence over this global default.</td>
+            <td><code class="docutils literal"><span class="pre">false</span></code></td>
+          </tr>
+          <tr class="row-even"><td>default.deadletterqueue.topic</td>
+            <td>Medium</td>
+            <td colspan="2">Optional global default DLQ topic name used by the opt-in DSL DLQ feature when a topology does not specify one via <code class="docutils literal"><span class="pre">withDeadLetterQueue(...)</span></code>. If set, it must be a valid Kafka topic name (validated at startup). Coexists with <code class="docutils literal"><span class="pre">errors.dead.letter.queue.topic.name</span></code>. The DLQ topic is assumed to already exist and is not created automatically.</td>
+            <td><code class="docutils literal"><span class="pre">null</span></code></td>
           </tr>
           <tr class="row-odd"><td>default.deserialization.exception.handler (Deprecated. Use deserialization.exception.handler instead.)</td>
             <td>Medium</td>
@@ -569,6 +581,14 @@ streamsSettings.put(StreamsConfig.NUM_STANDBY_REPLICAS_CONFIG, 1);</code></pre>
               </p>
             </div>
           </blockquote>
+        </div>
+        <div class="section" id="default-deadletterqueue-enabled">
+          <span id="streams-developer-guide-dlq-enabled"></span><h4><a class="toc-backref" href="#id48">default.deadletterqueue.enabled</a><a class="headerlink" href="#default-deadletterqueue-enabled" title="Permalink to this headline"></a></h4>
+          <blockquote><div><p>Globally enables or disables the opt-in Dead Letter Queue (DLQ) default for the DSL. Defaults to <code>false</code>. When set to <code>true</code>, <code>default.deadletterqueue.topic</code> must also be set to a non-blank, valid Kafka topic name; otherwise the <code>StreamsConfig</code> constructor fails fast with a <code>ConfigException</code> so the misconfiguration surfaces at startup rather than being silently ignored. Once enabled with a topic, DLQ routing applies to the application's regular (<code>StreamThread</code>) source topics &mdash; capturing records that fail deserialization, processing, or serialization/production &mdash; even for topologies that never call <code>withDeadLetterQueue(...)</code>. Global state stores (for example, those created via <code>globalTable(...)</code> or <code>addGlobalStore(...)</code>) are loaded by a separate global thread and are outside the scope of this DLQ mechanism. A per-<code>KStream</code> <code>withDeadLetterQueue(...)</code> DSL call takes precedence over this global setting (DSL-level precedence). This key coexists with the existing <code>errors.dead.letter.queue.topic.name</code> configuration and does not change its behavior.</p></div></blockquote>
+        </div>
+        <div class="section" id="default-deadletterqueue-topic">
+          <span id="streams-developer-guide-dlq-topic"></span><h4><a class="toc-backref" href="#id49">default.deadletterqueue.topic</a><a class="headerlink" href="#default-deadletterqueue-topic" title="Permalink to this headline"></a></h4>
+          <blockquote><div><p>An optional global default DLQ topic name for the opt-in DSL DLQ feature. Defaults to <code>null</code>. When a topology opts in via <code>KStream.withDeadLetterQueue(String dlqTopic, DeadLetterQueueOptions options)</code>, the topic supplied in that DSL call overrides this global default. Whenever this key is set &mdash; independent of <code>default.deadletterqueue.enabled</code> &mdash; it is validated against the canonical Kafka topic-name rules at startup, and an invalid name fails fast with a <code>ConfigException</code>. This key coexists with the existing <code>errors.dead.letter.queue.topic.name</code> key. The DLQ topic is assumed to already exist and is not created automatically by Kafka Streams.</p></div></blockquote>
         </div>
         <div class="section" id="deserialization-exception-handler">
           <span id="streams-developer-guide-deh"></span><h4><a class="toc-backref" href="#id7">deserialization.exception.handler (deprecated: default.deserialization.exception.handler)</a><a class="headerlink" href="#deserialization-exception-handler" title="Permalink to this headline"></a></h4>

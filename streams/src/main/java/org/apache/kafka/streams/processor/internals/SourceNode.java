@@ -21,6 +21,7 @@ import org.apache.kafka.common.header.Headers;
 import org.apache.kafka.common.metrics.Sensor;
 import org.apache.kafka.common.serialization.Deserializer;
 import org.apache.kafka.streams.errors.StreamsException;
+import org.apache.kafka.streams.kstream.DeadLetterQueueOptions;
 import org.apache.kafka.streams.processor.TimestampExtractor;
 import org.apache.kafka.streams.processor.api.Record;
 import org.apache.kafka.streams.processor.internals.metrics.ProcessorNodeMetrics;
@@ -35,6 +36,13 @@ public class SourceNode<KIn, VIn> extends ProcessorNode<KIn, VIn, KIn, VIn> {
     private Deserializer<VIn> valDeserializer;
     private final TimestampExtractor timestampExtractor;
     private Sensor processAtSourceSensor;
+
+    // Opt-in DSL Dead Letter Queue (DLQ) configuration attached per source node. When a topology opts in via
+    // KStream#withDeadLetterQueue(String, DeadLetterQueueOptions), the resolved DLQ topic and options are recorded
+    // here so the runtime (StreamTask) can wrap this node's deserialization exception handler with the DLQ-aware
+    // decorator. Left null for source nodes that did not opt in, preserving default error-handling behaviour.
+    private String deadLetterQueueTopic;
+    private DeadLetterQueueOptions deadLetterQueueOptions;
 
     public SourceNode(final String name,
                       final TimestampExtractor timestampExtractor,
@@ -106,5 +114,32 @@ public class SourceNode<KIn, VIn> extends ProcessorNode<KIn, VIn, KIn, VIn> {
 
     public TimestampExtractor timestampExtractor() {
         return timestampExtractor;
+    }
+
+    /**
+     * Mark this source node as opted in to the DSL-level Dead Letter Queue, routing records that fail
+     * deserialization at this node to the given DLQ topic with the given options.
+     *
+     * @param deadLetterQueueTopic   the resolved DLQ topic name (must not be null)
+     * @param deadLetterQueueOptions the resolved DLQ options (must not be null)
+     */
+    public void setDeadLetterQueue(final String deadLetterQueueTopic, final DeadLetterQueueOptions deadLetterQueueOptions) {
+        this.deadLetterQueueTopic = deadLetterQueueTopic;
+        this.deadLetterQueueOptions = deadLetterQueueOptions;
+    }
+
+    /**
+     * @return the DLQ topic this source node routes deserialization failures to, or {@code null} if this node
+     *         did not opt in to the DSL-level Dead Letter Queue
+     */
+    public String deadLetterQueueTopic() {
+        return deadLetterQueueTopic;
+    }
+
+    /**
+     * @return the DLQ options for this source node, or {@code null} if this node did not opt in
+     */
+    public DeadLetterQueueOptions deadLetterQueueOptions() {
+        return deadLetterQueueOptions;
     }
 }

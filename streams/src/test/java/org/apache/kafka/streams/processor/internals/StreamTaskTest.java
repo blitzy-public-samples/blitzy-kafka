@@ -26,6 +26,7 @@ import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.Metric;
 import org.apache.kafka.common.MetricName;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.config.ConfigException;
 import org.apache.kafka.common.errors.TimeoutException;
 import org.apache.kafka.common.header.internals.RecordHeaders;
 import org.apache.kafka.common.metrics.JmxReporter;
@@ -60,6 +61,8 @@ import org.apache.kafka.streams.errors.TaskCorruptedException;
 import org.apache.kafka.streams.errors.TaskMigratedException;
 import org.apache.kafka.streams.errors.TopologyException;
 import org.apache.kafka.streams.errors.internals.FailedProcessingException;
+import org.apache.kafka.streams.kstream.DeadLetterQueueOptions;
+import org.apache.kafka.streams.kstream.internals.DeadLetterQueueExceptionHandlerDecorator;
 import org.apache.kafka.streams.processor.FailOnInvalidTimestamp;
 import org.apache.kafka.streams.processor.LogAndSkipOnInvalidTimestamp;
 import org.apache.kafka.streams.processor.PunctuationType;
@@ -91,8 +94,11 @@ import org.mockito.quality.Strictness;
 
 import java.io.File;
 import java.io.IOException;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.time.Duration;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -134,6 +140,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
@@ -318,6 +325,15 @@ public class StreamTaskTest {
             mkEntry(StreamsConfig.PROCESSING_EXCEPTION_HANDLER_CLASS_CONFIG, processingExceptionHandler.getName()),
             mkEntry(StreamsConfig.DEFAULT_TIMESTAMP_EXTRACTOR_CLASS_CONFIG, timestampExtractor.getName())
         )));
+    }
+
+    private static StreamsConfig createConfigWithDeadLetterQueue(final boolean enabled, final String topic) {
+        final Map<String, Object> props = new HashMap<>(createConfig().originals());
+        props.put(StreamsConfig.DEFAULT_DEAD_LETTER_QUEUE_ENABLED_CONFIG, enabled);
+        if (topic != null) {
+            props.put(StreamsConfig.DEFAULT_DEAD_LETTER_QUEUE_TOPIC_CONFIG, topic);
+        }
+        return new StreamsConfig(props);
     }
 
     @BeforeEach
@@ -3248,6 +3264,148 @@ public class StreamTaskTest {
             logContext,
             false
         );
+    }
+
+    // ------------------------------------------------------------------------------------------------------------
+    // Issue #2 — RecordQueueCreator.resolveDeserializationExceptionHandler(SourceNode) precedence coverage.
+    //
+    // The resolver is a private method on the private inner class RecordQueueCreator, so it is driven via
+    // reflection. Its only inputs are the source node's DSL opt-in (deadLetterQueueTopic()/deadLetterQueueOptions())
+    // and the effective global default.deadletterqueue.* configuration read from processorContext.appConfigs().
+    // The six cases below pin every branch and the DSL-over-global precedence:
+    //   (a) DSL topic + explicit options            -> wrap, options preserved by identity
+    //   (b) DSL topic, no options                   -> wrap, options defaulted to DeadLetterQueueOptions.with(topic)
+    //   (c) global enabled + non-blank topic        -> wrap, options defaulted to DeadLetterQueueOptions.with(topic)
+    //   (d) global enabled + blank/whitespace topic -> NOT wrapped (guard), default handler returned unchanged
+    //   (e) global disabled (topic present)         -> NOT wrapped, default handler returned unchanged
+    //   (f) neither DSL nor global configured       -> NOT wrapped, default handler returned unchanged
+    //   (g) DSL topic wins over an enabled global    -> wrap with the DSL topic/options
+    // ------------------------------------------------------------------------------------------------------------
+
+    @Test
+    public void shouldWrapWithDlqHandlerWhenSourceHasDslDlqTopicAndOptions() throws Exception {
+        when(stateManager.taskId()).thenReturn(taskId);
+        when(stateManager.taskType()).thenReturn(TaskType.ACTIVE);
+        task = createStatelessTask(createConfig());
+        final DeadLetterQueueOptions options = DeadLetterQueueOptions.with("dsl-dlq").withMaxRecordSize(512);
+        final MockSourceNode<Integer, Integer> source = new MockSourceNode<>(intDeserializer, intDeserializer);
+        source.setDeadLetterQueue("dsl-dlq", options);
+
+        final DeserializationExceptionHandler resolved = resolveDeserializationExceptionHandler(task, source);
+
+        final DeadLetterQueueExceptionHandlerDecorator.DeserializationDecorator dlqHandler =
+            assertInstanceOf(DeadLetterQueueExceptionHandlerDecorator.DeserializationDecorator.class, resolved);
+        assertEquals("dsl-dlq", dlqHandler.deadLetterQueueTopic());
+        assertSame(options, dlqHandler.deadLetterQueueOptions());
+    }
+
+    @Test
+    public void shouldWrapWithDefaultOptionsWhenSourceHasDslDlqTopicButNoOptions() throws Exception {
+        when(stateManager.taskId()).thenReturn(taskId);
+        when(stateManager.taskType()).thenReturn(TaskType.ACTIVE);
+        task = createStatelessTask(createConfig());
+        final MockSourceNode<Integer, Integer> source = new MockSourceNode<>(intDeserializer, intDeserializer);
+        source.setDeadLetterQueue("dsl-dlq", null);
+
+        final DeserializationExceptionHandler resolved = resolveDeserializationExceptionHandler(task, source);
+
+        final DeadLetterQueueExceptionHandlerDecorator.DeserializationDecorator dlqHandler =
+            assertInstanceOf(DeadLetterQueueExceptionHandlerDecorator.DeserializationDecorator.class, resolved);
+        assertEquals("dsl-dlq", dlqHandler.deadLetterQueueTopic());
+        assertEquals(DeadLetterQueueOptions.with("dsl-dlq"), dlqHandler.deadLetterQueueOptions());
+    }
+
+    @Test
+    public void shouldWrapWithDlqHandlerWhenGlobalDeadLetterQueueEnabledWithTopic() throws Exception {
+        when(stateManager.taskId()).thenReturn(taskId);
+        when(stateManager.taskType()).thenReturn(TaskType.ACTIVE);
+        task = createStatelessTask(createConfigWithDeadLetterQueue(true, "global-dlq"));
+        final MockSourceNode<Integer, Integer> source = new MockSourceNode<>(intDeserializer, intDeserializer);
+
+        final DeserializationExceptionHandler resolved = resolveDeserializationExceptionHandler(task, source);
+
+        final DeadLetterQueueExceptionHandlerDecorator.DeserializationDecorator dlqHandler =
+            assertInstanceOf(DeadLetterQueueExceptionHandlerDecorator.DeserializationDecorator.class, resolved);
+        assertEquals("global-dlq", dlqHandler.deadLetterQueueTopic());
+        assertEquals(DeadLetterQueueOptions.with("global-dlq"), dlqHandler.deadLetterQueueOptions());
+    }
+
+    @Test
+    public void shouldFailFastWhenGlobalDeadLetterQueueEnabledButTopicIsBlank() {
+        // MA-02: an enabled-but-unconfigured global DLQ (blank topic) is rejected at StreamsConfig construction
+        // (fail-fast) rather than silently routing nothing. The misconfiguration is surfaced before any task is
+        // built, so the blank-topic scenario is no longer reachable at task/handler-resolution time.
+        final ConfigException error = assertThrows(
+            ConfigException.class,
+            () -> createConfigWithDeadLetterQueue(true, "   ")
+        );
+        assertTrue(error.getMessage().contains(StreamsConfig.DEFAULT_DEAD_LETTER_QUEUE_TOPIC_CONFIG));
+    }
+
+    @Test
+    public void shouldNotWrapWhenGlobalDeadLetterQueueDisabledEvenWithTopicSet() throws Exception {
+        when(stateManager.taskId()).thenReturn(taskId);
+        when(stateManager.taskType()).thenReturn(TaskType.ACTIVE);
+        task = createStatelessTask(createConfigWithDeadLetterQueue(false, "global-dlq"));
+        final MockSourceNode<Integer, Integer> source = new MockSourceNode<>(intDeserializer, intDeserializer);
+
+        final DeserializationExceptionHandler resolved = resolveDeserializationExceptionHandler(task, source);
+
+        assertSame(defaultDeserializationExceptionHandler(task), resolved);
+    }
+
+    @Test
+    public void shouldNotWrapWhenNeitherDslNorGlobalDeadLetterQueueConfigured() throws Exception {
+        when(stateManager.taskId()).thenReturn(taskId);
+        when(stateManager.taskType()).thenReturn(TaskType.ACTIVE);
+        task = createStatelessTask(createConfig());
+        final MockSourceNode<Integer, Integer> source = new MockSourceNode<>(intDeserializer, intDeserializer);
+
+        final DeserializationExceptionHandler resolved = resolveDeserializationExceptionHandler(task, source);
+
+        assertSame(defaultDeserializationExceptionHandler(task), resolved);
+    }
+
+    @Test
+    public void shouldPreferDslDlqTopicOverGlobalDeadLetterQueueConfig() throws Exception {
+        when(stateManager.taskId()).thenReturn(taskId);
+        when(stateManager.taskType()).thenReturn(TaskType.ACTIVE);
+        task = createStatelessTask(createConfigWithDeadLetterQueue(true, "global-dlq"));
+        final DeadLetterQueueOptions options = DeadLetterQueueOptions.with("dsl-dlq");
+        final MockSourceNode<Integer, Integer> source = new MockSourceNode<>(intDeserializer, intDeserializer);
+        source.setDeadLetterQueue("dsl-dlq", options);
+
+        final DeserializationExceptionHandler resolved = resolveDeserializationExceptionHandler(task, source);
+
+        final DeadLetterQueueExceptionHandlerDecorator.DeserializationDecorator dlqHandler =
+            assertInstanceOf(DeadLetterQueueExceptionHandlerDecorator.DeserializationDecorator.class, resolved);
+        assertEquals("dsl-dlq", dlqHandler.deadLetterQueueTopic());
+        assertSame(options, dlqHandler.deadLetterQueueOptions());
+    }
+
+    private static DeserializationExceptionHandler resolveDeserializationExceptionHandler(final StreamTask streamTask,
+                                                                                          final SourceNode<?, ?> source)
+        throws Exception {
+        final Object queueCreator = recordQueueCreator(streamTask);
+        final Method method = queueCreator.getClass()
+            .getDeclaredMethod("resolveDeserializationExceptionHandler", SourceNode.class);
+        method.setAccessible(true);
+        return (DeserializationExceptionHandler) method.invoke(queueCreator, source);
+    }
+
+    private static DeserializationExceptionHandler defaultDeserializationExceptionHandler(final StreamTask streamTask)
+        throws Exception {
+        final Object queueCreator = recordQueueCreator(streamTask);
+        final Field handlerField = queueCreator.getClass()
+            .getDeclaredField("defaultDeserializationExceptionHandler");
+        handlerField.setAccessible(true);
+        return (DeserializationExceptionHandler) handlerField.get(queueCreator);
+    }
+
+    private static Object recordQueueCreator(final StreamTask streamTask) throws Exception {
+        final Field field = StreamTask.class.getDeclaredField("recordQueueCreator");
+        field.setAccessible(true);
+        return field.get(streamTask);
     }
 
     private StreamTask createStatelessTask(final StreamsConfig config) {

@@ -16,11 +16,14 @@
  */
 package org.apache.kafka.streams.kstream.internals;
 
+import org.apache.kafka.common.internals.Topic;
 import org.apache.kafka.common.serialization.Serde;
 import org.apache.kafka.common.utils.Bytes;
 import org.apache.kafka.streams.KeyValue;
+import org.apache.kafka.streams.errors.TopologyException;
 import org.apache.kafka.streams.internals.ApiUtils;
 import org.apache.kafka.streams.kstream.BranchedKStream;
+import org.apache.kafka.streams.kstream.DeadLetterQueueOptions;
 import org.apache.kafka.streams.kstream.ForeachAction;
 import org.apache.kafka.streams.kstream.GlobalKTable;
 import org.apache.kafka.streams.kstream.Grouped;
@@ -43,6 +46,7 @@ import org.apache.kafka.streams.kstream.ValueMapper;
 import org.apache.kafka.streams.kstream.ValueMapperWithKey;
 import org.apache.kafka.streams.kstream.internals.graph.BaseRepartitionNode;
 import org.apache.kafka.streams.kstream.internals.graph.BaseRepartitionNode.BaseRepartitionNodeBuilder;
+import org.apache.kafka.streams.kstream.internals.graph.DeadLetterQueueGraphNode;
 import org.apache.kafka.streams.kstream.internals.graph.GraphNode;
 import org.apache.kafka.streams.kstream.internals.graph.OptimizableRepartitionNode;
 import org.apache.kafka.streams.kstream.internals.graph.OptimizableRepartitionNode.OptimizableRepartitionNodeBuilder;
@@ -127,6 +131,8 @@ public class KStreamImpl<K, V> extends AbstractStream<K, V> implements KStream<K
 
     private static final String REPARTITION_NAME = "KSTREAM-REPARTITION-";
 
+    private static final String DEAD_LETTER_QUEUE_NAME = "KSTREAM-DEADLETTERQUEUE-";
+
     private final boolean repartitionRequired;
 
     private OptimizableRepartitionNode<K, V> repartitionNode;
@@ -140,6 +146,60 @@ public class KStreamImpl<K, V> extends AbstractStream<K, V> implements KStream<K
                 final InternalStreamsBuilder builder) {
         super(name, keySerde, valueSerde, subTopologySourceNodes, graphNode, builder);
         this.repartitionRequired = repartitionRequired;
+    }
+
+    @Override
+    public KStream<K, V> withDeadLetterQueue(final String dlqTopic, final DeadLetterQueueOptions options) {
+        Objects.requireNonNull(dlqTopic, "dlqTopic cannot be null");
+        Objects.requireNonNull(options, "options cannot be null");
+        if (dlqTopic.trim().isEmpty()) {
+            throw new IllegalArgumentException("dlqTopic cannot be blank");
+        }
+        // Validate the DLQ topic name with Kafka's canonical topic validator at topology-build time so an invalid
+        // name fails fast here rather than at first produce.
+        Topic.validate(dlqTopic);
+        // The supplied options always carry their own DLQ topic (they can only be created via
+        // DeadLetterQueueOptions.with(topic)); reject an incoherent call in which the method argument and the
+        // options disagree, so there is a single unambiguous effective topic.
+        if (options.dlqTopic() != null && !options.dlqTopic().equals(dlqTopic)) {
+            throw new IllegalArgumentException(
+                "dlqTopic argument '" + dlqTopic + "' does not match the topic configured on the supplied "
+                    + "DeadLetterQueueOptions ('" + options.dlqTopic() + "'); they must be identical");
+        }
+
+        // Eagerly verify this stream has at least one originating source (or repartition) boundary that can be
+        // marked. The authoritative, optimization-aware marking is performed later by
+        // DeadLetterQueueGraphNode#writeToTopology.
+        if (DeadLetterQueueGraphNode.resolveSourceNames(graphNode).isEmpty()) {
+            throw new IllegalStateException(
+                "withDeadLetterQueue could not locate an originating source node for this stream; "
+                    + "the dead letter queue can only be enabled on streams derived from a source topic");
+        }
+
+        // Reject a DLQ topic that is itself an originating source of this stream — either by exact name or via a
+        // source topic pattern that matches it. Routing failures back into a source topic re-consumes, re-fails,
+        // and re-dead-letters the same record, amplifying one bad record into many (P16-03). Guard this at
+        // topology-build time so the unsafe configuration is rejected before the topology starts.
+        final Optional<String> sourceCollision =
+            DeadLetterQueueGraphNode.findSourceTopicCollision(graphNode, dlqTopic);
+        if (sourceCollision.isPresent()) {
+            throw new TopologyException(
+                "dead letter queue topic '" + dlqTopic + "' must not be an originating source of the same stream "
+                    + "(it collides with " + sourceCollision.get() + "); routing failed records back into a source "
+                    + "topic can recursively amplify a single failing record. Use a dedicated DLQ topic that is not "
+                    + "consumed by this topology.");
+        }
+
+        // Carry the immutable DLQ policy on a dedicated metadata node in this sub-graph rather than mutating shared
+        // source objects. The node marks the resolved source(s) for DLQ routing at topology-build time; it adds no
+        // processing step, so the same KStream is returned unchanged for fluent chaining, and topologies that never
+        // call this method are completely unaffected.
+        final String name = builder.newProcessorName(DEAD_LETTER_QUEUE_NAME);
+        final DeadLetterQueueGraphNode<K, V> deadLetterQueueNode =
+            new DeadLetterQueueGraphNode<>(name, dlqTopic, options);
+        builder.addGraphNode(graphNode, deadLetterQueueNode);
+
+        return this;
     }
 
     @Override

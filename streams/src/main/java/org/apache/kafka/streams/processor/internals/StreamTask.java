@@ -39,6 +39,8 @@ import org.apache.kafka.streams.errors.TaskMigratedException;
 import org.apache.kafka.streams.errors.TopologyException;
 import org.apache.kafka.streams.errors.internals.DefaultErrorHandlerContext;
 import org.apache.kafka.streams.errors.internals.FailedProcessingException;
+import org.apache.kafka.streams.kstream.DeadLetterQueueOptions;
+import org.apache.kafka.streams.kstream.internals.DeadLetterQueueExceptionHandlerDecorator;
 import org.apache.kafka.streams.processor.Cancellable;
 import org.apache.kafka.streams.processor.PunctuationType;
 import org.apache.kafka.streams.processor.Punctuator;
@@ -65,6 +67,8 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 
 import static java.util.Collections.singleton;
+import static org.apache.kafka.streams.StreamsConfig.DEFAULT_DEAD_LETTER_QUEUE_ENABLED_CONFIG;
+import static org.apache.kafka.streams.StreamsConfig.DEFAULT_DEAD_LETTER_QUEUE_TOPIC_CONFIG;
 import static org.apache.kafka.streams.StreamsConfig.PROCESSING_EXCEPTION_HANDLER_CLASS_CONFIG;
 import static org.apache.kafka.streams.processor.internals.metrics.StreamsMetricsImpl.maybeMeasureLatency;
 import static org.apache.kafka.streams.processor.internals.metrics.StreamsMetricsImpl.maybeRecordSensor;
@@ -226,7 +230,18 @@ public class StreamTask extends AbstractTask implements ProcessorNodePunctuator,
             highWatermark.put(topicPartition, -1L);
         }
         timeCurrentIdlingStarted = Optional.empty();
-        processingExceptionHandler = config.processingExceptionHandler;
+        // Install the opt-in, DSL-level DLQ layer onto the subtopology-wide processing exception handler when this
+        // subtopology opted in (via any node's withDeadLetterQueue sub-graph or the global default). The handler is
+        // shared by every ProcessorNode in the subtopology (propagated via node.init below), so wrapping it once here
+        // covers both the normal-record processing site (ProcessorNode) and the punctuation site (StreamTask); the
+        // decorator resolves the effective per-node DLQ policy from the failing node's ErrorHandlerContext
+        // #processorNodeId() at runtime. When the subtopology did not opt in, the configured handler is returned
+        // unchanged (byte-for-byte behaviour).
+        processingExceptionHandler = DeadLetterQueueInstaller.maybeWrapProcessingHandler(
+            config.processingExceptionHandler,
+            topology,
+            DeadLetterQueueInstaller.globalOptions(processorContext.appConfigs())
+        );
     }
 
     // create queues for each assigned partition and associate them
@@ -958,13 +973,37 @@ public class StreamTask extends AbstractTask implements ProcessorNodePunctuator,
             final List<ProducerRecord<byte[], byte[]>> deadLetterQueueRecords = processingExceptionResponse.deadLetterQueueRecords();
             if (!deadLetterQueueRecords.isEmpty()) {
                 final RecordCollector collector = ((RecordCollector.Supplier) processorContext).recordCollector();
+                // Opt-in, DSL-level DLQ path: route through the recursion-guarded DLQ send (MA-05) and count each
+                // record on the dlq-records-sent sensor (MA-08). Punctuation carries no source record, so the opt-in
+                // decorator excludes it (empty list) — this branch therefore fires only for a custom handler that
+                // returns DLQ records, whose behaviour is preserved. The pre-existing path is left unchanged.
+                final boolean optInDeadLetterQueue =
+                    processingExceptionHandler instanceof DeadLetterQueueExceptionHandlerDecorator.ProcessingDecorator;
                 for (final ProducerRecord<byte[], byte[]> deadLetterQueueRecord : deadLetterQueueRecords) {
-                    collector.send(
-                            deadLetterQueueRecord.key(),
-                            deadLetterQueueRecord.value(),
-                            node.name(),
-                            processorContext,
-                            deadLetterQueueRecord);
+                    if (optInDeadLetterQueue) {
+                        // Recursion-guarded DLQ send (MA-05). The dlq-records-sent-total metric is incremented inside
+                        // the record collector's producer callback only once the broker acknowledges the DLQ record
+                        // (MA-08 / P5-05, ack-based counting) — not here at the send attempt — so a failed DLQ send
+                        // is never counted as sent.
+                        collector.sendDeadLetterQueueRecord(deadLetterQueueRecord, node.name(), processorContext);
+                    } else {
+                        collector.send(
+                                deadLetterQueueRecord.key(),
+                                deadLetterQueueRecord.value(),
+                                node.name(),
+                                processorContext,
+                                deadLetterQueueRecord);
+                    }
+                }
+                // Opt-in path only: a single targeted WARN per failure event, WITHOUT the throwable (MA-09).
+                if (optInDeadLetterQueue) {
+                    DeadLetterQueueObserver.warn(
+                        log,
+                        processingException.getClass().getName(),
+                        errorHandlerContext.topic(),
+                        errorHandlerContext.partition(),
+                        errorHandlerContext.offset()
+                    );
                 }
             }
 
@@ -1424,10 +1463,60 @@ public class StreamTask extends AbstractTask implements ProcessorNodePunctuator,
                     partition,
                     source,
                     timestampExtractor,
-                    defaultDeserializationExceptionHandler,
+                    resolveDeserializationExceptionHandler(source),
                     processorContext,
                     logContext
             );
+        }
+
+        /**
+         * Resolve the effective deserialization exception handler for a source node, applying the opt-in Dead
+         * Letter Queue (DLQ) precedence: a per-source-node DSL opt-in (via
+         * {@link org.apache.kafka.streams.kstream.KStream#withDeadLetterQueue(String, DeadLetterQueueOptions)})
+         * takes precedence over the global {@code default.deadletterqueue.*} defaults, which are disabled by
+         * default. When neither opt-in applies, the topology's configured handler is returned unchanged so that
+         * non-opted-in topologies retain byte-for-byte identical error-handling behaviour.
+         *
+         * @param source the source node the queue is being created for
+         * @return the configured handler, wrapped in the DLQ-aware decorator only when DLQ is opted in
+         */
+        private DeserializationExceptionHandler resolveDeserializationExceptionHandler(final SourceNode<?, ?> source) {
+            // 1) DSL-level opt-in (most specific) — a topic marked on the source graph node via withDeadLetterQueue.
+            final String dslDlqTopic = source.deadLetterQueueTopic();
+            if (dslDlqTopic != null) {
+                final DeadLetterQueueOptions dslOptions = source.deadLetterQueueOptions() != null
+                    ? source.deadLetterQueueOptions()
+                    : DeadLetterQueueOptions.with(dslDlqTopic);
+                // Wrap in the delegating DLQ-aware decorator: it invokes the configured handler (preserving its
+                // decisions and side effects) and only routes DLQ-eligible failures. The delegate is already
+                // configured, so the decorator is NOT re-configured here.
+                return new DeadLetterQueueExceptionHandlerDecorator.DeserializationDecorator(
+                    defaultDeserializationExceptionHandler,
+                    dslDlqTopic,
+                    dslOptions
+                );
+            }
+
+            // 2) Global default.deadletterqueue.* fallback — off unless explicitly enabled with a topic set.
+            final Map<String, Object> appConfigs = processorContext.appConfigs();
+            final Object enabledValue = appConfigs.get(DEFAULT_DEAD_LETTER_QUEUE_ENABLED_CONFIG);
+            final boolean globalEnabled = enabledValue instanceof Boolean
+                ? (Boolean) enabledValue
+                : Boolean.parseBoolean(String.valueOf(enabledValue));
+            if (globalEnabled) {
+                final Object topicValue = appConfigs.get(DEFAULT_DEAD_LETTER_QUEUE_TOPIC_CONFIG);
+                final String globalTopic = topicValue == null ? null : String.valueOf(topicValue);
+                if (globalTopic != null && !globalTopic.trim().isEmpty()) {
+                    return new DeadLetterQueueExceptionHandlerDecorator.DeserializationDecorator(
+                        defaultDeserializationExceptionHandler,
+                        globalTopic,
+                        DeadLetterQueueOptions.with(globalTopic)
+                    );
+                }
+            }
+
+            // 3) No opt-in — preserve the existing behaviour exactly.
+            return defaultDeserializationExceptionHandler;
         }
     }
 }

@@ -16,8 +16,10 @@
  */
 package org.apache.kafka.streams.processor.internals.metrics;
 
+import org.apache.kafka.common.metrics.Metrics;
 import org.apache.kafka.common.metrics.Sensor;
 import org.apache.kafka.common.metrics.Sensor.RecordingLevel;
+import org.apache.kafka.common.utils.MockTime;
 
 import org.junit.jupiter.api.Test;
 import org.mockito.MockedStatic;
@@ -260,5 +262,62 @@ public class TaskMetricsTest {
             );
             assertThat(sensor, is(expectedSensor));
         }
+    }
+
+    @Test
+    public void shouldGetDlqRecordsSentSensor() {
+        final String operation = "dlq-records-sent";
+        final String totalDescription = "The total number of records sent to the dead letter queue";
+        final String rateDescription = "The average number of records sent to the dead letter queue per second";
+        when(streamsMetrics.taskLevelSensor(THREAD_ID, TASK_ID, operation, RecordingLevel.INFO)).thenReturn(expectedSensor);
+        when(streamsMetrics.taskLevelTagMap(THREAD_ID, TASK_ID)).thenReturn(tagMap);
+
+        try (final MockedStatic<StreamsMetricsImpl> streamsMetricsStaticMock = mockStatic(StreamsMetricsImpl.class)) {
+            final Sensor sensor = TaskMetrics.dlqRecordsSentSensor(THREAD_ID, TASK_ID, streamsMetrics);
+            streamsMetricsStaticMock.verify(
+                () -> StreamsMetricsImpl.addInvocationRateToSensor(
+                    expectedSensor,
+                    TASK_LEVEL_GROUP,
+                    tagMap,
+                    operation,
+                    rateDescription
+                )
+            );
+            streamsMetricsStaticMock.verify(
+                () -> StreamsMetricsImpl.addSumMetricToSensor(
+                    expectedSensor,
+                    TASK_LEVEL_GROUP,
+                    tagMap,
+                    operation,
+                    true,
+                    totalDescription
+                )
+            );
+            assertThat(sensor, is(expectedSensor));
+        }
+    }
+
+    // Issue #7 — the dlq-records-sent sensor is registered at TASK level, so it must be reclaimed by
+    // StreamTask's close path (removeAllSensors -> StreamsMetricsImpl.removeAllTaskLevelSensors). This
+    // exercises the real registry end-to-end: the dlq-records-sent-total metric exists after registration
+    // and is gone after the task-level sensors are removed (no leak across task recycling).
+    @Test
+    public void shouldRemoveDlqRecordsSentTotalMetricWhenTaskLevelSensorsAreRemoved() {
+        try (final Metrics metrics = new Metrics()) {
+            final StreamsMetricsImpl realStreamsMetrics =
+                new StreamsMetricsImpl(metrics, "test-client", "processId", new MockTime());
+
+            TaskMetrics.dlqRecordsSentSensor(THREAD_ID, TASK_ID, realStreamsMetrics);
+            assertThat(countDlqRecordsSentTotalMetrics(realStreamsMetrics), is(1L));
+
+            realStreamsMetrics.removeAllTaskLevelSensors(THREAD_ID, TASK_ID);
+            assertThat(countDlqRecordsSentTotalMetrics(realStreamsMetrics), is(0L));
+        }
+    }
+
+    private static long countDlqRecordsSentTotalMetrics(final StreamsMetricsImpl streamsMetrics) {
+        return streamsMetrics.metrics().keySet().stream()
+            .filter(metricName -> metricName.name().equals("dlq-records-sent-total"))
+            .count();
     }
 }

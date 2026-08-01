@@ -61,6 +61,75 @@ import java.time.Duration;
 public interface KStream<K, V> {
 
     /**
+     * Opt this stream in to the DSL-level Dead Letter Queue (DLQ) capability.
+     *
+     * <p>When enabled, records that fail at this stream's originating source topic(s) are captured — as their
+     * original key/value bytes plus {@code dlq.*} diagnostic headers — and routed to the supplied {@code dlqTopic},
+     * instead of either terminating the {@code StreamThread} (fail-fast) or being silently skipped
+     * (log-and-continue). Processing then resumes with the next record. Both records that fail
+     * <em>deserialization</em> at the source and records originating from the source that later fail
+     * <em>processing</em> (an eligible user-code {@code RuntimeException}) or <em>serialization/production</em> when
+     * writing downstream are routed; retriable broker/producer failures are not dead-lettered and continue to use the
+     * producer's existing retry configuration. The DLQ topic is assumed to already exist; Kafka Streams does not
+     * create it.
+     *
+     * <p>This is an <em>opt-in</em> capability layered on top of the existing exception-handling machinery: it is
+     * scoped to the topology that calls this method and takes precedence over the global
+     * {@code default.deadletterqueue.*} configuration. Topologies that never call {@code withDeadLetterQueue}
+     * exhibit byte-for-byte identical error-handling behaviour. DLQ writes reuse the same Streams producer (and
+     * therefore the same security and authentication configuration); under exactly-once they are produced
+     * <em>within</em> the task's transaction and are committed or aborted atomically with it. They are
+     * "best-effort" only in the sense that a DLQ write which itself fails to be produced is not retried indefinitely:
+     * the failure is escalated once and the task fails (surfacing through the uncaught-exception handler) rather than
+     * attempting to dead-letter the DLQ record.
+     *
+     * <p>This method does not add a processing step to the topology; the built-in implementation returns the
+     * same-typed {@code KStream} unchanged so it can be chained fluently, for example:
+     *
+     * <pre>{@code
+     * builder.stream("input-topic")
+     *        .withDeadLetterQueue("input-topic-dlq", DeadLetterQueueOptions.with("input-topic-dlq"))
+     *        .filter(...)
+     *        .to("output-topic");
+     * }</pre>
+     *
+     * <p><b>Compatibility note.</b> This method was added to the {@code KStream} interface as a {@code default}
+     * method purely to preserve source and binary compatibility for existing custom {@code KStream}
+     * implementations (adding a method never breaks an implementor at compile or link time). The {@code default}
+     * implementation does <em>not</em> silently no-op: because a custom implementation cannot wire DLQ routing into
+     * the internal topology, invoking it on anything other than the built-in {@code KStreamImpl} throws
+     * {@link UnsupportedOperationException} so that an unsupported opt-in fails loudly rather than appearing to
+     * succeed while installing nothing. The built-in {@code KStreamImpl} returned by {@link StreamsBuilder}
+     * overrides this method to install DLQ routing and return this stream.
+     *
+     * <p><b>Implementation requirements.</b> The {@code default} implementation always throws
+     * {@link UnsupportedOperationException}; the built-in {@code KStreamImpl} overrides it with the working
+     * implementation.
+     *
+     * @param dlqTopic
+     *        the name of the (pre-existing) Dead Letter Queue topic that failed records are routed to; must not be null
+     * @param options
+     *        the {@link DeadLetterQueueOptions} controlling DLQ behaviour (max record size and header inclusion);
+     *        must not be null
+     *
+     * @return the same-typed {@code KStream} (the built-in {@code KStreamImpl} returns this stream unchanged, for
+     *         fluent chaining)
+     *
+     * @throws UnsupportedOperationException if invoked on a {@code KStream} implementation that does not support
+     *         the Dead Letter Queue capability (the {@code default} method always throws; the built-in
+     *         {@code KStreamImpl} overrides it)
+     *
+     * @see DeadLetterQueueOptions
+     */
+    default KStream<K, V> withDeadLetterQueue(final String dlqTopic, final DeadLetterQueueOptions options) {
+        throw new UnsupportedOperationException(
+            "withDeadLetterQueue(String, DeadLetterQueueOptions) is not supported by this KStream implementation. "
+                + "The opt-in Dead Letter Queue capability is provided by the built-in KStream implementation "
+                + "(KStreamImpl) returned by StreamsBuilder; a custom KStream implementation must override this "
+                + "method to support it.");
+    }
+
+    /**
      * Create a new {@code KStream} that consists of all records of this stream which satisfy the given predicate.
      * All records that do not satisfy the predicate are dropped.
      * This is a stateless record-by-record operation (cf. {@link #processValues(FixedKeyProcessorSupplier, String...)}

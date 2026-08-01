@@ -17,7 +17,13 @@
 package org.apache.kafka.streams.scala
 package kstream
 
-import org.apache.kafka.streams.kstream.{GlobalKTable, JoinWindows, KStream => KStreamJ, Printed}
+import org.apache.kafka.streams.kstream.{
+  DeadLetterQueueOptions,
+  GlobalKTable,
+  JoinWindows,
+  KStream => KStreamJ,
+  Printed
+}
 import org.apache.kafka.streams.processor.TopicNameExtractor
 import org.apache.kafka.streams.processor.api.{FixedKeyProcessorSupplier, ProcessorSupplier}
 import org.apache.kafka.streams.scala.FunctionsCompatConversions.{
@@ -874,4 +880,37 @@ class KStream[K, V](val inner: KStreamJ[K, V]) {
    */
   def peek(action: (K, V) => Unit, named: Named): KStream[K, V] =
     new KStream(inner.peek(action.asForeachAction, named))
+
+  /**
+   * Opt this stream in to the DSL-level Dead Letter Queue (DLQ) capability. This is the Scala mirror of
+   * `org.apache.kafka.streams.kstream.KStream#withDeadLetterQueue` and simply delegates to the underlying Java
+   * stream, so the two DSLs behave identically.
+   * <p>
+   * When enabled, records that fail at this stream's originating source topic(s) are captured &mdash; as their
+   * original key/value bytes plus `dlq.*` diagnostic headers &mdash; and routed to the supplied `dlqTopic`,
+   * instead of either terminating the stream thread (fail-fast) or being silently skipped (log-and-continue);
+   * processing then resumes with the next record. Both records that fail <em>deserialization</em> at the source
+   * and records originating from the source that later fail <em>processing</em> (an eligible user-code
+   * `RuntimeException`) or <em>serialization/production</em> when writing downstream are routed. Retriable
+   * broker/producer failures are <em>not</em> dead-lettered and continue to use the producer's existing retry
+   * configuration. The DLQ topic is assumed to already exist; Kafka Streams does not create it.
+   * <p>
+   * This is an opt-in capability scoped to the topology that calls it, and it takes precedence over the global
+   * `default.deadletterqueue.*` configuration. Any topology that does not call this method retains byte-for-byte
+   * identical error-handling behavior. DLQ writes reuse the same Streams producer (and therefore the same security
+   * and authentication configuration); under exactly-once they are produced <em>within</em> the task's transaction
+   * and committed or aborted atomically with it. They are "best-effort" only in the sense that a DLQ write which
+   * itself fails to be produced is not retried indefinitely: the failure is escalated once and the task fails
+   * (surfacing through the uncaught-exception handler) rather than attempting to dead-letter the DLQ record.
+   *
+   * @param dlqTopic the name of the (pre-existing) Dead Letter Queue topic to route failed records to; must not
+   *                 be null
+   * @param options  the [[org.apache.kafka.streams.kstream.DeadLetterQueueOptions]] controlling DLQ behavior
+   *                 (the maximum record size &mdash; an over-limit value is truncated rather than dropped &mdash;
+   *                 and the header-inclusion toggle); must not be null
+   * @return this same [[KStream]], unchanged, so DLQ configuration can be chained fluently
+   * @see `org.apache.kafka.streams.kstream.KStream#withDeadLetterQueue`
+   */
+  def withDeadLetterQueue(dlqTopic: String, options: DeadLetterQueueOptions): KStream[K, V] =
+    new KStream(inner.withDeadLetterQueue(dlqTopic, options))
 }

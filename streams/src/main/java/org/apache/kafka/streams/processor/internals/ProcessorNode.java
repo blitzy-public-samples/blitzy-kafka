@@ -25,6 +25,8 @@ import org.apache.kafka.streams.errors.TaskCorruptedException;
 import org.apache.kafka.streams.errors.TaskMigratedException;
 import org.apache.kafka.streams.errors.internals.DefaultErrorHandlerContext;
 import org.apache.kafka.streams.errors.internals.FailedProcessingException;
+import org.apache.kafka.streams.kstream.DeadLetterQueueOptions;
+import org.apache.kafka.streams.kstream.internals.DeadLetterQueueExceptionHandlerDecorator;
 import org.apache.kafka.streams.processor.api.FixedKeyProcessor;
 import org.apache.kafka.streams.processor.api.FixedKeyProcessorContext;
 import org.apache.kafka.streams.processor.api.InternalFixedKeyRecordFactory;
@@ -64,6 +66,17 @@ public class ProcessorNode<KIn, VIn, KOut, VOut> {
 
     private Sensor droppedRecordsSensor;
 
+    // Opt-in, DSL-level Dead Letter Queue (DLQ) routing configuration for failures that occur AT this node —
+    // processing exceptions at a processor node and produce/serialization exceptions at a sink node — resolved at
+    // runtime by ErrorHandlerContext#processorNodeId(). Distinct from SourceNode's own deadLetterQueueTopic/Options,
+    // which are deserialization-scoped: a source deserializes a record before it is routed to any branch, so its
+    // policy is keyed by source topic, whereas processing/production failures must be keyed by the node (branch
+    // lineage) in which they occur so an opt-in on one branch never leaks to an unopted sibling branch (P4-01) and
+    // a dynamically-matched Pattern topic routes by the stable node identity rather than a build-time topic
+    // (P16-01/P16-02). Null unless a downstream withDeadLetterQueue opt-in marked this node.
+    private String dlqRoutingTopic;
+    private DeadLetterQueueOptions dlqRoutingOptions;
+
     public ProcessorNode(final String name) {
         this(name, (Processor<KIn, VIn, KOut, VOut>) null, null);
     }
@@ -94,6 +107,38 @@ public class ProcessorNode<KIn, VIn, KOut, VOut> {
 
     public final String name() {
         return name;
+    }
+
+    /**
+     * Mark this node as opted in to the DSL-level Dead Letter Queue (DLQ). Failures that occur while this node runs
+     * — a processing exception at a processor node, or a produce/serialization exception at a sink node — are routed
+     * to {@code dlqRoutingTopic} with {@code dlqRoutingOptions}. This is applied at topology-build time by the node
+     * factory (see {@code InternalTopologyBuilder.markProcessorNodeForDeadLetterQueue}) on behalf of a downstream
+     * {@link org.apache.kafka.streams.kstream.KStream#withDeadLetterQueue(String, DeadLetterQueueOptions)} opt-in; it
+     * is never invoked for topologies that do not opt in, so their behaviour is byte-for-byte unchanged.
+     *
+     * @param dlqRoutingTopic   the resolved DLQ topic name
+     * @param dlqRoutingOptions the resolved immutable DLQ options
+     */
+    public void setDeadLetterQueueRouting(final String dlqRoutingTopic, final DeadLetterQueueOptions dlqRoutingOptions) {
+        this.dlqRoutingTopic = dlqRoutingTopic;
+        this.dlqRoutingOptions = dlqRoutingOptions;
+    }
+
+    /**
+     * @return the node-scoped DLQ topic for processing/production failures at this node, or {@code null} when this
+     *         node did not opt in (see {@link #setDeadLetterQueueRouting})
+     */
+    public String dlqRoutingTopic() {
+        return dlqRoutingTopic;
+    }
+
+    /**
+     * @return the node-scoped DLQ options for processing/production failures at this node, or {@code null} when this
+     *         node did not opt in
+     */
+    public DeadLetterQueueOptions dlqRoutingOptions() {
+        return dlqRoutingOptions;
     }
 
     public List<ProcessorNode<KOut, VOut, ?, ?>> children() {
@@ -246,13 +291,35 @@ public class ProcessorNode<KIn, VIn, KOut, VOut> {
             final List<ProducerRecord<byte[], byte[]>> deadLetterQueueRecords = response.deadLetterQueueRecords();
             if (!deadLetterQueueRecords.isEmpty()) {
                 final RecordCollector collector = ((RecordCollector.Supplier) internalProcessorContext).recordCollector();
+                // Opt-in, DSL-level DLQ path: route through the recursion-guarded DLQ send (MA-05) and count each
+                // record on the dlq-records-sent sensor (MA-08). The pre-existing / custom-handler path is unchanged.
+                final boolean optInDeadLetterQueue =
+                    processingExceptionHandler instanceof DeadLetterQueueExceptionHandlerDecorator.ProcessingDecorator;
                 for (final ProducerRecord<byte[], byte[]> deadLetterQueueRecord : deadLetterQueueRecords) {
-                    collector.send(
-                            deadLetterQueueRecord.key(),
-                            deadLetterQueueRecord.value(),
-                            name(),
-                            internalProcessorContext,
-                            deadLetterQueueRecord
+                    if (optInDeadLetterQueue) {
+                        // Recursion-guarded DLQ send (MA-05). The dlq-records-sent-total metric is incremented inside
+                        // the record collector's producer callback only once the broker acknowledges the DLQ record
+                        // (MA-08 / P5-05, ack-based counting) — not here at the send attempt — so a failed DLQ send
+                        // is never counted as sent.
+                        collector.sendDeadLetterQueueRecord(deadLetterQueueRecord, name(), internalProcessorContext);
+                    } else {
+                        collector.send(
+                                deadLetterQueueRecord.key(),
+                                deadLetterQueueRecord.value(),
+                                name(),
+                                internalProcessorContext,
+                                deadLetterQueueRecord
+                        );
+                    }
+                }
+                // Opt-in path only: a single targeted WARN per failure event, WITHOUT the throwable (MA-09).
+                if (optInDeadLetterQueue) {
+                    DeadLetterQueueObserver.warn(
+                        log,
+                        processingException.getClass().getName(),
+                        errorHandlerContext.topic(),
+                        errorHandlerContext.partition(),
+                        errorHandlerContext.offset()
                     );
                 }
             }

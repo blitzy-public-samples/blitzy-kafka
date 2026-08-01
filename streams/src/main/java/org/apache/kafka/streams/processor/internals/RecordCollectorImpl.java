@@ -46,6 +46,7 @@ import org.apache.kafka.streams.errors.TaskCorruptedException;
 import org.apache.kafka.streams.errors.TaskMigratedException;
 import org.apache.kafka.streams.errors.internals.DefaultErrorHandlerContext;
 import org.apache.kafka.streams.errors.internals.FailedProcessingException;
+import org.apache.kafka.streams.kstream.internals.DeadLetterQueueExceptionHandlerDecorator;
 import org.apache.kafka.streams.processor.RecordContext;
 import org.apache.kafka.streams.processor.StreamPartitioner;
 import org.apache.kafka.streams.processor.TaskId;
@@ -270,57 +271,230 @@ public class RecordCollectorImpl implements RecordCollector {
                             final String processorNodeId,
                             final InternalProcessorContext<?, ?> context,
                             final ProducerRecord<byte[], byte[]> serializedRecord) {
+        doSend(key, value, processorNodeId, context, serializedRecord, false);
+    }
 
-        streamsProducer.send(serializedRecord, (metadata, exception) -> {
-            try {
-                // if there's already an exception record, skip logging offsets or new exceptions
-                if (sendException.get() != null) {
-                    return;
-                }
+    /**
+     * {@inheritDoc}
+     *
+     * <p>Overrides the default to route the DLQ record through the recursion-guarded {@link #doSend} path so that a
+     * DLQ record that itself fails to produce is escalated exactly once (rather than re-entering the production
+     * exception handler and potentially recursing indefinitely — MA-05).
+     */
+    @Override
+    public void sendDeadLetterQueueRecord(final ProducerRecord<byte[], byte[]> deadLetterQueueRecord,
+                                          final String processorNodeId,
+                                          final InternalProcessorContext<?, ?> context) {
+        doSend(
+            deadLetterQueueRecord.key(),
+            deadLetterQueueRecord.value(),
+            processorNodeId,
+            context,
+            deadLetterQueueRecord,
+            true
+        );
+    }
 
-                if (exception == null) {
-                    final TopicPartition tp = new TopicPartition(metadata.topic(), metadata.partition());
-                    if (metadata.offset() >= 0L) {
-                        offsets.put(tp, metadata.offset());
-                    } else {
-                        log.warn("Received offset={} in produce response for {}", metadata.offset(), tp);
+    /**
+     * Core send implementation shared by the public {@link #send(Object, Object, String, InternalProcessorContext,
+     * ProducerRecord) send} entry point (for normal records) and {@link #sendDeadLetterQueueRecord(ProducerRecord,
+     * String, InternalProcessorContext) sendDeadLetterQueueRecord} (for opt-in DLQ side output).
+     *
+     * <p>When {@code isDeadLetterQueueRecord} is {@code false} the behaviour is byte-for-byte identical to the
+     * historical send path: an asynchronous producer failure is routed to {@link #recordSendError} (which consults
+     * the {@link ProductionExceptionHandler}), and a synchronous throw from the producer propagates to the caller.
+     *
+     * <p>When {@code isDeadLetterQueueRecord} is {@code true} the recursion guard (MA-05) applies: a failed DLQ send —
+     * whether reported asynchronously through the callback or thrown synchronously by
+     * {@link StreamsProducer#send(ProducerRecord, org.apache.kafka.clients.producer.Callback)} — is escalated exactly
+     * once via {@link #sendException} so the {@code StreamThread} surfaces it through the uncaught-exception path,
+     * instead of being routed back into the production error handler (which could otherwise return another DLQ record
+     * and recurse indefinitely). A successful DLQ send is bookkept exactly like any other produced record and, on the
+     * opt-in DLQ path, additionally increments the {@code dlq-records-sent-total} metric — but only once the broker
+     * acknowledges the record (P5-05, ack-based counting), so a DLQ send that fails is never counted as sent.
+     */
+    private <K, V> void doSend(final K key,
+                               final V value,
+                               final String processorNodeId,
+                               final InternalProcessorContext<?, ?> context,
+                               final ProducerRecord<byte[], byte[]> serializedRecord,
+                               final boolean isDeadLetterQueueRecord) {
+
+        // Ack-based DLQ counting (P5-05 / MA-08): resolve the dlq-records-sent sensor here, on the calling
+        // StreamThread, and capture it for the asynchronous callback. The producer completion callback runs on the
+        // producer's Sender thread, where {@code Thread.currentThread().getName()} would carry the wrong
+        // {@code thread-id} tag, so the sensor must NOT be resolved inside the callback. It is resolved lazily on the
+        // opt-in DLQ path only ({@code isDeadLetterQueueRecord}), so a topology that does not opt in never registers
+        // the sensor and keeps byte-for-byte identical non-opt-in behaviour. The sensor is used to increment
+        // {@code dlq-records-sent-total} only once the broker acknowledges the DLQ record (success branch below), so
+        // the metric counts confirmed DLQ persistence rather than send attempts.
+        final Sensor dlqRecordsSentSensor = isDeadLetterQueueRecord
+            ? TaskMetrics.dlqRecordsSentSensor(Thread.currentThread().getName(), taskId.toString(), streamsMetrics)
+            : null;
+
+        try {
+            streamsProducer.send(serializedRecord, (metadata, exception) -> {
+                try {
+                    // if there's already an exception record, skip logging offsets or new exceptions
+                    if (sendException.get() != null) {
+                        return;
                     }
 
-                    if (!serializedRecord.topic().endsWith("-changelog")) {
-                        // we may not have created a sensor during initialization if the node uses dynamic topic routing,
-                        // as all topics are not known up front, so create the sensor for this topic if absent
-                        final Sensor topicProducedSensor = producedSensorByTopic.computeIfAbsent(
-                            serializedRecord.topic(),
-                            t -> TopicMetrics.producedSensor(
-                                Thread.currentThread().getName(),
-                                taskId.toString(),
-                                processorNodeId,
+                    if (exception == null) {
+                        final TopicPartition tp = new TopicPartition(metadata.topic(), metadata.partition());
+                        if (metadata.offset() >= 0L) {
+                            offsets.put(tp, metadata.offset());
+                        } else {
+                            log.warn("Received offset={} in produce response for {}", metadata.offset(), tp);
+                        }
+
+                        if (!serializedRecord.topic().endsWith("-changelog")) {
+                            // we may not have created a sensor during initialization if the node uses dynamic topic routing,
+                            // as all topics are not known up front, so create the sensor for this topic if absent
+                            final Sensor topicProducedSensor = producedSensorByTopic.computeIfAbsent(
                                 serializedRecord.topic(),
-                                context.metrics()
-                            )
-                        );
-                        final long bytesProduced = producerRecordSizeInBytes(serializedRecord);
-                        topicProducedSensor.record(
-                            bytesProduced,
-                            context.currentSystemTimeMs()
-                        );
-                    }
-                } else {
-                    recordSendError(
-                        serializedRecord.topic(),
-                        exception,
-                        serializedRecord,
-                        context,
-                        processorNodeId
-                    );
+                                t -> TopicMetrics.producedSensor(
+                                    Thread.currentThread().getName(),
+                                    taskId.toString(),
+                                    processorNodeId,
+                                    serializedRecord.topic(),
+                                    context.metrics()
+                                )
+                            );
+                            final long bytesProduced = producerRecordSizeInBytes(serializedRecord);
+                            topicProducedSensor.record(
+                                bytesProduced,
+                                context.currentSystemTimeMs()
+                            );
+                        }
 
-                    // KAFKA-7510 only put message key and value in TRACE level log so we don't leak data by default
-                    log.trace("Failed record: (key {} value {} timestamp {}) topic=[{}] partition=[{}]", key, value, serializedRecord.timestamp(), serializedRecord.topic(), serializedRecord.partition());
+                        if (isDeadLetterQueueRecord) {
+                            // Ack-based DLQ counting (P5-05): increment dlq-records-sent-total only now that the
+                            // broker has acknowledged the DLQ record, so the metric reflects confirmed DLQ
+                            // persistence. A DLQ send that fails is handled in the exception branch below (escalated
+                            // exactly once via the recursion guard) and is deliberately NOT counted here, so a failed
+                            // DLQ send never emits a false "sent" signal.
+                            DeadLetterQueueObserver.recordSent(dlqRecordsSentSensor);
+                        }
+                    } else if (isDeadLetterQueueRecord) {
+                        // Recursion guard (MA-05): a DLQ record that itself failed to produce must NOT be routed back
+                        // through the production exception handler (which could return another DLQ record and recurse
+                        // indefinitely). Escalate exactly once via sendException so the StreamThread surfaces it through
+                        // the uncaught-exception path, consistent with the KIP-1034 design.
+                        maybeLatchDeadLetterQueueSendException(serializedRecord.topic(), exception);
+                    } else {
+                        recordSendError(
+                            serializedRecord.topic(),
+                            exception,
+                            serializedRecord,
+                            context,
+                            processorNodeId
+                        );
+
+                        // KAFKA-7510 only put message key and value in TRACE level log so we don't leak data by default
+                        log.trace("Failed record: (key {} value {} timestamp {}) topic=[{}] partition=[{}]", key, value, serializedRecord.timestamp(), serializedRecord.topic(), serializedRecord.partition());
+                    }
+                } catch (final RuntimeException fatal) {
+                    sendException.set(new StreamsException("Producer.send `Callback` failed", fatal));
                 }
-            } catch (final RuntimeException fatal) {
-                sendException.set(new StreamsException("Producer.send `Callback` failed", fatal));
+            });
+        } catch (final RuntimeException synchronousSendException) {
+            if (isDeadLetterQueueRecord) {
+                // A synchronous failure from StreamsProducer.send for a DLQ record is escalated exactly once,
+                // consistent with the asynchronous callback path above (MA-05).
+                maybeLatchDeadLetterQueueSendException(serializedRecord.topic(), synchronousSendException);
+            } else {
+                throw synchronousSendException;
             }
-        });
+        }
+    }
+
+    /**
+     * Escalate a failed Dead Letter Queue send exactly once. The failure is latched into the shared
+     * {@link #sendException} (first error wins) so that it surfaces through the {@code StreamThread}'s
+     * uncaught-exception path on the next {@code send}/{@code flush}/close, rather than being re-handled by the
+     * production exception handler. This is the recursion guard required by MA-05: a DLQ write is a best-effort side
+     * output and is not retried; if it cannot be produced, the task fails rather than dead-lettering the DLQ record.
+     *
+     * @param dlqTopic the DLQ topic the record could not be produced to
+     * @param cause    the underlying send failure (synchronous throw or asynchronous callback exception)
+     */
+    private void maybeLatchDeadLetterQueueSendException(final String dlqTopic, final Exception cause) {
+        final KafkaException dlqSendException = new StreamsException(
+            String.format(
+                "Unable to send a record to the dead letter queue topic [%s] for task %s. The dead letter queue write "
+                    + "is a best-effort side output and is not retried; failing the task so the failure is surfaced to "
+                    + "the uncaught exception handler.",
+                dlqTopic, taskId),
+            cause);
+        if (sendException.compareAndSet(null, dlqSendException)) {
+            log.error("Unable to send a record to the dead letter queue topic [{}] for task {}.", dlqTopic, taskId, cause);
+        }
+    }
+
+    /**
+     * Route the DLQ records returned by a production/serialization exception handler to the DLQ topic.
+     *
+     * <p>Only the opt-in, DSL-level DLQ path — identified by the production exception handler being the
+     * {@link DeadLetterQueueExceptionHandlerDecorator.ProductionDecorator DLQ-aware production decorator} — is
+     * recursion-guarded and observed: each record is produced through the guarded {@link #doSend} path (MA-05),
+     * counted once on the {@code dlq-records-sent} sensor when the broker acknowledges it (MA-08 / P5-05, so the
+     * metric reflects confirmed DLQ persistence rather than send attempts), and a single targeted WARN carrying only
+     * the exception class and source coordinates (never the throwable or payload) is emitted per failure event when
+     * the record is routed to the DLQ (MA-09).
+     * Records returned by the pre-existing KIP-1034 global-config path or a custom handler are produced through the
+     * ordinary {@link #send} path exactly as before, so non-opt-in behaviour is byte-for-byte unchanged.
+     *
+     * @param deadLetterQueueRecords the DLQ records returned by the handler response (may be empty)
+     * @param processorNodeId        the id of the processor node on whose behalf the records are sent
+     * @param context                the current processor context (source of the metrics registry and coordinates)
+     * @param failureCause           the exception that triggered dead-lettering (used only for the WARN class name)
+     */
+    private void maybeSendDeadLetterQueueRecords(final List<ProducerRecord<byte[], byte[]>> deadLetterQueueRecords,
+                                                 final String processorNodeId,
+                                                 final InternalProcessorContext<?, ?> context,
+                                                 final Exception failureCause) {
+        if (deadLetterQueueRecords.isEmpty()) {
+            return;
+        }
+        final boolean optInDeadLetterQueue =
+            productionExceptionHandler instanceof DeadLetterQueueExceptionHandlerDecorator.ProductionDecorator;
+        for (final ProducerRecord<byte[], byte[]> deadLetterQueueRecord : deadLetterQueueRecords) {
+            if (optInDeadLetterQueue) {
+                // Recursion-guarded DLQ send (MA-05). The dlq-records-sent-total metric is NOT incremented here at
+                // the send attempt; it is incremented inside doSend's producer callback only once the broker
+                // acknowledges the DLQ record (P5-05, ack-based counting), so a failed DLQ send emits no false
+                // "sent" signal.
+                doSend(
+                    deadLetterQueueRecord.key(),
+                    deadLetterQueueRecord.value(),
+                    processorNodeId,
+                    context,
+                    deadLetterQueueRecord,
+                    true
+                );
+            } else {
+                send(
+                    deadLetterQueueRecord.key(),
+                    deadLetterQueueRecord.value(),
+                    processorNodeId,
+                    context,
+                    deadLetterQueueRecord
+                );
+            }
+        }
+        if (optInDeadLetterQueue) {
+            // A single targeted WARN per failure event, emitted when the record is ROUTED to the DLQ (attempt
+            // semantics, before the asynchronous acknowledgement) — see DeadLetterQueueObserver.warn (P9-02).
+            final ProcessorRecordContext recordContext = context.recordContext();
+            DeadLetterQueueObserver.warn(
+                log,
+                failureCause.getClass().getName(),
+                recordContext == null ? null : recordContext.topic(),
+                recordContext == null ? -1 : recordContext.partition(),
+                recordContext == null ? -1L : recordContext.offset()
+            );
+        }
     }
 
     private static void freeRawInputRecordFromContext(final InternalProcessorContext<Void, Void> context) {
@@ -373,18 +547,7 @@ public class RecordCollectorImpl implements RecordCollector {
             );
         }
 
-        final List<ProducerRecord<byte[], byte[]>> deadLetterQueueRecords = response.deadLetterQueueRecords();
-        if (!deadLetterQueueRecords.isEmpty()) {
-            for (final ProducerRecord<byte[], byte[]> deadLetterQueueRecord : deadLetterQueueRecords) {
-                this.send(
-                        deadLetterQueueRecord.key(),
-                        deadLetterQueueRecord.value(),
-                        processorNodeId,
-                        context,
-                        deadLetterQueueRecord
-                );
-            }
-        }
+        maybeSendDeadLetterQueueRecords(response.deadLetterQueueRecords(), processorNodeId, context, serializationException);
 
         if (maybeFailResponse(response.result()) == ProductionExceptionHandler.Result.FAIL) {
             throw new StreamsException(
@@ -511,18 +674,7 @@ public class RecordCollectorImpl implements RecordCollector {
                 return;
             }
 
-            final List<ProducerRecord<byte[], byte[]>> deadLetterQueueRecords = response.deadLetterQueueRecords();
-            if (!deadLetterQueueRecords.isEmpty()) {
-                for (final ProducerRecord<byte[], byte[]> deadLetterQueueRecord : deadLetterQueueRecords) {
-                    this.send(
-                            deadLetterQueueRecord.key(),
-                            deadLetterQueueRecord.value(),
-                            processorNodeId,
-                            context,
-                            deadLetterQueueRecord
-                    );
-                }
-            }
+            maybeSendDeadLetterQueueRecords(response.deadLetterQueueRecords(), processorNodeId, context, productionException);
 
             if (productionException instanceof RetriableException && response.result() == ProductionExceptionHandler.Result.RETRY) {
                 errorMessage += "\nThe broker is either slow or in bad state (like not having enough replicas) in responding the request, " +

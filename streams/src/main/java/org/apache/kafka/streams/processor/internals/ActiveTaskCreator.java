@@ -189,7 +189,19 @@ class ActiveTaskCreator {
             logContext,
             taskId,
             streamsProducer,
-            applicationConfig.productionExceptionHandler(),
+            // Install the opt-in, DSL-level DLQ layer onto the task's production exception handler when this
+            // subtopology opted in (via any node's withDeadLetterQueue sub-graph or the global default). The
+            // decorator resolves the effective per-node DLQ policy from the failing sink node's ErrorHandlerContext
+            // #processorNodeId() at runtime. When it did not opt in, the configured handler is returned unchanged,
+            // preserving byte-for-byte behaviour.
+            DeadLetterQueueInstaller.maybeWrapProductionHandler(
+                applicationConfig.productionExceptionHandler(),
+                topology,
+                DeadLetterQueueInstaller.globalOptions(
+                    applicationConfig.getBoolean(StreamsConfig.DEFAULT_DEAD_LETTER_QUEUE_ENABLED_CONFIG),
+                    applicationConfig.getString(StreamsConfig.DEFAULT_DEAD_LETTER_QUEUE_TOPIC_CONFIG)
+                )
+            ),
             streamsMetrics,
             topology
         );

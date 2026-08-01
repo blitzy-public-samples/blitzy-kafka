@@ -104,11 +104,15 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -1886,6 +1890,274 @@ public class RecordCollectorTest {
 
         assertEquals(1, mockProducer.history().size());
         assertEquals("dlq", mockProducer.history().get(0).topic());
+    }
+
+    @Test
+    public void shouldNotEmitOptInDlqObservabilityForNonOptInSerializationException() {
+        // Regression: the opt-in DSL DLQ observability (dlq-records-sent metric + targeted WARN) must NOT fire for
+        // the pre-existing global-config (KIP-1034) production path. A serialization failure with the global DLQ
+        // topic configured still produces the DLQ record (unchanged behaviour), but the new observability stays
+        // absent so topologies that do not opt in via withDeadLetterQueue keep byte-for-byte identical behaviour.
+        try (final LogCaptureAppender logCaptureAppender = LogCaptureAppender.createAndRegister(RecordCollectorImpl.class);
+             final ErrorStringSerializer errorSerializer = new ErrorStringSerializer()) {
+            final DefaultProductionExceptionHandler productionExceptionHandler = new DefaultProductionExceptionHandler();
+            productionExceptionHandler.configure(Collections.singletonMap(
+                StreamsConfig.ERRORS_DEAD_LETTER_QUEUE_TOPIC_NAME_CONFIG,
+                "dlq"
+            ));
+            final RecordCollector collector = newRecordCollector(productionExceptionHandler);
+            collector.initialize();
+
+            assertThrows(
+                StreamsException.class,
+                () ->
+                    collector.send(topic, "hello", "world", null, 0, null, errorSerializer, stringSerializer, sinkNodeName, context)
+            );
+
+            // The global-config DLQ record is still produced (KIP-1034 behaviour unchanged).
+            assertEquals(1, mockProducer.history().size());
+            assertEquals("dlq", mockProducer.history().get(0).topic());
+
+            // ...but the opt-in dlq-records-sent metric is never registered for the non-opt-in path.
+            assertNull(streamsMetrics.metrics().get(new MetricName(
+                "dlq-records-sent-total",
+                "stream-task-metrics",
+                "The total number of records sent to the dead letter queue",
+                mkMap(
+                    mkEntry("thread-id", Thread.currentThread().getName()),
+                    mkEntry("task-id", taskId.toString())
+                )
+            )));
+
+            // ...and the targeted opt-in DLQ WARN is never emitted for the non-opt-in path.
+            final List<String> messages = logCaptureAppender.getMessages();
+            final boolean warnPresent = messages.stream().anyMatch(message ->
+                message.contains("Routing a failed record to the dead letter queue."));
+            assertFalse(warnPresent, "Opt-in DLQ WARN must not fire for the non-opt-in path. Captured: " + messages);
+        }
+    }
+
+    @Test
+    public void shouldNotEmitOptInDlqObservabilityForNonOptInProduceException() {
+        // Regression: the opt-in DSL DLQ observability (dlq-records-sent metric + targeted WARN) must NOT fire for
+        // the pre-existing global-config (KIP-1034) production path. A produce-time failure with the global DLQ
+        // topic configured still produces the DLQ record (unchanged behaviour), but the new observability stays
+        // absent so topologies that do not opt in via withDeadLetterQueue keep byte-for-byte identical behaviour.
+        try (final LogCaptureAppender logCaptureAppender = LogCaptureAppender.createAndRegister(RecordCollectorImpl.class)) {
+            final KafkaException exception = new KafkaException("KABOOM!");
+            final StreamsProducer streamProducer = getExceptionalStreamsProducerOnSend(exception);
+            final MockProducer<byte[], byte[]> mockProducer = (MockProducer<byte[], byte[]>) streamProducer.kafkaProducer();
+            final DefaultProductionExceptionHandler productionExceptionHandler = new DefaultProductionExceptionHandler();
+            productionExceptionHandler.configure(Collections.singletonMap(
+                StreamsConfig.ERRORS_DEAD_LETTER_QUEUE_TOPIC_NAME_CONFIG,
+                "dlq"
+            ));
+            final RecordCollector collector = new RecordCollectorImpl(
+                logContext,
+                taskId,
+                streamProducer,
+                productionExceptionHandler,
+                streamsMetrics,
+                topology
+            );
+
+            collector.initialize();
+
+            collector.send(topic, "hello", "world", null, 0, null, stringSerializer, stringSerializer, sinkNodeName, context);
+            assertThrows(StreamsException.class, collector::flush);
+
+            // The global-config DLQ record is still produced (KIP-1034 behaviour unchanged).
+            assertEquals(1, mockProducer.history().size());
+            assertEquals("dlq", mockProducer.history().get(0).topic());
+
+            // ...but the opt-in dlq-records-sent metric is never registered for the non-opt-in path.
+            assertNull(streamsMetrics.metrics().get(new MetricName(
+                "dlq-records-sent-total",
+                "stream-task-metrics",
+                "The total number of records sent to the dead letter queue",
+                mkMap(
+                    mkEntry("thread-id", Thread.currentThread().getName()),
+                    mkEntry("task-id", taskId.toString())
+                )
+            )));
+
+            // ...and the targeted opt-in DLQ WARN is never emitted for the non-opt-in path.
+            final List<String> messages = logCaptureAppender.getMessages();
+            final boolean warnPresent = messages.stream().anyMatch(message ->
+                message.contains("Routing a failed record to the dead letter queue."));
+            assertFalse(warnPresent, "Opt-in DLQ WARN must not fire for the non-opt-in path. Captured: " + messages);
+        }
+    }
+
+    @Test
+    public void shouldEscalateOnceAndNotReRouteWhenDeadLetterQueueRecordSendFailsAsynchronously() {
+        // MA-05 recursion guard (asynchronous callback): when a DLQ record itself fails to be produced, the failure
+        // must be escalated exactly once via the shared sendException (so it surfaces through the StreamThread's
+        // uncaught-exception path on the next send/flush/close) and must NOT be routed back through the production
+        // exception handler — otherwise the handler could return another DLQ record and recurse indefinitely.
+        final StreamsProducer streamsProducer = mock(StreamsProducer.class);
+        final AtomicReference<KafkaException> sendException = new AtomicReference<>(null);
+        when(streamsProducer.sendException()).thenReturn(sendException);
+        when(streamsProducer.send(any(), any())).thenAnswer(invocation -> {
+            ((Callback) invocation.getArgument(1)).onCompletion(null, new KafkaException("DLQ produce boom"));
+            return null;
+        });
+        // If the production handler is ever consulted for the DLQ record's own failure, that is the recursion bug.
+        final ProductionExceptionHandler recursionSentinel = mock(ProductionExceptionHandler.class);
+        final ProcessorTopology topology = mock(ProcessorTopology.class);
+
+        final RecordCollectorImpl collector = new RecordCollectorImpl(
+            logContext, taskId, streamsProducer, recursionSentinel, streamsMetrics, topology);
+
+        final ProducerRecord<byte[], byte[]> dlqRecord =
+            new ProducerRecord<>("dlqTopic", null, 0L, "k".getBytes(), "v".getBytes());
+
+        // The failed DLQ send is a best-effort side output: it must NOT throw synchronously here.
+        assertDoesNotThrow(() -> collector.sendDeadLetterQueueRecord(dlqRecord, sinkNodeName, context));
+
+        // Escalated exactly once: a DLQ-specific StreamsException naming the DLQ topic is latched.
+        final KafkaException latched = sendException.get();
+        assertNotNull(latched, "A failed DLQ send must latch an exception for escalation");
+        assertInstanceOf(StreamsException.class, latched);
+        assertTrue(latched.getMessage().contains("dlqTopic"),
+            "Escalated exception should identify the DLQ topic. Was: " + latched.getMessage());
+
+        // No recursion: the producer was asked to send exactly once (the DLQ record itself), and the production
+        // exception handler was never consulted for the DLQ record's own failure.
+        verify(streamsProducer, times(1)).send(any(), any());
+        verifyNoInteractions(recursionSentinel);
+    }
+
+    @Test
+    public void shouldEscalateWhenDeadLetterQueueRecordSendFailsSynchronously() {
+        // MA-05 recursion guard (synchronous throw): a synchronous failure from the producer send for a DLQ record
+        // is escalated exactly once (latched) and is NOT propagated to the caller, mirroring the asynchronous path.
+        final StreamsProducer streamsProducer = mock(StreamsProducer.class);
+        final AtomicReference<KafkaException> sendException = new AtomicReference<>(null);
+        when(streamsProducer.sendException()).thenReturn(sendException);
+        when(streamsProducer.send(any(), any())).thenThrow(new StreamsException("synchronous DLQ produce boom"));
+        final ProductionExceptionHandler recursionSentinel = mock(ProductionExceptionHandler.class);
+        final ProcessorTopology topology = mock(ProcessorTopology.class);
+
+        final RecordCollectorImpl collector = new RecordCollectorImpl(
+            logContext, taskId, streamsProducer, recursionSentinel, streamsMetrics, topology);
+
+        final ProducerRecord<byte[], byte[]> dlqRecord =
+            new ProducerRecord<>("dlqTopic", null, 0L, "k".getBytes(), "v".getBytes());
+
+        // Must not propagate the synchronous failure to the caller (best-effort side output).
+        assertDoesNotThrow(() -> collector.sendDeadLetterQueueRecord(dlqRecord, sinkNodeName, context));
+
+        final KafkaException latched = sendException.get();
+        assertNotNull(latched, "A synchronous DLQ send failure must be latched for escalation");
+        assertInstanceOf(StreamsException.class, latched);
+        assertTrue(latched.getMessage().contains("dlqTopic"));
+        verifyNoInteractions(recursionSentinel);
+    }
+
+    @Test
+    public void shouldNotOverwriteFirstEscalatedExceptionOnSubsequentDeadLetterQueueSendFailure() {
+        // MA-05 escalate-ONCE: once a failed DLQ send has latched an exception, a subsequent failed DLQ send must
+        // not overwrite it or pile up additional escalations (first error wins), keeping the failure signal stable.
+        final StreamsProducer streamsProducer = mock(StreamsProducer.class);
+        final AtomicReference<KafkaException> sendException = new AtomicReference<>(null);
+        when(streamsProducer.sendException()).thenReturn(sendException);
+        when(streamsProducer.send(any(), any())).thenAnswer(invocation -> {
+            ((Callback) invocation.getArgument(1)).onCompletion(null, new KafkaException("DLQ produce boom"));
+            return null;
+        });
+        final ProcessorTopology topology = mock(ProcessorTopology.class);
+        final RecordCollectorImpl collector = new RecordCollectorImpl(
+            logContext, taskId, streamsProducer, productionExceptionHandler, streamsMetrics, topology);
+
+        final ProducerRecord<byte[], byte[]> firstDlqRecord =
+            new ProducerRecord<>("dlqTopic", null, 0L, "k1".getBytes(), "v1".getBytes());
+        final ProducerRecord<byte[], byte[]> secondDlqRecord =
+            new ProducerRecord<>("dlqTopic", null, 0L, "k2".getBytes(), "v2".getBytes());
+
+        collector.sendDeadLetterQueueRecord(firstDlqRecord, sinkNodeName, context);
+        final KafkaException firstLatched = sendException.get();
+        assertNotNull(firstLatched, "The first failed DLQ send must latch an exception");
+
+        // A second failed DLQ send must not replace the first escalation.
+        collector.sendDeadLetterQueueRecord(secondDlqRecord, sinkNodeName, context);
+        assertSame(firstLatched, sendException.get(),
+            "The first escalated exception must be preserved (escalate once, first error wins)");
+    }
+
+    @Test
+    public void shouldIncrementDlqRecordsSentTotalOnlyOnBrokerAckForOptInDlqSend() {
+        // P5-05 (ack-based counting): the dlq-records-sent-total metric must be incremented ONLY once the broker
+        // ACKNOWLEDGES the DLQ record — i.e. from the producer send callback's success branch (exception == null) —
+        // so it reflects confirmed DLQ persistence rather than a send attempt. Here the producer completes the DLQ
+        // send successfully, so the metric reads exactly 1.
+        final StreamsProducer streamsProducer = mock(StreamsProducer.class);
+        when(streamsProducer.sendException()).thenReturn(new AtomicReference<>(null));
+        final RecordMetadata ackMetadata = new RecordMetadata(new TopicPartition("dlqTopic", 0), 0L, 0, 0L, 1, 1);
+        when(streamsProducer.send(any(), any())).thenAnswer(invocation -> {
+            // Simulate a successful broker acknowledgement (exception == null).
+            ((Callback) invocation.getArgument(1)).onCompletion(ackMetadata, null);
+            return null;
+        });
+        final ProcessorTopology topology = mock(ProcessorTopology.class);
+        final RecordCollectorImpl collector = new RecordCollectorImpl(
+            logContext, taskId, streamsProducer, productionExceptionHandler, streamsMetrics, topology);
+
+        final ProducerRecord<byte[], byte[]> dlqRecord =
+            new ProducerRecord<>("dlqTopic", null, 0L, "k".getBytes(), "v".getBytes());
+        collector.sendDeadLetterQueueRecord(dlqRecord, sinkNodeName, context);
+
+        // The acknowledged DLQ record is counted exactly once.
+        assertEquals(1.0, streamsMetrics.metrics().get(new MetricName(
+            "dlq-records-sent-total",
+            "stream-task-metrics",
+            "The total number of records sent to the dead letter queue",
+            mkMap(
+                mkEntry("thread-id", Thread.currentThread().getName()),
+                mkEntry("task-id", taskId.toString())
+            ))).metricValue());
+    }
+
+    @Test
+    public void shouldNotIncrementDlqRecordsSentTotalWhenDlqSendFailsAsynchronously() {
+        // P5-05 (no false success): when a DLQ record's own produce fails asynchronously (exception != null in the
+        // callback), the dlq-records-sent-total metric must NOT be incremented. The sensor is registered when the
+        // send is attempted (on the calling thread, so it carries the correct thread-id tag), so the metric exists
+        // but reads 0.0 — a truthful "0 sent" rather than the previous false "1 sent" — and the failure is escalated
+        // exactly once via the recursion guard.
+        final StreamsProducer streamsProducer = mock(StreamsProducer.class);
+        final AtomicReference<KafkaException> sendException = new AtomicReference<>(null);
+        when(streamsProducer.sendException()).thenReturn(sendException);
+        when(streamsProducer.send(any(), any())).thenAnswer(invocation -> {
+            // Simulate an asynchronous DLQ produce failure (exception != null).
+            ((Callback) invocation.getArgument(1)).onCompletion(null, new KafkaException("DLQ produce boom"));
+            return null;
+        });
+        final ProcessorTopology topology = mock(ProcessorTopology.class);
+        final RecordCollectorImpl collector = new RecordCollectorImpl(
+            logContext, taskId, streamsProducer, productionExceptionHandler, streamsMetrics, topology);
+
+        final ProducerRecord<byte[], byte[]> dlqRecord =
+            new ProducerRecord<>("dlqTopic", null, 0L, "k".getBytes(), "v".getBytes());
+        // Best-effort side output: a failed DLQ send must not throw synchronously to the caller.
+        assertDoesNotThrow(() -> collector.sendDeadLetterQueueRecord(dlqRecord, sinkNodeName, context));
+
+        // The failed DLQ send is escalated exactly once (DLQ-specific StreamsException naming the DLQ topic).
+        final KafkaException latched = sendException.get();
+        assertNotNull(latched, "A failed DLQ send must latch an exception for escalation");
+        assertInstanceOf(StreamsException.class, latched);
+        assertTrue(latched.getMessage().contains("dlqTopic"),
+            "Escalated exception should identify the DLQ topic. Was: " + latched.getMessage());
+
+        // ...and it must NOT be counted as sent: the metric reads 0.0 (no false "sent" signal on failure).
+        assertEquals(0.0, streamsMetrics.metrics().get(new MetricName(
+            "dlq-records-sent-total",
+            "stream-task-metrics",
+            "The total number of records sent to the dead letter queue",
+            mkMap(
+                mkEntry("thread-id", Thread.currentThread().getName()),
+                mkEntry("task-id", taskId.toString())
+            ))).metricValue());
     }
 
     @Test

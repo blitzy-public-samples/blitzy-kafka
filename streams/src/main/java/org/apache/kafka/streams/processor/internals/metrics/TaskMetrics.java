@@ -84,6 +84,12 @@ public class TaskMetrics {
     private static final String DROPPED_RECORDS_RATE_DESCRIPTION =
         RATE_DESCRIPTION_PREFIX + DROPPED_RECORDS_DESCRIPTION + RATE_DESCRIPTION_SUFFIX;
 
+    private static final String DLQ_RECORDS_SENT = "dlq-records-sent";
+    private static final String DLQ_RECORDS_SENT_DESCRIPTION = "records sent to the dead letter queue";
+    private static final String DLQ_RECORDS_SENT_TOTAL_DESCRIPTION = TOTAL_DESCRIPTION + DLQ_RECORDS_SENT_DESCRIPTION;
+    private static final String DLQ_RECORDS_SENT_RATE_DESCRIPTION =
+        RATE_DESCRIPTION_PREFIX + DLQ_RECORDS_SENT_DESCRIPTION + RATE_DESCRIPTION_SUFFIX;
+
     private static final String PROCESS = "process";
     private static final String PROCESS_LATENCY = PROCESS + LATENCY_SUFFIX;
     private static final String PROCESS_DESCRIPTION = "calls to process";
@@ -256,6 +262,41 @@ public class TaskMetrics {
             DROPPED_RECORDS,
             DROPPED_RECORDS_RATE_DESCRIPTION,
             DROPPED_RECORDS_TOTAL_DESCRIPTION,
+            RecordingLevel.INFO,
+            streamsMetrics
+        );
+    }
+
+    /**
+     * Task-scoped sensor for the opt-in, DSL-level Dead Letter Queue layer, exposing the {@code dlq-records-sent-rate}
+     * and {@code dlq-records-sent-total} metrics. The metric is registered in the task-level {@code stream-task-metrics}
+     * group and is tagged by {@code thread-id} and {@code task-id}; because a Kafka Streams {@code task-id} has the form
+     * {@code <subtopologyId>_<partition>}, the {@code task-id} tag inherently identifies the topology/subtopology the
+     * DLQ writes originated from (there is no separate non-standard "topology" tag). The sensor is created lazily and
+     * idempotently — repeated calls for the same {@code threadId}/{@code taskId} return the same underlying sensor —
+     * and its lifecycle (creation/removal) follows the standard task-metrics machinery, so it is cleaned up with the
+     * task like every other task sensor.
+     *
+     * <p>It is incremented exactly once per DLQ <em>record</em> whose production the broker has acknowledged (via
+     * {@code DeadLetterQueueObserver.recordSent}, called from the record collector's producer send callback), for
+     * every eligible opt-in path — deserialization, processing, serialization and production. Counting on
+     * acknowledgement rather than at the send attempt means the total reflects DLQ records that were confirmed
+     * persisted, not attempts or failure events: a DLQ send that fails is escalated once and is not counted (P5-05).
+     *
+     * @param threadId       the stream thread id (thread-id tag)
+     * @param taskId         the task id (task-id tag; encodes the subtopology)
+     * @param streamsMetrics the streams metrics registry
+     * @return the {@code dlq-records-sent} sensor
+     */
+    public static Sensor dlqRecordsSentSensor(final String threadId,
+                                              final String taskId,
+                                              final StreamsMetricsImpl streamsMetrics) {
+        return invocationRateAndTotalSensor(
+            threadId,
+            taskId,
+            DLQ_RECORDS_SENT,
+            DLQ_RECORDS_SENT_RATE_DESCRIPTION,
+            DLQ_RECORDS_SENT_TOTAL_DESCRIPTION,
             RecordingLevel.INFO,
             streamsMetrics
         );

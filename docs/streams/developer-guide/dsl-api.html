@@ -72,6 +72,7 @@
                 <li><a class="reference internal" href="#controlling-emit-rate" id="id32">Controlling KTable update rate</a></li>
                 <li><a class="reference internal" href="#versioned-state-stores" id="id36">Using timestamp-based semantics for table processors</a></li>
                 <li><a class="reference internal" href="#writing-streams-back-to-kafka" id="id25">Writing streams back to Kafka</a></li>
+                <li><a class="reference internal" href="#dead-letter-queue" id="id38">Routing failed records to a Dead Letter Queue</a></li>
                 <li><a class="reference internal" href="#testing-a-streams-app" id="id26">Testing a Streams application</a></li>
                 <li><a class="reference internal" href="#scala-dsl" id="id27">Kafka Streams DSL for Scala</a></li>
                 <ul>
@@ -4169,6 +4170,56 @@ stream.to(&quot;my-stream-output-topic&quot;, Produced.with(Serdes.String(), Ser
                     it is now your responsibility to guarantee message delivery semantics when talking to such external systems (e.g., to
                     retry on delivery failure or to prevent message duplication).</p>
             </div>
+        </div>
+        <div class="section" id="dead-letter-queue">
+            <span id="streams-developer-guide-dsl-dlq"></span><h2><a class="toc-backref" href="#id38">Routing failed records to a Dead Letter Queue</a><a class="headerlink" href="#dead-letter-queue" title="Permalink to this headline"></a></h2>
+            <p>Kafka Streams supports an <b>opt-in</b>, per-<code>KStream</code> Dead Letter Queue (DLQ). By calling
+               <code>withDeadLetterQueue(String dlqTopic, DeadLetterQueueOptions options)</code> on a stream, records that fail
+               at that stream's originating source topic(s) are routed to the configured DLQ topic instead of stopping the
+               application or being silently skipped. Both records that fail <b>deserialization</b> at the source and records
+               originating from the source that later fail <b>processing</b> (an eligible user-code <code>RuntimeException</code>)
+               or <b>serialization/production</b> when writing downstream are captured. Retriable broker/producer failures (for
+               example, produce timeouts) are <b>not</b> dead-lettered and continue to use the producer's existing retry
+               configuration. The call returns the same-typed <code>KStream&lt;K, V&gt;</code>, so it can be chained fluently.</p>
+            <p>Each DLQ record preserves the <b>original key and value bytes</b> of the failed record. When header inclusion is
+               enabled (the default), it attaches six diagnostic headers: <code>dlq.exception.class</code>,
+               <code>dlq.exception.message</code>, <code>dlq.source.topic</code>, <code>dlq.source.partition</code>,
+               <code>dlq.source.offset</code>, and <code>dlq.failure.timestamp</code>; if the header-inclusion toggle is
+               disabled, no headers are attached. In addition, when a value is truncated to satisfy a configured maximum record
+               size, two annotation headers &mdash; <code>dlq.value.truncated</code> and <code>dlq.value.original.size</code>
+               &mdash; are attached so that the truncation is never silent.</p>
+            <p><code>DeadLetterQueueOptions</code> configures (1) the DLQ topic name, (2) an optional maximum record size, and
+               (3) whether the diagnostic headers are included (a header-inclusion toggle that defaults to <code>true</code>).
+               The maximum record size bounds the <b>combined</b> key and value length: when a failed record would exceed it, the
+               value bytes are <b>truncated</b> (the key is preserved verbatim) so the record still fits, and the truncation is
+               <b>annotated</b> with the <code>dlq.value.truncated</code> / <code>dlq.value.original.size</code> headers &mdash;
+               the record is never dropped on account of its size. By default no maximum is applied and the original key and value
+               bytes are preserved verbatim.</p>
+            <p>DLQ records are produced through the <b>same Streams producer</b> used for normal output, and therefore reuse the
+               application's existing security and authentication configuration &mdash; no new credential surface is introduced.
+               Under exactly-once processing, a DLQ record is produced <b>within</b> the task's transaction and is committed or
+               aborted atomically with it. DLQ delivery is <em>best-effort</em> in the following precise sense: if the DLQ write
+               itself fails to be produced, the failure is escalated once (surfacing through the uncaught-exception handler)
+               rather than being retried indefinitely or re-routed. A single WARN log is emitted when a record is
+               <em>routed</em> to the DLQ (the routing attempt), while the <code>dlq-records-sent-total</code> metric is
+               incremented only once the broker <b>acknowledges</b> the DLQ record &mdash; so the metric counts records confirmed
+               persisted, and a DLQ write that fails is never counted as sent.</p>
+            <p>The DLQ topic is assumed to <b>already exist</b>; Kafka Streams does not create it automatically. A
+               <code>withDeadLetterQueue(...)</code> call takes precedence over the global
+               <code>default.deadletterqueue.topic</code> / <code>default.deadletterqueue.enabled</code> configuration defaults,
+               and topologies that never opt in retain byte-for-byte identical error-handling behavior.</p>
+            <p>The opt-in is validated when the topology is built, so a mistake fails fast rather than at first produce:
+               the topic name must be non-blank and valid, the <code>dlqTopic</code> argument must be <b>identical</b> to the
+               topic carried by the supplied <code>DeadLetterQueueOptions</code> (so there is a single unambiguous effective
+               topic), the stream must originate from a source topic, and the DLQ topic must <b>not</b> itself be a source
+               topic of the same stream &mdash; routing failed records back into a source would re-consume, re-fail and
+               re-dead-letter the same record, amplifying one bad record into many. Use a dedicated DLQ topic that the
+               topology does not consume. Calling <code>withDeadLetterQueue(...)</code> on a custom <code>KStream</code>
+               implementation (rather than the built-in one returned by <code>StreamsBuilder</code>) throws
+               <code>UnsupportedOperationException</code>, so an opt-in that cannot be honored fails loudly instead of
+               silently installing nothing.</p>
+            <pre class="line-numbers"><code class="language-java">KStream&lt;String, String&gt; stream = builder.stream("input-topic");
+stream.withDeadLetterQueue("my-dlq-topic", DeadLetterQueueOptions.with("my-dlq-topic"));</code></pre>
         </div>
         <div class="section" id="testing-a-streams-app">
             <h2><a class="headerlink" href="#testing-a-streams-app" title="Permalink to this headline">Testing a Streams application</a></h2>
